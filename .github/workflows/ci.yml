@@ -8,18 +8,20 @@ on:
 jobs:
   checks:
     runs-on: macos-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
+          # Node 22 is the floor the Cursor SDK needs later.
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Typecheck (strict)
+      - name: Typecheck (strict, every workspace package)
         run: npm run typecheck
       - name: Lint
         run: npm run lint
       - name: Container runner syntax
-        run: node --check src/main/runner/runner.js
-      - name: Unit tests
+        run: node --check packages/desktop/src/main/runner/runner.js
+      - name: Unit tests (every workspace package)
         run: npm test

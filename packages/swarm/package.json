@@ -1,5 +1,5 @@
 {
-  "name": "gimbal",
+  "name": "@puck/swarm",
   "version": "1.0.0",
   "description": "Multi-agent proxy for peer-to-peer Claude communication",
   "main": "dist/index.js",
@@ -10,7 +10,8 @@
     "build": "tsc",
     "start": "tsx src/index.ts",
     "dev": "tsx src/index.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "claude",
