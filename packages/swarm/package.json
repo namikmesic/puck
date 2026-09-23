@@ -1,0 +1,40 @@
+{
+  "name": "gimbal",
+  "version": "1.0.0",
+  "description": "Multi-agent proxy for peer-to-peer Claude communication",
+  "main": "dist/index.js",
+  "bin": {
+    "gimbal": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "claude",
+    "agent",
+    "proxy",
+    "mcp"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.29",
+    "@elevenlabs/elevenlabs-js": "^2.34.0",
+    "@types/node": "^25.2.0",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/marked": "^5.0.2",
+    "@types/marked-terminal": "^6.1.1",
+    "tsx": "^4.21.0",
+    "vitest": "^1.2.0"
+  }
+}
