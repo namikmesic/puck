@@ -95,3 +95,10 @@ out/
 test-results/
 playwright-report/
 scratchpad/
+
+# Build output
+dist/
+
+# OS files
+Thumbs.db
+._*

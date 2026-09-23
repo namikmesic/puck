@@ -4,6 +4,25 @@ A macOS desktop client for coding agents. Puck gives Claude Code and Codex
 Slack-style, long-lived conversations — each agent is a contact in the
 sidebar — while every turn executes inside a Docker container you configure.
 
+Puck is becoming one TypeScript workspace that merges this desktop client with the
+multi-agent swarm approach from gimbal, without external harnesses.
+The repository holds two npm workspace packages: [`packages/desktop`](packages/desktop)
+is the Electron app described below, and [`packages/swarm`](packages/swarm) is
+gimbal, imported unchanged (see [NOTICE.md](NOTICE.md)).
+The design specification (`data/puck-spec` in the Firstmate home) decides the
+architecture that joins them; nothing in this repository wires the two together yet.
+
+## Repository layout
+
+- `package.json` - workspace root. `npm run check` runs typecheck, lint and tests
+  for every package; `npm start` and `npm run test:e2e` forward to the desktop app.
+- `packages/desktop` - the Electron app (forge + webpack). Its own
+  `AGENTS.md` and `DESIGN.md` live next to it.
+- `packages/swarm` - gimbal: channels, message router and store, coordinator,
+  roles, human director, transcripts, knowledge protocol, vitest smoke test.
+- `.github/workflows/ci.yml` - install, typecheck, lint, runner syntax, tests
+  on Node 22.
+
 ## How it works
 
 - **Agents** are named provider configurations: provider, model, system
@@ -52,13 +71,17 @@ Then, in the app:
 ## Develop
 
 ```bash
-npm run typecheck   # strict tsc
+npm run typecheck   # strict tsc, every package
 npm run lint
-npm test            # vitest unit suites
+npm test            # vitest suites, every package
+npm run check       # all three, what CI runs
 npm run test:e2e    # boots the real app and smoke-checks the UI
 ```
 
-The container runner lives in `src/main/runner/runner.js` (plain CommonJS,
+To work on one package, run its scripts from its directory or with
+`npm run <script> --workspace packages/desktop` (or `packages/swarm`).
+
+The container runner lives in `packages/desktop/src/main/runner/runner.js` (plain CommonJS,
 bundled as a raw string and docker-cp'd into environments on start). Runner
 changes take effect on the next environment restart.
 
