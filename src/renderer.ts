@@ -19,6 +19,7 @@ import { createSessionStore, type Session } from './renderer/session-store';
 import { applyEvent, initChatView } from './renderer/chat-view';
 import { initAgentEditor } from './renderer/settings/agent-editor';
 import { initEnvEditor } from './renderer/settings/env-editor';
+import { initSupportView } from './renderer/settings/support';
 import { initPalette } from './renderer/palette';
 import { initRoster } from './renderer/roster';
 import {
@@ -113,9 +114,11 @@ const detailTitle = byId('detail-title');
 const secAgents = byId('sec-agents');
 const secProviders = byId('sec-providers');
 const secEnvs = byId('sec-envs');
+const secSupport = byId('sec-support');
 const secAgentsTitle = byId('sec-agents-title');
 const secProvidersTitle = byId('sec-providers-title');
 const secEnvsTitle = byId('sec-envs-title');
+const secSupportTitle = byId('sec-support-title');
 
 // Sticky scrolling: follow the stream only while the user is at the bottom.
 let stickToBottom = true;
@@ -262,6 +265,7 @@ function showSettingsSection(section: SettingsSection): void {
   secAgents.classList.toggle('hidden', section !== 'agents');
   secProviders.classList.toggle('hidden', section !== 'providers');
   secEnvs.classList.toggle('hidden', section !== 'envs');
+  secSupport.classList.toggle('hidden', section !== 'support');
   syncSettingsNavActive();
   if (section === 'agents') {
     void renderAgents();
@@ -269,6 +273,9 @@ function showSettingsSection(section: SettingsSection): void {
   } else if (section === 'providers') {
     void renderProviders();
     secProvidersTitle.focus();
+  } else if (section === 'support') {
+    void supportView.render();
+    secSupportTitle.focus();
   } else {
     void renderEnvs();
     secEnvsTitle.focus();
@@ -575,6 +582,19 @@ const envEditor = initEnvEditor({
     secretVal: byId<HTMLInputElement>('d-secret-val'),
     secretAdd: byId<HTMLButtonElement>('d-secret-add'),
     save: byId<HTMLButtonElement>('d-save'),
+  },
+});
+
+/* ---------- Support section ---------- */
+
+const supportView = initSupportView({
+  bridge,
+  els: {
+    version: byId('support-version'),
+    dataDir: byId('support-datadir'),
+    logFile: byId('support-logfile'),
+    exportBtn: byId<HTMLButtonElement>('support-export'),
+    msg: byId('support-msg'),
   },
 });
 

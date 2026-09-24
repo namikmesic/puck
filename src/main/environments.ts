@@ -21,6 +21,7 @@ import type {
   EnvLifecycleEvent,
   EnvStage,
 } from '../harness/bridge';
+import { log } from './log';
 import { RUNNER_SOURCE } from './runner-source';
 import { detach as detachRunner, onRunnerExit, probe as probeRunner } from './runner';
 import {
@@ -305,6 +306,7 @@ export async function create(cfg: EnvironmentConfig): Promise<EnvironmentInfo[]>
   s.environments.push({ id, ...sanitize(cfg, id) });
   if (!s.activeEnvId) s.activeEnvId = id;
   save();
+  log.info('env.create', { envId: id });
   return list();
 }
 
@@ -314,6 +316,7 @@ export async function update(id: string, cfg: EnvironmentConfig): Promise<Enviro
   if (idx === -1) throw new Error('Unknown environment');
   s.environments[idx] = { id, ...sanitize(cfg, id) };
   save();
+  log.info('env.update', { envId: id });
   return list();
 }
 
@@ -356,8 +359,13 @@ function withEnvOp<T>(id: string, kind: OpKind, fn: (signal: AbortSignal) => Pro
     .then(async () => {
       runningOps.set(id, { kind, controller });
       detachRunner(id);
+      log.info(`env.${kind}`, { envId: id });
       try {
         return await fn(controller.signal);
+      } catch (err) {
+        // Every op failure lands in the diagnostic log by name; the caller still sees it.
+        log.error(`env.${kind} failed`, err, { envId: id });
+        throw err;
       } finally {
         // Bookkeeping settles BEFORE the caller's await resumes, so a runner
         // exit or a status read right after an op sees "idle", not a stale op.

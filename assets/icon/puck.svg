@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Puck application icon, 1024 px source.
+  A flat puck: a disc seen from slightly above, in the emerald tones from
+  DESIGN.md. No text, no gradients, transparent background.
+  scripts/make-icon.sh renders this file into puck.iconset and puck.icns.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- side of the puck -->
+  <path fill="#1E3E34" d="M132 440 V 600 A 380 190 0 0 0 892 600 V 440 A 380 190 0 0 1 132 440 Z" />
+  <!-- top face -->
+  <ellipse cx="512" cy="440" rx="380" ry="190" fill="#2E5E4E" />
+  <!-- recessed inner face -->
+  <ellipse cx="512" cy="440" rx="286" ry="143" fill="#3A7A66" />
+</svg>

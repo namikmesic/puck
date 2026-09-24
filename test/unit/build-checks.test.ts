@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findAppArtifacts, findMakeArtifacts, nodeMajorMismatch } from '../../scripts/build-checks.mjs';
+import { MIN_MACOS, RELEASE_TARGET } from '../../scripts/release.mjs';
 
 const root = join(__dirname, '..', '..');
 const read = (rel: string) => readFileSync(join(root, rel), 'utf8');
@@ -111,5 +112,39 @@ describe('toolchain pin', () => {
   it('routes package and make through the artifact-checking wrapper', () => {
     expect(pkg.scripts.package).toBe('node scripts/forge.mjs package');
     expect(pkg.scripts.make).toBe('node scripts/forge.mjs make');
+  });
+});
+
+describe('release metadata', () => {
+  const pkg = JSON.parse(read('package.json')) as { version: string };
+  const changelog = read('CHANGELOG.md');
+  const readme = read('README.md');
+  const release = read('RELEASE.md');
+  const macosMajor = MIN_MACOS.split('.')[0];
+
+  it('names the package version at the top of the changelog', () => {
+    const top = /^## (\d+\.\d+\.\d+)/m.exec(changelog)?.[1];
+    expect(top).toBe(pkg.version);
+  });
+
+  it('documents the minimum macOS and the target that the build enforces', () => {
+    expect(readme).toContain(`macOS ${macosMajor} (`);
+    expect(changelog).toContain(`macOS ${macosMajor} or later`);
+    expect(release).toContain(`Minimum macOS ${MIN_MACOS}`);
+    expect(RELEASE_TARGET).toEqual({ platform: 'darwin', arch: 'arm64' });
+    expect(readme).toContain(`Puck-${RELEASE_TARGET.platform}-${RELEASE_TARGET.arch}-${pkg.version}.zip`);
+  });
+
+  it('ships the release icon that forge.config.ts points at', () => {
+    expect(read('forge.config.ts')).toMatch(/icon: path\.resolve\(__dirname, 'assets', 'icon', 'puck'\)/);
+    expect(statSync(join(root, 'assets', 'icon', 'puck.icns')).size).toBeGreaterThan(0);
+    expect(read('assets/icon/puck.svg')).toContain('<svg');
+  });
+
+  it('keeps signing out of the repository: no identity or credential literal in the config', () => {
+    const config = read('forge.config.ts');
+    expect(config).toContain("import { signingPlan } from './scripts/release.mjs'");
+    expect(config).not.toMatch(/Developer ID Application:/);
+    expect(config).not.toMatch(/appleIdPassword|appleApiKey/);
   });
 });

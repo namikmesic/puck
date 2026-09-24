@@ -39,6 +39,9 @@ export const CHANNELS = {
   convoSave: 'convo:save',
   convoLoad: 'convo:load',
 
+  supportInfo: 'support:info',
+  supportExport: 'support:export',
+
   startTurn: 'harness:start-turn',
   interrupt: 'harness:interrupt',
   answerAsk: 'harness:answer-ask',

@@ -33,6 +33,9 @@ const bridge: PuckBridge = {
   convoSave: (agentId, data) => ipcRenderer.invoke(CHANNELS.convoSave, { agentId, data }),
   convoLoad: () => ipcRenderer.invoke(CHANNELS.convoLoad),
 
+  supportInfo: () => ipcRenderer.invoke(CHANNELS.supportInfo),
+  supportExport: () => ipcRenderer.invoke(CHANNELS.supportExport),
+
   startTurn: (turnId, agentId, prompt) =>
     ipcRenderer.invoke(CHANNELS.startTurn, { turnId, agentId, prompt }),
   interrupt: (turnId) => ipcRenderer.invoke(CHANNELS.interrupt, turnId),

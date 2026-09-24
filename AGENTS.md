@@ -51,6 +51,15 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   Bump a pin deliberately, together with any runner.js adaptation.
   colima does not share host temp dirs either, so scripts reach containers as `sh -lc` arguments.
 - **Provider ids** (`claude-code`, `codex`) are persisted in user stores - never rename them.
+- **Release mechanics** live in `scripts/forge.mjs` (the wrapper) and `scripts/release.mjs` (pure helpers, tested).
+  Signing and notarization switch on only through the `PUCK_SIGN_*` and `PUCK_NOTARIZE_*` variables listed in `RELEASE.md`, never through a committed file.
+  The wrapper prints the signing state, forces darwin/arm64, checks signature, minimum macOS, and icon bytes, and writes a `.sha256` beside the ZIP.
+  `MIN_MACOS` in `scripts/release.mjs` must match the Electron `Info.plist`, and the changelog's top version must match `package.json` (`build-checks.test.ts`).
+  The icon source is `assets/icon/puck.svg`, and `scripts/make-icon.sh` regenerates the iconset and `.icns`.
+- **Diagnostic log** (`src/main/log.ts`): `log.info/warn/error` append to `userData/logs/puck.log`, rotated at 1 MiB, three files.
+  Log ids, names, states, and timings.
+  Never log prompts, transcripts, tokens, or secret values, even though every line is redacted.
+  The support bundle (`src/main/support.ts`) ships those files plus a summary of key NAMES only, through `support:export`.
 - **Quit is a drain** (`src/main/shutdown.ts`).
   The first `before-quit` is held while the renderer flushes and every queued store write settles.
   The renderer flush runs over `FLUSH_CHANNEL` into `session-store.flushPending`, which saves debounced conversations and the composer draft.
@@ -132,6 +141,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
 - `src/renderer.ts` - the wiring layer: DOM lookups, nav applier and settings modal, composer/turn loop, settings card grids, shortcuts, boot.
   `nav()` is the single entry point for navigation.
   Element ids follow prefixes: `a-*` agent editor, `d-*` environment editor, `sec-*` settings sections, `aed-*` agent-editor cards, `sm-*` settings modal.
+  Settings sections are `agents`, `providers`, `envs`, and `support` (`SettingsSection` in `nav.ts`).
 - `src/styles/` - one stylesheet per surface (`shell`, `settings`, `editors`, `chat`, `overlays`).
   The import order in `renderer.ts` preserves the cascade.
 - `src/renderer/` - extracted, unit-tested modules.
@@ -146,6 +156,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   - `settings/cards.ts` and `settings/env-rail.ts` - card-grid kit and the ONE environment op ladder (list cards and detail header share it).
   - `env-progress.ts` - lifecycle presentation: status chip, "stage · elapsed" line, and composer gate text.
     Its tracker merges pushed lifecycle events and runs the elapsed-time ticker.
+  - `settings/support.ts` - the Support section: version, data paths, and the support-bundle export button.
   - `nav.ts` - pure nav state machine (`navTransition`, `escapeTarget`).
   - `options.ts`, `util.ts`, `dom.ts`, `format.ts`, `markdown.ts`.
 

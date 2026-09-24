@@ -10,6 +10,8 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-test-'));
 
 export const app = {
   getPath: (): string => userData,
+  getVersion: (): string => '0.0.0-test',
+  getName: (): string => 'Puck',
   quit: (): void => undefined,
   on: (): void => undefined,
   isPackaged: false,
@@ -40,6 +42,9 @@ export class BrowserWindow {
     setWindowOpenHandler: (): void => undefined,
     send: (): void => undefined,
   };
+  static fromWebContents(): BrowserWindow | null {
+    return null;
+  }
   isDestroyed(): boolean {
     return false;
   }
@@ -52,6 +57,13 @@ export class BrowserWindow {
 }
 
 export const shell = { openExternal: async (): Promise<void> => undefined };
+
+/** Save dialog with a scripted answer: tests set `nextSave` before the call. */
+export const dialog = {
+  nextSave: { canceled: true } as { canceled: boolean; filePath?: string },
+  showSaveDialog: async (): Promise<{ canceled: boolean; filePath?: string }> => dialog.nextSave,
+  showErrorBox: (): void => undefined,
+};
 
 /** Records registrations so tests can assert channel-table totality. */
 export const ipcMain = {

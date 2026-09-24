@@ -10,6 +10,7 @@ import type { HarnessEvent } from '../harness/types';
 import type { HarnessStatus } from '../harness/bridge';
 import * as agents from './agents';
 import * as envs from './environments';
+import { log } from './log';
 import * as runner from './runner';
 import * as sessions from './session-registry';
 import { requireProvider } from './providers';
@@ -41,10 +42,13 @@ export async function* runTurn(
 ): AsyncGenerator<HarnessEvent, void, undefined> {
   const agent = agents.byId(agentId);
   const env = envs.activeEnv();
-  const fail = (message: string): HarnessEvent[] => [
-    { kind: 'error', message },
-    { kind: 'turn-end', stats: { inputTokens: 0, outputTokens: 0, durationMs: 0 } },
-  ];
+  const fail = (message: string): HarnessEvent[] => {
+    log.warn('turn.refused', { turnId, agentId, reason: message });
+    return [
+      { kind: 'error', message },
+      { kind: 'turn-end', stats: { inputTokens: 0, outputTokens: 0, durationMs: 0 } },
+    ];
+  };
 
   if (!agent) {
     yield* fail('This agent no longer exists. Open Settings and create one.');
@@ -72,6 +76,16 @@ export async function* runTurn(
   // the agent. Sparse: untouched agents compile to '{}'. The agent store
   // only persists registry provider ids, so an unknown one is a real fault.
   const settings = JSON.stringify(requireProvider(agent.provider).compileSettings(agent.options));
+  const startedAt = Date.now();
+  // Ids, names, and timings only: the prompt and the transcript never reach the log.
+  log.info('turn.start', {
+    turnId,
+    agentId: agent.id,
+    provider: agent.provider,
+    model: agent.model,
+    envId: env.id,
+    resume: resume !== null,
+  });
 
   try {
     // Attempt 0 resumes; if the provider reports the id no longer resolves
@@ -115,7 +129,12 @@ export async function* runTurn(
         ) {
           stale = true;
           sessions.forget(agent.id, env.id);
+          log.info('turn.resume-stale', { turnId, envId: env.id });
           break; // abandon this attempt silently; retry fresh
+        }
+        if (event.kind === 'error') log.warn('turn.error', { turnId, message: event.message });
+        if (event.kind === 'turn-end') {
+          log.info('turn.end', { turnId, hostMs: Date.now() - startedAt, ...event.stats });
         }
         yield event;
       }

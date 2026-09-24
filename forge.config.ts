@@ -1,4 +1,5 @@
-import type { ForgeConfig } from '@electron-forge/shared-types';
+import * as path from 'node:path';
+import type { ForgeConfig, ForgePackagerOptions } from '@electron-forge/shared-types';
 import { MakerZIP } from '@electron-forge/maker-zip';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { WebpackPlugin } from '@electron-forge/plugin-webpack';
@@ -7,6 +8,17 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 import { mainConfig } from './webpack.main.config';
 import { rendererConfig } from './webpack.renderer.config';
+import { signingPlan } from './scripts/release.mjs';
+
+// Developer ID signing and notarization switch on through the environment
+// variables documented in RELEASE.md (never through a file in the repo).
+// With none of them set the build is ad hoc signed and not notarized, and
+// scripts/forge.mjs says so on the console. A misconfigured set is reported
+// there too, before Forge starts; the config itself just falls back.
+const signing = signingPlan(process.env);
+const signingOptions: Pick<ForgePackagerOptions, 'osxSign' | 'osxNotarize'> = signing.ok
+  ? (signing.packager as Pick<ForgePackagerOptions, 'osxSign' | 'osxNotarize'>)
+  : {};
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -14,6 +26,11 @@ const config: ForgeConfig = {
     name: 'Puck',
     appBundleId: 'com.namikmesic.puck',
     appCategoryType: 'public.app-category.developer-tools',
+    // Packager appends the platform extension (.icns on macOS). The source
+    // and the render script live next to it: assets/icon/puck.svg,
+    // scripts/make-icon.sh.
+    icon: path.resolve(__dirname, 'assets', 'icon', 'puck'),
+    ...signingOptions,
   },
   rebuildConfig: {},
   // macOS-first: ship only what we actually build.

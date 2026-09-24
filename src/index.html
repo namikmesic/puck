@@ -95,6 +95,7 @@
           <button class="nav-item" data-section="agents" type="button">Agents</button>
           <button class="nav-item" data-section="providers" type="button">Providers</button>
           <button class="nav-item" data-section="envs" type="button">Environments</button>
+          <button class="nav-item" data-section="support" type="button">Support</button>
         </nav>
         <div class="sm-body">
           <button class="icon-btn sm-close" id="settings-close" type="button" aria-label="Close settings">
@@ -132,6 +133,33 @@
                 </p>
                 <div class="form-msg" id="env-msg"></div>
                 <div class="cards" id="env-cards"></div>
+              </div>
+
+              <div class="settings-section hidden" id="sec-support">
+                <h2 class="page-title" id="sec-support-title" tabindex="-1">Support</h2>
+                <p class="page-sub">
+                  Puck keeps a diagnostic log on this Mac and sends nothing anywhere.
+                  When you report a problem, export the bundle below and attach it to the report.
+                </p>
+                <div class="form-msg" id="support-msg"></div>
+                <div class="card support-card">
+                  <dl class="facts">
+                    <dt>Version</dt>
+                    <dd id="support-version">…</dd>
+                    <dt>Data folder</dt>
+                    <dd id="support-datadir">…</dd>
+                    <dt>Log file</dt>
+                    <dd id="support-logfile">…</dd>
+                  </dl>
+                  <p class="support-note">
+                    The bundle holds the log files and a summary of your agents, environments, and
+                    providers: ids, names, versions, states, and key names. It never holds tokens,
+                    secret values, environment-variable values, prompts, or transcripts.
+                  </p>
+                  <div class="card-foot">
+                    <button class="btn-primary" id="support-export" type="button">Export support bundle…</button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

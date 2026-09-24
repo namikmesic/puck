@@ -11,6 +11,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import { log } from '../log';
 import { deleteSecret, loadSecret, saveSecret } from '../secrets';
 import type { ProviderAuth, ProviderCredential } from './types';
 
@@ -144,6 +145,7 @@ export function createOAuthAccount<T>(cfg: OAuthAccountConfig<T>): OAuthAccount<
       onLoginCb = cb;
     },
     notifyLogin() {
+      log.info('auth.login', { store: cfg.storeName });
       onLoginCb?.();
     },
     setOnLogout(cb) {
@@ -156,6 +158,7 @@ export function createOAuthAccount<T>(cfg: OAuthAccountConfig<T>): OAuthAccount<
       epoch += 1;
       lastError = null;
       store.clear();
+      log.info('auth.logout', { store: cfg.storeName });
       await onLogoutCb?.();
     },
     async getFreshTokens(): Promise<T | null> {
@@ -189,7 +192,7 @@ export function createOAuthAccount<T>(cfg: OAuthAccountConfig<T>): OAuthAccount<
     lastError: () => lastError,
     recordError(err: unknown): void {
       lastError = err instanceof Error ? err.message : String(err);
-      console.error(`${cfg.storeName} auth error:`, err);
+      log.error(`${cfg.storeName} auth error`, err);
     },
   };
   return account;

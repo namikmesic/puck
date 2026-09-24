@@ -5,16 +5,18 @@
  * Domain logic lives in src/main/*; this file only assembles it.
  */
 
-import { app, BrowserWindow, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import * as agents from './main/agents';
 import * as backend from './main/backend';
 import * as conversations from './main/conversations';
 import * as providerRegistry from './main/providers';
 import * as environments from './main/environments';
+import { log } from './main/log';
 import * as runner from './main/runner';
 import * as sessionRegistry from './main/session-registry';
 import { flushWrites } from './main/jsonstore';
 import { flushRenderers, installQuitDrain } from './main/shutdown';
+import * as support from './main/support';
 import {
   agentConfigFrom,
   askAnswersFrom,
@@ -28,8 +30,18 @@ import { CHANNELS, ENV_EVENT_CHANNEL, EVENT_CHANNEL } from './harness/channels';
 import { dockerLocation } from './main/docker-client';
 
 // A rejected fire-and-forget promise must never take the process down.
+// Both faults land in the diagnostic log (userData/logs, see main/log.ts).
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection in main process:', reason);
+  log.error('Unhandled rejection in main process', reason);
+});
+// Electron shows its error dialog only while it is the sole listener, so
+// this listener logs the fault and then shows the same dialog itself.
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught exception in main process', err);
+  dialog.showErrorBox(
+    'A JavaScript error occurred in the main process',
+    err instanceof Error ? err.stack ?? err.message : String(err),
+  );
 });
 
 // Composition: the runner bridge speaks NDJSON over whatever exec transport
@@ -49,7 +61,7 @@ environments.onLifecycle((payload) => {
 });
 providerRegistry.setOnLogin(() =>
   environments.injectCredentialsIntoRunning().catch((err) => {
-    console.error('Credential push into running environments failed:', err);
+    log.error('Credential push into running environments failed', err);
   }),
 );
 providerRegistry.setOnLogout((provider) => environments.purgeCredentials(provider));
@@ -91,6 +103,7 @@ const createWindow = (): void => {
   });
 
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
+  log.info('window.created');
 };
 
 /* ---------- IPC surface ---------- */
@@ -160,6 +173,10 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   },
 
   [CHANNELS.convoLoad]: () => conversations.loadAll(),
+
+  [CHANNELS.supportInfo]: () => support.supportInfo(),
+  [CHANNELS.supportExport]: (event) =>
+    support.exportSupportBundle(BrowserWindow.fromWebContents(event.sender)),
   [CHANNELS.convoSave]: (_event, args) => {
     const a = objArgs(args);
     return conversations.save(requireId(a.agentId, 'agent'), conversations.fromIpc(a.data));
@@ -187,12 +204,27 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
 };
 
 for (const [channel, handler] of Object.entries(ipcHandlers)) {
-  ipcMain.handle(channel, handler);
+  // Every failed request lands in the diagnostic log under its channel
+  // name; the renderer still receives the rejection unchanged.
+  ipcMain.handle(channel, async (event, args) => {
+    try {
+      return await handler(event, args);
+    } catch (err) {
+      log.warn(`ipc.failed ${channel}`, { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }
+  });
 }
 
 /* ---------- App lifecycle ---------- */
 
 app.on('ready', () => {
+  log.info('app.ready', {
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    electron: process.versions.electron,
+    platform: `${process.platform}-${process.arch}`,
+  });
   // Packaged builds get a strict CSP; dev needs webpack's eval sourcemaps,
   // covered by the WebpackPlugin devContentSecurityPolicy instead.
   if (app.isPackaged) {
@@ -220,6 +252,8 @@ installQuitDrain(app, { flushRenderers, drainStores: flushWrites, timeoutMs: 5_0
 
 // Kill runner docker-exec children on quit — no orphaned processes.
 app.on('before-quit', () => runner.detachAll());
+// will-quit fires once, after the drain has re-issued quit; before-quit fires twice.
+app.on('will-quit', () => log.info('app.quit'));
 
 // macOS convention: closing the window keeps the app (and menu bar) alive.
 app.on('window-all-closed', () => {

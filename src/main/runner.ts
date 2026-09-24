@@ -9,6 +9,7 @@
 
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { HarnessEvent } from '../harness/types';
+import { log } from './log';
 
 /**
  * Transport seam: how to open a stdio exec into an environment's runner.
@@ -131,6 +132,12 @@ function ensure(envId: string): RunnerProc {
     if (failed) return;
     failed = true;
     proc.exitCode = code;
+    log.warn('runner.exit', {
+      envId,
+      code,
+      turns: routes.size,
+      stderr: proc.stderrTail.trim().slice(-300),
+    });
     clearTimeout(readyTimer);
     readyReject(new Error(code === null ? 'runner process exited' : `runner process exited (code ${code})`));
     for (const route of routes.values()) route(null);

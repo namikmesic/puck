@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { log } from './log';
 
 const chains = new Map<string, Promise<void>>();
 
@@ -38,7 +39,7 @@ export function writeTextAtomic(file: string, text: string): Promise<void> {
   // write (disk full, permissions) becomes an unhandled rejection, which
   // kills the process by default. Awaiting callers still see the rejection.
   next.catch((err) => {
-    console.error(`jsonstore: write to ${file} failed:`, err);
+    log.error(`jsonstore: write to ${file} failed`, err);
   });
   // Forget a settled tail so flushWrites() only ever waits on real work.
   const settled = (): void => {

@@ -1,7 +1,7 @@
 {
   "name": "puck",
   "productName": "Puck",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "A macOS desktop client for coding agents — Claude Code and Codex conversations running in Docker sandboxes.",
   "main": ".webpack/main",
   "private": true,

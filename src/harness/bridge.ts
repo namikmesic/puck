@@ -180,6 +180,15 @@ export interface ConversationData {
   draft?: string;
 }
 
+/** Version and data paths shown on Settings → Support (and documented in the README). */
+export interface SupportInfo {
+  version: string;
+  /** Electron userData: the folder every Puck store and log lives under. */
+  dataDir: string;
+  /** The current diagnostic log file. */
+  logFile: string;
+}
+
 export interface BridgeEventPayload {
   turnId: string;
   event: HarnessEvent;
@@ -223,6 +232,13 @@ export interface PuckBridge {
   /** Persist / restore the per-agent conversation transcripts. */
   convoSave(agentId: string, data: ConversationData): Promise<void>;
   convoLoad(): Promise<Record<string, ConversationData>>;
+
+  supportInfo(): Promise<SupportInfo>;
+  /**
+   * Save a support bundle (diagnostic logs plus a sanitized configuration
+   * summary) where the user picks; `path` is null when the dialog is canceled.
+   */
+  supportExport(): Promise<{ path: string | null }>;
 
   /**
    * Resolves once the turn's event stream has been fully emitted.

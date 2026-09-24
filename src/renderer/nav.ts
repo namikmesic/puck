@@ -8,7 +8,7 @@
 import type { AgentInfo, EnvironmentInfo } from '../harness/bridge';
 
 export type View = 'chat' | 'settings' | 'env-detail' | 'agent-detail';
-export type SettingsSection = 'agents' | 'providers' | 'envs';
+export type SettingsSection = 'agents' | 'providers' | 'envs' | 'support';
 
 export interface NavState {
   view: View;
