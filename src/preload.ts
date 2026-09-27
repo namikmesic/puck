@@ -14,6 +14,13 @@ const bridge: PuckBridge = {
   providerAuthStart: (id) => ipcRenderer.invoke(CHANNELS.providerAuthStart, id),
   providerAuthCancel: (id) => ipcRenderer.invoke(CHANNELS.providerAuthCancel, id),
   providerAuthLogout: (id) => ipcRenderer.invoke(CHANNELS.providerAuthLogout, id),
+  sshHostAdd: (host) => ipcRenderer.invoke(CHANNELS.sshHostAdd, host),
+  sshHostRemove: (id) => ipcRenderer.invoke(CHANNELS.sshHostRemove, id),
+  targetHealth: (providerId, targetId) => ipcRenderer.invoke(CHANNELS.targetHealth, { providerId, targetId }),
+  githubInstallations: () => ipcRenderer.invoke(CHANNELS.githubInstallations),
+  githubRepos: () => ipcRenderer.invoke(CHANNELS.githubRepos),
+  githubSetConfigRepo: (fullName) => ipcRenderer.invoke(CHANNELS.githubSetConfigRepo, fullName),
+  githubSetPat: (token) => ipcRenderer.invoke(CHANNELS.githubSetPat, token),
 
   envList: () => ipcRenderer.invoke(CHANNELS.envList),
   envCreate: (cfg: EnvironmentConfig) => ipcRenderer.invoke(CHANNELS.envCreate, cfg),

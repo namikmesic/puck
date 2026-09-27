@@ -6,6 +6,10 @@
  *
  * The binary is located by `docker-discovery.ts` (never the inherited GUI
  * PATH alone); the resolved location is cached for the process lifetime.
+ *
+ * Every call can address a remote engine: `host` (an `ssh://` URL or an
+ * ssh-config alias) becomes a leading `-H ssh://…`, and the CLI reaches the
+ * engine through the system ssh (so ~/.ssh/config and the ssh agent apply).
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -29,6 +33,8 @@ export interface DockerOptions {
   signal?: AbortSignal;
   /** Receives every complete output line (stdout and stderr) as it arrives. */
   onOutput?: (line: string) => void;
+  /** Remote engine: `ssh://user@host[:port]` or an ssh-config alias. Unset = local. */
+  host?: string;
 }
 
 export type DockerRunner = (args: string[], opts?: DockerOptions) => Promise<DockerResult>;
@@ -72,10 +78,20 @@ function childEnv(binary: string): NodeJS.ProcessEnv {
   return { ...process.env, PATH: current ? `${dir}${path.delimiter}${current}` : dir };
 }
 
+/** The `-H` URL for a remote host: aliases become `ssh://alias`. */
+export function sshHostUrl(host: string): string {
+  return host.startsWith('ssh://') ? host : `ssh://${host}`;
+}
+
+/** Global CLI flags come before the subcommand: `docker -H ssh://… <args>`. */
+export function withHost(args: string[], host?: string): string[] {
+  return host ? ['-H', sshHostUrl(host), ...args] : args;
+}
+
 /** Spawn a docker process directly (stdio bridge use); the binary must have been resolved before. */
-export function dockerProcess(args: string[]): ChildProcessWithoutNullStreams {
+export function dockerProcess(args: string[], host?: string): ChildProcessWithoutNullStreams {
   const binary = dockerBinaryCached();
-  return spawn(binary, args, { env: childEnv(binary) });
+  return spawn(binary, withHost(args, host), { env: childEnv(binary) });
 }
 
 /* ---------- Running commands ---------- */
@@ -149,7 +165,8 @@ async function spawnDocker(args: string[], opts: DockerOptions = {}): Promise<Do
         settle({ code, stdout, stderr: 'cancelled', aborted: true });
       } else if (timedOut) {
         const seconds = Math.round(timeoutMs / 1000);
-        settle({ code, stdout, stderr: `docker ${args[0]} timed out after ${seconds}s`, timedOut: true });
+        const sub = args[0] === '-H' ? args[2] : args[0];
+        settle({ code, stdout, stderr: `docker ${sub} timed out after ${seconds}s`, timedOut: true });
       } else {
         settle({ code, stdout, stderr });
       }
@@ -165,7 +182,9 @@ export function useDockerRunner(fn: DockerRunner): void {
 }
 
 export function docker(args: string[], opts?: DockerOptions): Promise<DockerResult> {
-  return runner(args, opts);
+  if (!opts?.host) return runner(args, opts);
+  const { host, ...rest } = opts;
+  return runner(withHost(args, host), rest);
 }
 
 /**

@@ -13,7 +13,7 @@ import * as envs from './environments';
 import { log } from './log';
 import * as runner from './runner';
 import * as sessions from './session-registry';
-import { requireProvider } from './providers';
+import { requireHarness } from './providers';
 import { notReadyMessage } from '../harness/lifecycle';
 
 /** turnId → routing info. `reqId` differs from `turnId` on a stale-resume
@@ -75,7 +75,7 @@ export async function* runTurn(
   // Compiled at turn time so schema/compile changes apply without re-saving
   // the agent. Sparse: untouched agents compile to '{}'. The agent store
   // only persists registry provider ids, so an unknown one is a real fault.
-  const settings = JSON.stringify(requireProvider(agent.provider).compileSettings(agent.options));
+  const settings = JSON.stringify(requireHarness(agent.provider).compileSettings(agent.options));
   const startedAt = Date.now();
   // Ids, names, and timings only: the prompt and the transcript never reach the log.
   log.info('turn.start', {

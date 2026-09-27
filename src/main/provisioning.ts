@@ -9,7 +9,7 @@
  * image (a follow-up) would bake in.
  */
 
-import type { PinnedPackage, Provider } from './providers/types';
+import type { HarnessDescriptor, PinnedPackage } from '../harness/providers';
 
 /** Where the runner's SDKs live inside the container (`npm --prefix`). */
 export const SDK_PREFIX = '/opt/puck';
@@ -44,11 +44,11 @@ export interface BootstrapStep {
   install: string;
 }
 
-export function bootstrapPlan(list: readonly Provider[]): BootstrapStep[] {
+export function bootstrapPlan(list: readonly HarnessDescriptor[]): BootstrapStep[] {
   const steps: BootstrapStep[] = [];
   const clis = list
-    .filter((p) => p.container.cliBin && p.container.cliPackages.length > 0)
-    .flatMap((p) => p.container.cliPackages);
+    .filter((p) => p.packages.cliBin && p.packages.cli.length > 0)
+    .flatMap((p) => p.packages.cli);
   if (clis.length) {
     steps.push({
       kind: 'clis',
@@ -56,7 +56,7 @@ export function bootstrapPlan(list: readonly Provider[]): BootstrapStep[] {
       install: `npm install -g ${clis.map(pinnedSpec).join(' ')}`,
     });
   }
-  const sdks = list.flatMap((p) => p.container.sdkPackages);
+  const sdks = list.flatMap((p) => p.packages.sdk);
   if (sdks.length) {
     steps.push({
       kind: 'sdks',
@@ -74,10 +74,10 @@ export interface ExpectedPackage extends PinnedPackage {
 }
 
 /** Every pinned package the registry expects inside a container. */
-export function expectedPackages(list: readonly Provider[]): ExpectedPackage[] {
+export function expectedPackages(list: readonly HarnessDescriptor[]): ExpectedPackage[] {
   return list.flatMap((p) => [
-    ...(p.container.cliBin ? p.container.cliPackages : []).map((pkg) => ({ ...pkg, kind: 'cli' as const })),
-    ...p.container.sdkPackages.map((pkg) => ({ ...pkg, kind: 'sdk' as const })),
+    ...(p.packages.cliBin ? p.packages.cli : []).map((pkg) => ({ ...pkg, kind: 'cli' as const })),
+    ...p.packages.sdk.map((pkg) => ({ ...pkg, kind: 'sdk' as const })),
   ]);
 }
 

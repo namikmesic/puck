@@ -137,7 +137,12 @@ export interface ProviderCapabilities {
   reportsCost: boolean;
 }
 
-export interface ProviderInfo {
+/** The three kinds of provider Puck configures; ids are unique across kinds. */
+export type ProviderKind = 'harness' | 'environment' | 'integration';
+
+/** A harness provider (Claude Code, Codex): runs agents inside environments. */
+export interface HarnessProviderInfo {
+  kind: 'harness';
   id: string;
   label: string;
   /** Known model ids ("auto" first). */
@@ -150,6 +155,107 @@ export interface ProviderInfo {
   configOptions: ProviderOption[];
   capabilities: ProviderCapabilities;
   auth: ProviderAuthInfo;
+}
+
+/** One Docker engine an environment provider can run containers on. */
+export interface EnvTargetInfo {
+  id: string;
+  label: string;
+  /** `ssh://user@host[:port]` or an ssh-config alias; null for the local engine. */
+  host: string | null;
+}
+
+/** An environment provider (Local Docker, Docker over SSH): where containers run. */
+export interface EnvironmentProviderInfo {
+  kind: 'environment';
+  id: string;
+  label: string;
+  targets: EnvTargetInfo[];
+  /** One line about the provider itself, e.g. where the docker CLI was found. */
+  detail: string;
+}
+
+/** Why a target failed its health check (null class = healthy). */
+export type TargetProblem =
+  | 'docker-cli-missing'
+  | 'daemon-down'
+  | 'ssh-auth'
+  | 'host-key'
+  | 'ssh-unreachable'
+  | 'docker-missing-remote'
+  | 'socket-permission'
+  | 'timeout'
+  | 'unknown';
+
+export interface TargetHealth {
+  ok: boolean;
+  /** Server version when healthy. */
+  version: string | null;
+  problem: TargetProblem | null;
+  /** User-facing sentence: the version, or what is wrong and how to fix it. */
+  message: string;
+  checkedAt: number;
+}
+
+/** A device-flow sign-in in progress: the code the user enters on GitHub. */
+export interface DeviceCodePrompt {
+  userCode: string;
+  /** Always exactly https://github.com/login/device (checked in main). */
+  verificationUri: string;
+  /** Epoch ms after which the code is no longer accepted. */
+  expiresAt: number;
+}
+
+/** What `providerAuthStart` returns: a loopback OAuth URL, or a device code. */
+export type ProviderAuthStart = { url: string } | DeviceCodePrompt;
+
+export type GitHubMode = 'app' | 'pat';
+
+/** GitHub's integration state as Settings shows it. Never carries a token. */
+export interface GitHubStatus {
+  /** Signed-in login, null when signed out. */
+  login: string | null;
+  mode: GitHubMode;
+  /** `owner/name` of the config repo, or null until one is chosen. */
+  configRepo: string | null;
+  /** Where to install the GitHub App on an account. */
+  installUrl: string;
+  /** False while the build carries the placeholder client id and no override is set. */
+  appConfigured: boolean;
+  /** The device code of a sign-in in progress, if any. */
+  pendingCode: DeviceCodePrompt | null;
+  /** Pre-filled link for creating a fine-grained personal access token. */
+  patUrl: string;
+}
+
+/** An integration provider (GitHub): an external service Puck signs in to. */
+export interface IntegrationProviderInfo {
+  kind: 'integration';
+  id: string;
+  label: string;
+  auth: ProviderAuthInfo;
+  github: GitHubStatus;
+}
+
+export type ProviderInfo = HarnessProviderInfo | EnvironmentProviderInfo | IntegrationProviderInfo;
+
+/** One GitHub App installation the signed-in user can reach. */
+export interface GitHubInstallation {
+  id: number;
+  /** The account (user or organization) the app is installed on. */
+  account: string;
+  accountType: string;
+  /** github.com page where the installation is managed. */
+  manageUrl: string;
+  repositorySelection: string;
+}
+
+export interface GitHubRepo {
+  /** `owner/name`. */
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  htmlUrl: string;
 }
 
 /** One persisted item of a conversation: a user message or a full agent turn. */
@@ -196,16 +302,31 @@ export interface BridgeEventPayload {
 
 export interface PuckBridge {
   status(): Promise<HarnessStatus>;
+  /** Every provider of every kind; `ProviderInfo.kind` discriminates. */
   providers(): Promise<ProviderInfo[]>;
   /** Open an http(s) link in the system browser (chat links never navigate the app). */
   openExternal(url: string): Promise<void>;
-  /** Begins a provider login (authorize page opens in the system browser);
-   *  returns the authorize URL. The login lands asynchronously - poll
+  /** Begins a provider login. Harness providers open the authorize page in
+   *  the system browser and return its URL; GitHub returns the device code
+   *  the user enters on github.com. The login lands asynchronously - poll
    *  `providers()` for `auth.connected`. */
-  providerAuthStart(id: string): Promise<{ url: string }>;
+  providerAuthStart(id: string): Promise<ProviderAuthStart>;
   /** Aborts a pending login; no-op when none is pending. */
   providerAuthCancel(id: string): Promise<void>;
   providerAuthLogout(id: string): Promise<void>;
+  /** Adds a Docker-over-SSH host; returns the updated provider list. */
+  sshHostAdd(host: { label: string; host: string }): Promise<ProviderInfo[]>;
+  sshHostRemove(id: string): Promise<ProviderInfo[]>;
+  /** Health of one environment-provider target (runs `docker version` there). */
+  targetHealth(providerId: string, targetId: string): Promise<TargetHealth>;
+  /** GitHub App installations the signed-in user can reach (empty for a personal token). */
+  githubInstallations(): Promise<GitHubInstallation[]>;
+  /** Repositories the GitHub sign-in can reach, for the config-repo picker. */
+  githubRepos(): Promise<GitHubRepo[]>;
+  /** Choose the config repo (`owner/name`); returns the updated provider list. */
+  githubSetConfigRepo(fullName: string): Promise<ProviderInfo[]>;
+  /** Sign in with a fine-grained personal access token instead of the app. */
+  githubSetPat(token: string): Promise<ProviderInfo[]>;
 
   agentList(): Promise<AgentInfo[]>;
   agentCreate(cfg: Omit<AgentConfig, 'id'>): Promise<AgentInfo[]>;

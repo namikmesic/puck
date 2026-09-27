@@ -24,7 +24,7 @@ vi.mock('../../src/main/runner', () => ({
 }));
 
 import * as environments from '../../src/main/environments';
-import { providers } from '../../src/main/providers';
+import { byKind } from '../../src/main/providers';
 
 const ok = (stdout = ''): DockerResult => ({ code: 0, stdout, stderr: '' });
 const err = (stderr: string, code = 1): DockerResult => ({ code, stdout: '', stderr });
@@ -51,7 +51,7 @@ class FakeDocker {
 
   /** Every pin present at its expected version (an already-provisioned container). */
   provisioned(): void {
-    this.installed = new Map(expectedPackages(providers).map((p) => [p.name, p.version]));
+    this.installed = new Map(expectedPackages(byKind('harness')).map((p) => [p.name, p.version]));
   }
 
   argv(): string[][] {
@@ -106,7 +106,7 @@ class FakeDocker {
         if (args[2] === 'cat') return err('No such file');
         if (args[2] !== 'sh') return ok('');
         const script = args[4];
-        const pins = expectedPackages(providers);
+        const pins = expectedPackages(byKind('harness'));
         if (script.includes('echo "')) {
           // The verify script: one "<name> <version|missing>" line per pin.
           return ok(pins.map((p) => `${p.name} ${this.installed.get(p.name) ?? 'missing'}`).join('\n'));
@@ -166,8 +166,6 @@ async function createEnv(name: string, over: Partial<Parameters<typeof environme
 }
 
 beforeAll(() => {
-  // Forwarded host auth vars would add machine-dependent -e flags.
-  for (const key of providers.flatMap((p) => p.container.forwardedEnvKeys)) delete process.env[key];
   // A container left running by a previous app session, seeded BEFORE the
   // store is first read so boot reconciliation sees it.
   fs.writeFileSync(
@@ -372,7 +370,7 @@ describe('failures keep their stage and classify the cause', () => {
   it('a version mismatch after install fails at verifying-packages with names and versions', async () => {
     const id = await createEnv('drift');
     fake.images.add('node:22-bookworm');
-    const [firstCli] = expectedPackages(providers).filter((p) => p.kind === 'cli');
+    const [firstCli] = expectedPackages(byKind('harness')).filter((p) => p.kind === 'cli');
     fake.installed.set(firstCli.name, '0.0.1'); // drifted…
     fake.stubborn.add(firstCli.name); // …and the install does not correct it
     await expect(environments.start(id)).rejects.toThrow(
@@ -387,7 +385,7 @@ describe('failures keep their stage and classify the cause', () => {
   it('with auto-install off, a missing SDK fails setup but a missing CLI is only a note', async () => {
     const id = await createEnv('user-managed', { autoInstall: false });
     fake.images.add('node:22-bookworm');
-    const expected = expectedPackages(providers);
+    const expected = expectedPackages(byKind('harness'));
     fake.installed = new Map(expected.map((p) => [p.name, p.kind === 'cli' ? null : p.version]));
     await environments.start(id); // CLIs missing → notes only
     expect(fake.argv().some((a) => a[0] === 'exec' && a[4]?.includes('npm install'))).toBe(false);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isDefaultValue, validateSettings, type ProviderOption } from '../../src/harness/options';
-import { providers, requireProvider } from '../../src/main/providers';
+import { byKind, requireHarness as requireProvider } from '../../src/main/providers';
 
 /** A value guaranteed to differ from the option's default. */
 function nonDefault(opt: ProviderOption): unknown {
@@ -19,7 +19,7 @@ function nonDefault(opt: ProviderOption): unknown {
 }
 
 describe('provider option schemas', () => {
-  for (const provider of providers) {
+  for (const provider of byKind('harness')) {
     describe(provider.id, () => {
       const schema = provider.configOptions;
 

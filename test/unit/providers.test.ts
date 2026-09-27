@@ -1,27 +1,60 @@
 import { describe, expect, it } from 'vitest';
+import type { HarnessProviderInfo, ProviderInfo } from '../../src/harness/bridge';
+import { harnessDescriptors } from '../../src/harness/providers';
 import {
-  defaultProvider,
+  byKind,
+  defaultHarness,
+  harnessById,
   providerById,
   providerInfos,
   providers,
+  requireHarness,
   requireProvider,
   toInfo,
 } from '../../src/main/providers';
 
+const harnessInfos = async (): Promise<HarnessProviderInfo[]> =>
+  (await providerInfos()).filter((i): i is HarnessProviderInfo => i.kind === 'harness');
+
 describe('provider registry', () => {
-  it('registers claude-code first (registration order is the default)', () => {
-    expect(providers.map((p) => p.id)).toEqual(['claude-code', 'codex']);
-    expect(defaultProvider().id).toBe('claude-code');
+  it('registers every kind, with frozen ids, claude-code the default harness', () => {
+    expect(providers.map((p) => p.id)).toEqual(['claude-code', 'codex', 'docker-local', 'docker-ssh', 'github']);
+    expect(byKind('harness').map((p) => p.id)).toEqual(['claude-code', 'codex']);
+    expect(byKind('environment').map((p) => p.id)).toEqual(['docker-local', 'docker-ssh']);
+    expect(byKind('integration').map((p) => p.id)).toEqual(['github']);
+    expect(defaultHarness().id).toBe('claude-code');
+    expect(new Set(providers.map((p) => p.id)).size).toBe(providers.length);
   });
 
   it('looks up by id and throws on unknown ids', () => {
     expect(providerById('codex')?.label).toBe('Codex');
+    expect(providerById('docker-ssh')?.kind).toBe('environment');
     expect(providerById('nope')).toBeUndefined();
     expect(() => requireProvider('nope')).toThrow(/Unknown provider/);
+    // Agents and turns only ever resolve harnesses.
+    expect(harnessById('github')).toBeUndefined();
+    expect(() => requireHarness('docker-local')).toThrow(/Unknown provider/);
+    expect(requireHarness('codex').id).toBe('codex');
   });
 
-  it('exposes complete frontend metadata', () => {
-    for (const info of providerInfos()) {
+  it('builds the host halves from the pure harness descriptors', () => {
+    for (const d of harnessDescriptors) {
+      const host = requireHarness(d.id);
+      expect(host.kind).toBe('harness');
+      expect(host.configOptions).toBe(d.configOptions);
+      expect(host.compileSettings).toBe(d.compileSettings);
+      expect(host.packages).toBe(d.packages);
+      expect(host.containerEnv).toBe(d.containerEnv);
+    }
+  });
+
+  it('every info carries its kind', async () => {
+    const infos = await providerInfos();
+    expect(infos.map((i) => [i.id, i.kind])).toEqual(providers.map((p) => [p.id, p.kind]));
+  });
+
+  it('exposes complete frontend metadata for harnesses', async () => {
+    for (const info of await harnessInfos()) {
       expect(info.models[0]).toBe('auto');
       expect(info.thinkingLevels[0]).toBe('auto');
       expect(info.systemPromptHint.length).toBeGreaterThan(0);
@@ -31,39 +64,48 @@ describe('provider registry', () => {
     }
   });
 
-  it('declares sub-agent support and whether the child transcript arrives', () => {
-    for (const info of providerInfos()) {
+  it('declares sub-agent support and whether the child transcript arrives', async () => {
+    for (const info of await harnessInfos()) {
       expect(typeof info.capabilities.subAgents).toBe('boolean');
       expect(typeof info.capabilities.subAgentTranscript).toBe('boolean');
       // A transcript needs sub-agent chats to land in.
       if (info.capabilities.subAgentTranscript) expect(info.capabilities.subAgents).toBe(true);
     }
-    expect(providerById('claude-code')?.capabilities).toMatchObject({ subAgents: true, subAgentTranscript: true });
+    expect(requireHarness('claude-code').capabilities).toMatchObject({ subAgents: true, subAgentTranscript: true });
     // codex exec reports collab tool calls (cards), never the child thread.
-    expect(providerById('codex')?.capabilities).toMatchObject({ subAgents: true, subAgentTranscript: false });
+    expect(requireHarness('codex').capabilities).toMatchObject({ subAgents: true, subAgentTranscript: false });
   });
 
   it('codex advertises the current reasoning levels', () => {
-    expect(providerById('codex')?.thinkingLevels).toContain('xhigh');
+    expect(requireHarness('codex').thinkingLevels).toContain('xhigh');
   });
 
-  it('toInfo never leaks auth methods or container internals', () => {
-    const info = toInfo(providers[0]);
-    expect(Object.keys(info).sort()).toEqual(
-      ['auth', 'capabilities', 'configOptions', 'id', 'label', 'models', 'systemPromptHint', 'thinkingLevels'].sort(),
+  it('toInfo never leaks auth methods, credentials or container internals', async () => {
+    const keys = async (id: string): Promise<string[]> => Object.keys(await toInfo(requireProvider(id))).sort();
+    expect(await keys('claude-code')).toEqual(
+      ['auth', 'capabilities', 'configOptions', 'id', 'kind', 'label', 'models', 'systemPromptHint', 'thinkingLevels'].sort(),
+    );
+    expect(await keys('docker-local')).toEqual(['detail', 'id', 'kind', 'label', 'targets']);
+    expect(await keys('github')).toEqual(['auth', 'github', 'id', 'kind', 'label']);
+    const gh = (await toInfo(requireProvider('github'))) as Extract<ProviderInfo, { kind: 'integration' }>;
+    expect(Object.keys(gh.github).sort()).toEqual(
+      ['appConfigured', 'configRepo', 'installUrl', 'login', 'mode', 'patUrl', 'pendingCode'].sort(),
     );
   });
 
   it('derives the container bootstrap contract both providers rely on', () => {
-    const clis = providers.flatMap((p) => p.container.cliPackages);
-    const sdks = providers.flatMap((p) => p.container.sdkPackages);
+    const clis = harnessDescriptors.flatMap((p) => p.packages.cli);
+    const sdks = harnessDescriptors.flatMap((p) => p.packages.sdk);
     expect(clis.map((p) => p.name)).toEqual(['@anthropic-ai/claude-code', '@openai/codex']);
     expect(sdks.map((p) => p.name)).toEqual(['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk']);
     // Every container package is pinned to an exact version (no ranges):
     // provisioning verifies the installed version against it after install.
     for (const pkg of [...clis, ...sdks]) expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
-    for (const p of providers) {
-      expect(p.container.credential.containerPath.startsWith('/root/.')).toBe(true);
-    }
+    // Today's runner runs as root; the descriptors name the unprivileged layout.
+    for (const p of byKind('harness')) expect(p.credential.containerPath.startsWith('/root/.')).toBe(true);
+    expect(harnessDescriptors.map((d) => d.credentialPath)).toEqual([
+      '/puck/home/.claude/.credentials.json',
+      '/puck/home/.codex/auth.json',
+    ]);
   });
 });

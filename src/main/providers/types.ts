@@ -1,22 +1,42 @@
 /**
- * The Provider interface: everything Puck needs to know about one agent
- * provider (Claude Code, Codex, …), declared in one place.
+ * Provider kinds: everything Puck configures is a provider of one of three
+ * kinds, sharing one registry (index.ts) and one Settings page.
  *
- * A provider implementation covers four surfaces:
- *  - descriptor: identity + agent-editor metadata (models, thinking levels,
- *    system-prompt semantics, capability flags shown to the frontend)
- *  - auth: the OAuth login lifecycle
- *  - container: how the provider is installed into and authenticated inside
- *    environment containers
- *  - execution: lives container-side in runner/runner.js as the PROVIDERS
- *    table — the hand-synced mirror of this interface (TypeScript cannot
- *    reach into the embedded runner string)
+ *  - harness (Claude Code, Codex): the pure descriptor from
+ *    src/harness/providers/ plus the host half - sign-in and the CLI
+ *    credential file mirrored into containers. Execution lives
+ *    container-side in runner/runner.js as the PROVIDERS table, the
+ *    hand-synced mirror of the descriptors.
+ *  - environment (Local Docker, Docker over SSH): the Docker engines
+ *    containers run on, each a target with its own health check.
+ *  - integration (GitHub): an external service Puck signs in to.
+ *
+ * Provider ids are persisted and never renamed.
  */
 
-import type { ProviderAuthInfo, ProviderCapabilities } from '../../harness/bridge';
-import type { ProviderOption, SettingsMap } from '../../harness/options';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import type {
+  DeviceCodePrompt,
+  EnvTargetInfo,
+  GitHubStatus,
+  ProviderAuthInfo,
+  ProviderKind,
+  TargetHealth,
+} from '../../harness/bridge';
+import type { HarnessDescriptor } from '../../harness/providers';
+import type { DockerRunner } from '../docker-client';
 
-/** Login + token lifecycle for one provider account. */
+export type { ProviderKind } from '../../harness/bridge';
+export type { HarnessDescriptor, PinnedPackage } from '../../harness/providers';
+
+interface ProviderBase {
+  readonly kind: ProviderKind;
+  /** Persisted (agent records, stores, runner dispatch) - NEVER change. */
+  readonly id: string;
+  readonly label: string;
+}
+
+/** Login + token lifecycle for one harness provider account. */
 export interface ProviderAuth {
   status(): ProviderAuthInfo;
   /**
@@ -43,9 +63,10 @@ export interface ProviderAuth {
 
 /** A CLI credential file Puck mirrors between host and containers. */
 export interface ProviderCredential {
-  /** Absolute host-side CLI file, docker-cp'd on env start when present. */
-  hostPath: string;
-  /** Full in-container path Puck reads/writes (and `cat`s on stop). */
+  /**
+   * Full in-container path today's root runner reads (and Puck `cat`s on
+   * stop). The descriptor's `credentialPath` is the unprivileged-user layout.
+   */
   containerPath: string;
   /** True while Puck holds tokens for this provider (no refresh, no network). */
   signedIn(): boolean;
@@ -65,51 +86,49 @@ export interface ProviderCredential {
   adoptIfNewer(containerJson: string): void;
 }
 
-/**
- * An npm package installed into containers at an exact version. Pins keep
- * the runner and the SDK it was written against in lockstep; provisioning
- * verifies the installed version after install and fails setup on drift.
- * Bump a pin deliberately, together with any runner.js adaptation.
- */
-export interface PinnedPackage {
-  name: string;
-  /** Exact version (no range). */
-  version: string;
-}
-
-/** How the provider is installed and authenticated inside containers. */
-export interface ContainerIntegration {
-  /** CLI binary name (empty for API-key-only providers without a CLI). */
-  cliBin: string;
-  /** npm -g packages that provide the interactive CLI. */
-  cliPackages: PinnedPackage[];
-  /** npm packages the runner agent needs under /opt/puck. */
-  sdkPackages: PinnedPackage[];
-  /** Host env vars forwarded into the container at creation. */
-  forwardedEnvKeys: string[];
-  /** Env baked into the container at creation (e.g. IS_SANDBOX=1). */
-  containerEnv: Record<string, string>;
-  credential: ProviderCredential;
-}
-
-export interface Provider {
-  /** Persisted in puck-agents.json and runner dispatch — NEVER change. */
-  readonly id: string;
-  readonly label: string;
-  /** Model ids for the agent editor, 'auto' first. */
-  readonly models: string[];
-  /** Thinking/effort levels, 'auto' first. */
-  readonly thinkingLevels: string[];
-  /** Agent-editor hint: where the system prompt lands for this provider. */
-  readonly systemPromptHint: string;
-  /** Schema-driven per-agent options rendered generically by the agent editor. */
-  readonly configOptions: readonly ProviderOption[];
-  readonly capabilities: ProviderCapabilities;
+/** A harness provider: the pure descriptor plus its host half. */
+export interface HarnessProvider extends ProviderBase, HarnessDescriptor {
+  readonly kind: 'harness';
   readonly auth: ProviderAuth;
-  readonly container: ContainerIntegration;
-  /**
-   * Sparse validated settings → the exact SDK options (Claude) / config
-   * (Codex) fragment the runner applies before the `advanced` passthrough.
-   */
-  compileSettings(settings: SettingsMap): SettingsMap;
+  readonly credential: ProviderCredential;
 }
+
+/**
+ * An environment provider: one or more Docker engines (targets). Container
+ * operations address a target through its argv runner, so the same Docker
+ * code serves the local engine and a remote one over SSH.
+ */
+export interface EnvironmentProvider extends ProviderBase {
+  readonly kind: 'environment';
+  targets(): EnvTargetInfo[];
+  /** One line about the provider itself (e.g. where the docker CLI was found). */
+  detail(): Promise<string>;
+  /** `docker version` against the target, with the failure classified. */
+  health(targetId: string): Promise<TargetHealth>;
+  /** Argv docker runner bound to the target. Throws for an unknown target. */
+  runner(targetId: string): DockerRunner;
+  /** Raw stdio docker process bound to the target (for long-lived exec bridges). */
+  spawn(targetId: string, args: string[]): ChildProcessWithoutNullStreams;
+}
+
+/** Sign-in lifecycle of an integration: GitHub's device flow. */
+export interface IntegrationAuth {
+  status(): ProviderAuthInfo;
+  /** Requests a device code and starts polling; resolves with the code to show. */
+  start(): Promise<DeviceCodePrompt>;
+  cancel(): void;
+  /** Sign out: a fence like the harness logout, then the local tokens are dropped. */
+  logout(): Promise<void>;
+}
+
+/** An integration provider: an external service Puck signs in to. */
+export interface IntegrationProvider extends ProviderBase {
+  readonly kind: 'integration';
+  readonly auth: IntegrationAuth;
+  /** Integration-specific state for Settings (GitHub is the only integration). */
+  state(): GitHubStatus;
+}
+
+export type Provider = HarnessProvider | EnvironmentProvider | IntegrationProvider;
+
+export type ProviderOfKind<K extends ProviderKind> = Extract<Provider, { kind: K }>;

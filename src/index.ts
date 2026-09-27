@@ -10,6 +10,8 @@ import * as agents from './main/agents';
 import * as backend from './main/backend';
 import * as conversations from './main/conversations';
 import * as providerRegistry from './main/providers';
+import * as github from './main/providers/github';
+import * as providersStore from './main/providers/providers-store';
 import * as environments from './main/environments';
 import { log } from './main/log';
 import * as runner from './main/runner';
@@ -22,9 +24,12 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
+  patFrom,
+  repoNameFrom,
   requireId,
   requireSecretKey,
   requireString,
+  sshHostFrom,
 } from './main/ipcguard';
 import { CHANNELS, ENV_EVENT_CHANNEL, EVENT_CHANNEL } from './harness/channels';
 import { dockerLocation } from './main/docker-client';
@@ -116,6 +121,13 @@ const createWindow = (): void => {
 // store or docker. No handler casts its args.
 type IpcHandler = (event: IpcMainInvokeEvent, args: unknown) => unknown;
 
+/** Providers with a sign-in (harness and integration kinds). */
+function signInProvider(id: string): providerRegistry.HarnessProvider | providerRegistry.IntegrationProvider {
+  const provider = providerRegistry.requireProvider(id);
+  if (provider.kind === 'environment') throw new Error(`${provider.label} has no sign-in.`);
+  return provider;
+}
+
 const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> = {
   [CHANNELS.status]: () => backend.status(),
   [CHANNELS.providers]: () => providerRegistry.providerInfos(),
@@ -123,14 +135,38 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url);
   },
   [CHANNELS.providerAuthStart]: async (_event, id) => {
-    const url = await providerRegistry.requireProvider(requireId(id, 'provider')).auth.start();
-    return { url };
+    const provider = signInProvider(requireId(id, 'provider'));
+    if (provider.kind === 'harness') return { url: await provider.auth.start() };
+    return provider.auth.start();
   },
   [CHANNELS.providerAuthCancel]: (_event, id) => {
-    providerRegistry.requireProvider(requireId(id, 'provider')).auth.cancel();
+    signInProvider(requireId(id, 'provider')).auth.cancel();
   },
-  [CHANNELS.providerAuthLogout]: (_event, id) =>
-    providerRegistry.requireProvider(requireId(id, 'provider')).auth.logout(),
+  [CHANNELS.providerAuthLogout]: (_event, id) => signInProvider(requireId(id, 'provider')).auth.logout(),
+  [CHANNELS.sshHostAdd]: (_event, host) => {
+    providersStore.addSshHost(sshHostFrom(host));
+    return providerRegistry.providerInfos();
+  },
+  [CHANNELS.sshHostRemove]: (_event, id) => {
+    providersStore.removeSshHost(requireId(id, 'SSH host'));
+    return providerRegistry.providerInfos();
+  },
+  [CHANNELS.targetHealth]: (_event, args) => {
+    const a = objArgs(args);
+    const provider = providerRegistry.requireProvider(requireId(a.providerId, 'provider'));
+    if (provider.kind !== 'environment') throw new Error(`${provider.label} has no targets.`);
+    return provider.health(requireId(a.targetId, 'target'));
+  },
+  [CHANNELS.githubInstallations]: () => github.installations(),
+  [CHANNELS.githubRepos]: () => github.repositories(),
+  [CHANNELS.githubSetConfigRepo]: async (_event, fullName) => {
+    await github.setConfigRepo(repoNameFrom(fullName));
+    return providerRegistry.providerInfos();
+  },
+  [CHANNELS.githubSetPat]: async (_event, token) => {
+    await github.setPersonalToken(patFrom(token));
+    return providerRegistry.providerInfos();
+  },
 
   [CHANNELS.agentList]: () => agents.list(),
   [CHANNELS.agentCreate]: (_event, cfg) => agents.create(agentConfigFrom(cfg)),

@@ -36,13 +36,18 @@ function fileFor(name: string): string {
 }
 
 /**
- * Store `json` encrypted, owner-readable only. Throws
+ * Store `json` encrypted, owner-readable only, atomically (tmp + rename): a
+ * rotated token pair replaces the old one whole or not at all, because the
+ * old pair is already dead on the provider's side. Throws
  * SecureStorageUnavailableError - and writes nothing - when the OS store
  * cannot encrypt. Callers surface the message as-is (auth status, editor).
  */
 export function saveSecret(name: string, json: string): void {
   if (!safeStorage.isEncryptionAvailable()) throw new SecureStorageUnavailableError();
-  fs.writeFileSync(fileFor(name), safeStorage.encryptString(json), { mode: 0o600 });
+  const file = fileFor(name);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, safeStorage.encryptString(json), { mode: 0o600 });
+  fs.renameSync(tmp, file);
 }
 
 /**

@@ -17,6 +17,13 @@ export const CHANNELS = {
   providerAuthStart: 'provider:auth-start',
   providerAuthCancel: 'provider:auth-cancel',
   providerAuthLogout: 'provider:auth-logout',
+  sshHostAdd: 'provider:ssh-host-add',
+  sshHostRemove: 'provider:ssh-host-remove',
+  targetHealth: 'provider:target-health',
+  githubInstallations: 'github:installations',
+  githubRepos: 'github:repos',
+  githubSetConfigRepo: 'github:set-config-repo',
+  githubSetPat: 'github:set-pat',
 
   agentList: 'agent:list',
   agentCreate: 'agent:create',
