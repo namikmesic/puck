@@ -4,6 +4,10 @@ Notable changes to Puck, newest first.
 Versions follow `MAJOR.MINOR.PATCH`, and every release is tagged `v<version>` on `main`.
 `RELEASE.md` describes how a release is built.
 
+## Unreleased
+
+- Providers come in three kinds with one registry: harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH with a health check that names the SSH problem), and GitHub, signed in through the device flow or a personal access token, with its config repo chosen in **Settings → Providers**; host CLI login files and host environment variables no longer reach containers.
+
 ## 0.0.1 - unreleased
 
 The first public build of Puck: macOS on Apple silicon, macOS 12 or later.

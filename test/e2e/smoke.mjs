@@ -66,6 +66,16 @@ try {
     throw new Error('settings modal did not open');
   });
   await page.waitForTimeout(400); // let the section renders surface any page errors
+  // Providers renders every kind: harnesses, environments, integrations.
+  await page.click('.nav-item[data-section="providers"]');
+  await page.waitForSelector('#pv-integration-cards [data-provider="github"]', { timeout: 5000 }).catch(() => {
+    throw new Error('providers section did not render the GitHub card');
+  });
+  const groups = await page.evaluate(() => ({
+    harness: document.querySelectorAll('#pv-harness-cards [data-provider]').length,
+    env: document.querySelectorAll('#pv-env-cards .pv-card').length,
+  }));
+  if (groups.harness !== 2 || groups.env !== 2) throw new Error(`providers grouped wrong: ${JSON.stringify(groups)}`);
   await page.keyboard.press('Escape');
   await browser.close();
 
@@ -73,7 +83,7 @@ try {
   if (!state.composer) throw new Error('composer missing');
   if (!state.status) throw new Error('harness:status round-trip failed');
   if (errors.length) throw new Error(`page errors: ${errors.join(' | ')}`);
-  console.log(`smoke OK — bridge + status up, settings modal opens, ${state.roster} agents listed`);
+  console.log(`smoke OK — bridge + status up, settings modal and Providers section render, ${state.roster} agents listed`);
 } finally {
   kill();
 }

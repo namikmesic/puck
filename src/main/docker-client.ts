@@ -49,20 +49,32 @@ const STDERR_TAIL = 4_000;
 
 let discovery: Promise<DockerLocation> | null = null;
 let cachedBinary: string | null = null;
+let lastDiscoveryError: string | null = null;
 
 export function dockerLocation(): Promise<DockerLocation> {
   if (!discovery) {
     discovery = discoverDocker(realDiscoveryDeps).then((loc) => {
       cachedBinary = loc.path;
+      lastDiscoveryError = null;
       return loc;
     });
     // A failed discovery must not be cached forever: the user may install
     // Docker while the app is open.
-    discovery.catch(() => {
+    discovery.catch((err: unknown) => {
       discovery = null;
+      lastDiscoveryError = err instanceof Error ? err.message : String(err);
     });
   }
   return discovery;
+}
+
+/**
+ * What discovery has found so far, without starting one (a failed discovery
+ * re-probes the login shell, too slow for status reads): the binary, the
+ * last failure, or neither while no discovery has finished yet.
+ */
+export function dockerLocationKnown(): { path: string | null; error: string | null } {
+  return { path: cachedBinary, error: cachedBinary ? null : lastDiscoveryError };
 }
 
 /** Synchronous accessor for code paths that cannot await (the runner exec spawner). */

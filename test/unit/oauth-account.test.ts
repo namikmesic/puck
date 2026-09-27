@@ -15,10 +15,11 @@ afterEach(() => {
   for (const name of stores.splice(0)) deleteSecret(name);
 });
 
-function makeAccount(refresh: (t: Tok) => Promise<Tok | null>) {
+function makeAccount(refresh: (t: Tok) => Promise<Tok | null>, refreshRejected?: (err: unknown) => boolean) {
   const name = `oauth-test-${++seq}.bin`;
   stores.push(name);
   return createOAuthAccount<Tok>({
+    refreshRejected,
     storeName: name,
     freshnessOf: (t) => t.at,
     needsRefresh: (t) => t.at < 1000,
@@ -159,5 +160,56 @@ describe('createOAuthAccount', () => {
       expect(cred.signedIn()).toBe(false);
       expect(await cred.fresh()).toBeNull();
     });
+  });
+
+  it('refreshes single-flight: concurrent callers share one rotation, saved before it is returned', async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const account = makeAccount(async () => {
+      calls += 1;
+      await gate;
+      return { v: 'rotated', at: 5000 };
+    });
+    account.save({ v: 'stale', at: 10 });
+    const all = Promise.all([account.getFreshTokens(), account.getFreshTokens(), account.getFreshTokens()]);
+    release();
+    const results = await all;
+    expect(calls).toBe(1);
+    expect(results.map((t) => t?.v)).toEqual(['rotated', 'rotated', 'rotated']);
+    expect(account.load()?.v).toBe('rotated');
+    // The next stale read starts a new refresh (the flight is not cached forever).
+    account.save({ v: 'stale-again', at: 20 });
+    await account.getFreshTokens();
+    expect(calls).toBe(2);
+  });
+
+  it('a rejected refresh token signs out, trips fences, and records why', async () => {
+    class Dead extends Error {}
+    const account = makeAccount(
+      async () => {
+        throw new Dead('GitHub sign-in expired. Sign in again.');
+      },
+      (err) => err instanceof Dead,
+    );
+    account.save({ v: 'stale', at: 10 });
+    const fence = account.fence();
+    expect(await account.getFreshTokens()).toBeNull();
+    expect(account.load()).toBeNull();
+    expect(fence.current()).toBe(false);
+    expect(account.lastError()).toBe('GitHub sign-in expired. Sign in again.');
+  });
+
+  it('any other refresh failure keeps the old tokens (offline starts must not break)', async () => {
+    const account = makeAccount(
+      async () => {
+        throw new Error('network down');
+      },
+      () => false,
+    );
+    account.save({ v: 'stale', at: 10 });
+    expect((await account.getFreshTokens())?.v).toBe('stale');
+    expect(account.load()?.v).toBe('stale');
+    expect(account.lastError()).toBe('network down');
   });
 });

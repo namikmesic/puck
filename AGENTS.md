@@ -45,7 +45,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   The binary is resolved in this order: configured path (`PUCK_DOCKER_BIN`), well-known install locations, inherited PATH, login-shell probe.
   The not-found error lists what was searched.
   Everything goes through `docker-client.ts` (argv, timeouts, abort signal, line streaming), and `TIMEOUTS` in `environments.ts` is the one table.
-- **Provider packages are pinned** (`PinnedPackage` in `src/main/providers/types.ts`).
+- **Provider packages are pinned** (`PinnedPackage` in `src/harness/providers/index.ts`).
   `provisioning.ts` checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every start.
   With auto-install on, any drift fails the start, and with it off only a missing SDK fails.
   Bump a pin deliberately, together with any runner.js adaptation.
@@ -72,7 +72,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   The Settings copy in `index.html` states this behavior.
 - **Persisted stores** live in Electron `userData`.
   Migrate, don't break: new fields get `??` defaults at load, and legacy keys are dual-read, never rewritten in place.
-  Layout: `puck-agents.json`, `puck-environments.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
+  Layout: `puck-agents.json`, `puck-environments.json`, `puck-providers.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
   Resume ids are keyed `agentId@envId`, scoped to the environment because a rebuilt container loses its transcripts.
   A legacy single-blob `puck-convos.json` is still read.
   Conversation files carry a format version `v`.
@@ -103,7 +103,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
 
 ## Adding a provider - checklist
 
-1. Descriptor module `src/main/providers/<id>.ts`: models, thinking levels, `configOptions` schema, `compileSettings`, capabilities, auth, and container integration (CLI/SDK packages, credential paths, forwarded env).
+1. Pure descriptor `src/harness/providers/<id>.ts` (models, thinking levels, `configOptions` schema, `compileSettings`, capabilities, pinned CLI/SDK packages, container env, credential path) and host half `src/main/providers/<id>.ts` (auth and the credential mirror).
 2. OAuth module (transport and token mapping).
    Shared PKCE and token-store helpers live in `oauth.ts`.
 3. Registry entry in `src/main/providers/index.ts`.

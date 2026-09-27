@@ -20,10 +20,13 @@ export const SSH_CONFIG_BLOCK = `Host my-docker-host
   ControlPersist 10m
   ServerAliveInterval 15
   ServerAliveCountMax 4
-  BatchMode yes`;
+  BatchMode yes
+  # Keys in 1Password, Secretive or gpg-agent? Point at that agent:
+  # IdentityAgent ~/path/to/agent.sock`;
 
 export const SSH_REQUIREMENTS = [
   'Key authentication through your ssh agent (ssh-add). Puck has no terminal, so passphrase prompts fail.',
+  "Apps opened from Finder see only macOS's own ssh agent: keys held by another agent need IdentityAgent in the Host block.",
   'The host key already known (connect once with ssh), or StrictHostKeyChecking accept-new.',
   'A remote user in the docker group, with docker on the non-interactive PATH.',
 ];

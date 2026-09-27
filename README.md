@@ -102,7 +102,8 @@ Everything Puck stores on your Mac is in one folder: `~/Library/Application Supp
 | `puck-environments.json` | Environments: name, image, Dockerfile, workspace path, environment variables |
 | `puck-resume.json` | Provider session ids, so a conversation continues after a restart |
 | `puck-convos/<agent id>.json` | One conversation transcript per agent |
-| `claude-oauth.bin`, `codex-oauth.bin` | Provider tokens, encrypted through the macOS Keychain |
+| `puck-providers.json` | Provider settings: Docker-over-SSH hosts, the GitHub config repo and sign-in mode |
+| `claude-oauth.bin`, `codex-oauth.bin`, `github-oauth.bin` | Provider tokens, encrypted through the macOS Keychain |
 | `env-secrets-<environment id>.bin` | Environment secrets, encrypted the same way |
 | `logs/puck.log`, `logs/puck.log.1`, `logs/puck.log.2` | The diagnostic log: three files of at most 1 MiB each |
 | `Cache`, `Local Storage`, and similar folders | Electron's own browser data |
@@ -128,8 +129,8 @@ Rebuild acts on the first click and resets the container, so stop and think befo
 
 Disconnect does not sign you out of the provider in your browser.
 It also leaves the provider CLI's own files in your home folder alone: `~/.claude/.credentials.json` and `~/.codex/auth.json`.
-When those files exist, Puck copies them into an environment on every start.
-Remove them too when you want a container with no credentials at all.
+Puck never copies those files into an environment, and host environment variables such as `ANTHROPIC_API_KEY` do not reach containers either.
+To give an environment an API key, add it as an environment secret.
 
 ## Wipe everything
 

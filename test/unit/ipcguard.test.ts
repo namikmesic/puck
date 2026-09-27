@@ -4,9 +4,12 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
+  patFrom,
+  repoNameFrom,
   requireId,
   requireSecretKey,
   requireString,
+  sshHostFrom,
 } from '../../src/main/ipcguard';
 
 describe('requireId', () => {
@@ -97,3 +100,57 @@ describe('askAnswersFrom', () => {
   });
 });
 
+describe('sshHostFrom', () => {
+  it('accepts ssh URLs (user and port optional) and ssh-config aliases', () => {
+    expect(sshHostFrom({ label: ' Build box ', host: ' ssh://me@build.example.com:2222 ' })).toEqual({
+      label: 'Build box',
+      host: 'ssh://me@build.example.com:2222',
+    });
+    expect(sshHostFrom({ label: '', host: 'ssh://10.0.0.9' }).host).toBe('ssh://10.0.0.9');
+    expect(sshHostFrom({ host: 'build_box.lan' })).toEqual({ label: '', host: 'build_box.lan' });
+  });
+  it('rejects argv injection, bad ports, junk and long labels', () => {
+    for (const host of [
+      '-oProxyCommand=touch /tmp/x',
+      'ssh://-oProxyCommand=x@box',
+      'ssh://me@-box',
+      'ssh://me@box:0',
+      'ssh://me@box:70000',
+      'ssh://me@box/path',
+      'tcp://box:2375',
+      'box; rm -rf /',
+      'me@box',
+      '',
+    ]) {
+      expect(() => sshHostFrom({ label: 'x', host }), host).toThrow();
+    }
+    expect(() => sshHostFrom({ label: 'x'.repeat(65), host: 'box' })).toThrow(/too long/);
+    expect(sshHostFrom({ label: 'x'.repeat(64), host: 'box' }).label).toHaveLength(64);
+    expect(() => sshHostFrom('box')).toThrow(/Invalid IPC payload/);
+    expect(() => sshHostFrom({ label: 'x', host: 42 })).toThrow();
+  });
+});
+
+describe('repoNameFrom', () => {
+  it('accepts owner/name', () => {
+    expect(repoNameFrom('octo-org/puck-config')).toBe('octo-org/puck-config');
+    expect(repoNameFrom('me/cfg.repo_1')).toBe('me/cfg.repo_1');
+  });
+  it('rejects anything else', () => {
+    for (const bad of ['cfg', 'a/b/c', '../etc', 'me/', '/cfg', 'me/cfg repo', 'me_x/cfg', 42, null]) {
+      expect(() => repoNameFrom(bad), String(bad)).toThrow(/Invalid repository name/);
+    }
+  });
+});
+
+describe('patFrom', () => {
+  it('accepts a trimmed token up to 255 characters', () => {
+    expect(patFrom('  github_pat_abc123  ')).toBe('github_pat_abc123');
+    expect(patFrom('x'.repeat(255))).toHaveLength(255);
+  });
+  it('rejects empty, oversized, whitespace-containing and non-string tokens', () => {
+    for (const bad of ['', '   ', 'x'.repeat(256), 'ghp_a b', 42, undefined]) {
+      expect(() => patFrom(bad)).toThrow();
+    }
+  });
+});

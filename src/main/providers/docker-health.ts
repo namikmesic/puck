@@ -37,6 +37,13 @@ const RULES: ReadonlyArray<{ problem: TargetProblem; remote: boolean | null; re:
     remote: true,
     re: /docker: (command )?not found|command not found: docker|exit status 127/i,
   },
+  // Over SSH a stopped remote engine surfaces as dial-stdio failing on the
+  // socket - before the generic connection rules, which would blame ssh.
+  {
+    problem: 'daemon-down',
+    remote: null,
+    re: /docker\.sock\S*:? (connect: )?(no such file or directory|connection refused)/i,
+  },
   {
     problem: 'ssh-unreachable',
     remote: true,

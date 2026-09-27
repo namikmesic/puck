@@ -3,7 +3,7 @@
  * docker CLI (docker-discovery.ts). One target, `local`.
  */
 
-import { docker, dockerLocation, dockerProcess } from '../docker-client';
+import { docker, dockerLocationKnown, dockerProcess } from '../docker-client';
 import { classifyHealth, HEALTH_ARGS, HEALTH_TIMEOUT_MS } from './docker-health';
 import type { EnvironmentProvider } from './types';
 
@@ -19,12 +19,9 @@ export const dockerLocalProvider: EnvironmentProvider = {
   label: 'Local Docker',
   targets: () => [{ id: LOCAL_TARGET, label: 'This Mac', host: null }],
   async detail() {
-    try {
-      const loc = await dockerLocation();
-      return `docker CLI at ${loc.path}`;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
-    }
+    const known = dockerLocationKnown();
+    if (known.path) return `docker CLI at ${known.path}`;
+    return known.error ?? 'Locating the docker CLI… (Check runs the search)';
   },
   async health(targetId) {
     requireLocal(targetId);
