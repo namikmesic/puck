@@ -70,18 +70,41 @@ const TIMEOUTS = {
   git: 10 * 60_000,
 };
 
-/** The git-askpass helper: root's git asks it for GitHub credentials. */
+/** The environment variable that tells git-askpass whose grant to answer with. */
+export const ASKPASS_OWNER_ENV = 'PUCK_GIT_OWNER';
+
+/**
+ * The git-askpass helper: root's git asks it for GitHub credentials. The
+ * password is the installation token of the repository's owner, named by
+ * PUCK_GIT_OWNER on the git command (git's prompt does not carry the path).
+ */
 export function askpassScript(paths: DaemonPaths): string {
   const file = path.join(paths.secrets, 'github.json');
+  const read =
+    'try{const o=(process.env.' +
+    ASKPASS_OWNER_ENV +
+    '||"").toLowerCase();const g=(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).grants||[]).find(function(x){return String(x.owner).toLowerCase()===o});process.stdout.write(g&&g.token||"")}catch(e){}';
   return [
     '#!/bin/sh',
     '# Answers git credential prompts for the mirrors (written by puckd; root only).',
     'case "$1" in',
     '  Username*) echo x-access-token ;;',
-    `  *) node -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).accessToken||"")}catch(e){}' ${JSON.stringify(file)} ;;`,
+    `  *) node -e '${read}' ${JSON.stringify(file)} ;;`,
     'esac',
     '',
   ].join('\n');
+}
+
+/** The environment of a root git command against a mirror of `github` (`owner/name`). */
+export function mirrorGitEnv(paths: DaemonPaths, github: string): Record<string, string> {
+  return {
+    PATH: HARNESS_PATH,
+    HOME: '/root',
+    LANG: 'C.UTF-8',
+    GIT_ASKPASS: path.join(paths.bin, 'git-askpass'),
+    GIT_TERMINAL_PROMPT: '0',
+    [ASKPASS_OWNER_ENV]: github.split('/')[0],
+  };
 }
 
 function fingerprint(...parts: unknown[]): string {
@@ -214,10 +237,8 @@ export async function provision(deps: ProvisionDeps): Promise<Record<string, str
     if (report.errors.length) throw new ProvisionError('verifying-packages', describePinFailure(report, true));
   });
 
-  const github = deps.credentials.github();
-  const userName = definition.git.userName ?? github?.login ?? 'Puck';
-  const userEmail =
-    definition.git.userEmail ?? (github?.login ? `${github.login}@users.noreply.github.com` : 'puck@users.noreply.github.com');
+  const userName = definition.git.userName ?? 'Puck';
+  const userEmail = definition.git.userEmail ?? 'puck@users.noreply.github.com';
   await stage('configuring-git', [userName, userEmail, askpassScript(paths), codexWrapperScript()], async () => {
     await must('configuring-git', ['git', 'config', '--system', '--replace-all', 'safe.directory', '*'], { env: rootEnv }, 'git config --system');
     await must('configuring-git', ['git', 'config', '--global', 'user.name', userName], { ...asPuck, env: puckEnv }, 'git config user.name');
@@ -233,12 +254,8 @@ export async function provision(deps: ProvisionDeps): Promise<Record<string, str
   // Always runs: fetching keeps the mirrors current, and a repo added to the
   // definition is cloned here.
   await stage('syncing-repos', null, async () => {
-    const gitEnv = {
-      ...rootEnv,
-      GIT_ASKPASS: path.join(paths.bin, 'git-askpass'),
-      GIT_TERMINAL_PROMPT: '0',
-    };
     for (const repo of definition.repos) {
+      const gitEnv = mirrorGitEnv(paths, repo.github);
       const mirror = path.join(paths.mirrors, `${repo.dir}.git`);
       const url = `${deps.gitBase}${repo.github}.git`;
       if (fs.existsSync(mirror)) {

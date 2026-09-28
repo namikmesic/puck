@@ -210,8 +210,10 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     pendingNotices = [notice];
     attempts = [(_req, ctx) => ctx.emit(END)];
     await send(s.id, 'status?');
-    expect(calls[0].prompt).toBe('[Puck] Updates since your last turn:\n- The environment restarted.\n\nstatus?');
-    expect(noticePrompt([notice])).toBe('[Puck] Updates since your last turn:\n- The environment restarted.');
+    expect(calls[0].prompt).toBe('[Puck] Updates since your last turn:\n- The environment restarted.\nDecide what to do next. If nothing needs doing, reply in one sentence.\n\nstatus?');
+    expect(noticePrompt([notice])).toBe(
+      '[Puck] Updates since your last turn:\n- The environment restarted.\nDecide what to do next. If nothing needs doing, reply in one sentence.',
+    );
     const log = transcripts.get(s.id).log;
     expect(log.map((e) => e.kind)).toEqual(['notice', 'user', 'turn']);
     expect(events.some((e) => e.kind === 'turn.notice')).toBe(true);
@@ -427,7 +429,9 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     const log = transcripts.get(s.id).log;
     expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
     expect(log.filter((e) => e.kind === 'notice')).toHaveLength(1);
-    expect(calls.map((c) => c.prompt)).toEqual(['[Puck] Updates since your last turn:\n- The environment restarted.\n\nkeep me']);
+    expect(calls.map((c) => c.prompt)).toEqual([
+      `${noticePrompt([{ id: 'ntc_1', kind: 'environment.restarted', at: 1, text: 'The environment restarted.' }])}\n\nkeep me`,
+    ]);
     expect(errors).toEqual([]);
   });
 

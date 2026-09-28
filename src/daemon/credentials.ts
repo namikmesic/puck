@@ -2,8 +2,10 @@
  * Credentials and secrets inside the environment.
  *
  * - The GitHub credential lives in /puck/state/secrets/github.json (root,
- *   0600). It never leaves root: agents cannot read it, and it is never put
- *   in a harness environment.
+ *   0600): one installation token per repository owner (a grant), pushed
+ *   by the runner before the previous one expires. It never leaves root:
+ *   agents cannot read it, and it is never put in a harness environment.
+ *   The daemon never refreshes a token.
  * - Environment secret values live in /puck/state/secrets/env.json (root,
  *   0600) and reach harness processes through their environment only.
  * - Harness CLI credential files live in the puck user's HOME, where the
@@ -17,7 +19,7 @@
  * deletes the inbox copy. Inbox files:
  *
  *   instance.json         { envId, name, pin, definition }
- *   github.json           the GitHub device-flow token pair (see `normalizeGithub`)
+ *   github.json           { grants: [...] } (see `normalizeGrants`)
  *   secrets.json          { values: { NAME: "value", ... } }
  *   harness-<id>.json     a harness CLI credential file, verbatim
  *
@@ -27,7 +29,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { GithubAuthState, Pin } from '../harness/daemon-protocol';
+import type { GithubAuthState, GithubGrant, Pin } from '../harness/daemon-protocol';
 import { harnessDescriptorById } from '../harness/providers';
 import { readDefinition, ENV_KEY_RE } from './definition';
 import type { CommandRunner, RunOptions } from './exec';
@@ -40,40 +42,41 @@ import type { InstanceRecord } from './store/instance';
 const MAX_CREDENTIAL_BYTES = 64 * 1024;
 const MAX_SECRET_BYTES = 64 * 1024;
 
-/**
- * The environment's GitHub credential: always a device-flow token pair
- * (an expiring user access token plus its refresh token).
- */
+/** The environment's GitHub credential: the current grant per owner. */
 export interface GithubCredential {
-  accessToken: string;
-  refreshToken: string;
-  /** Epoch ms when the access token expires. */
-  expiresAt: number;
-  /** Epoch ms when the refresh token expires, when GitHub said. */
-  refreshExpiresAt: number | null;
-  login: string | null;
+  grants: GithubGrant[];
   savedAt: number;
 }
 
-const TOKEN_RE = /^[\x21-\x7e]{8,512}$/;
+/** A grant is "expiring" (clients warn) when it has less than this left. */
+export const GRANT_EXPIRING_MS = 10 * 60_000;
 
-/** Accepts a device-flow token pair; anything else (a bare token, no expiry) is refused. */
-export function normalizeGithub(raw: unknown, now: number): GithubCredential | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
-  const expiresAt = num(r.expiresAt);
-  if (typeof r.accessToken !== 'string' || !TOKEN_RE.test(r.accessToken)) return null;
-  if (typeof r.refreshToken !== 'string' || !TOKEN_RE.test(r.refreshToken)) return null;
-  if (expiresAt === null) return null;
-  return {
-    accessToken: r.accessToken,
-    refreshToken: r.refreshToken,
-    expiresAt,
-    refreshExpiresAt: num(r.refreshExpiresAt),
-    login: typeof r.login === 'string' ? r.login.slice(0, 100) : null,
-    savedAt: now,
-  };
+// Installation tokens (`ghs_…`) can be long in GitHub's stateless format;
+// the bound only keeps junk out, and a token is printable ASCII.
+const TOKEN_RE = /^[\x21-\x7e]{8,4096}$/;
+const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
+
+/** Accepts `{ grants }` (or a bare list); every grant needs an owner, a token and an expiry. */
+export function normalizeGrants(raw: unknown, now: number): GithubCredential | null {
+  const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? (raw as { grants?: unknown }).grants : null;
+  if (!Array.isArray(list) || list.length === 0 || list.length > 100) return null;
+  const grants: GithubGrant[] = [];
+  const owners = new Set<string>();
+  for (const g of list) {
+    if (!g || typeof g !== 'object' || Array.isArray(g)) return null;
+    const r = g as Record<string, unknown>;
+    if (typeof r.owner !== 'string' || !OWNER_RE.test(r.owner)) return null;
+    if (typeof r.token !== 'string' || !TOKEN_RE.test(r.token)) return null;
+    if (typeof r.expiresAt !== 'number' || !Number.isFinite(r.expiresAt) || r.expiresAt <= 0) return null;
+    if (typeof r.installationId !== 'number' || !Number.isInteger(r.installationId) || r.installationId <= 0) return null;
+    if (!Array.isArray(r.repos) || !r.repos.every((x): x is string => typeof x === 'string' && REPO_RE.test(x))) return null;
+    const key = r.owner.toLowerCase();
+    if (owners.has(key)) return null;
+    owners.add(key);
+    grants.push({ owner: r.owner, installationId: r.installationId, repos: r.repos.slice(0, 1000), token: r.token, expiresAt: r.expiresAt });
+  }
+  return { grants, savedAt: now };
 }
 
 export function validSecretValues(raw: unknown): Record<string, string> | null {
@@ -126,24 +129,35 @@ export class Credentials {
 
   github(): GithubCredential | null {
     try {
-      return readJsonFile<GithubCredential>(this.githubFile);
+      return normalizeGrants(readJsonFile<unknown>(this.githubFile), this.now());
     } catch {
       return null;
     }
   }
 
+  /** The grant for a repository owner (case-insensitive), expired or not. */
+  grantFor(owner: string): GithubGrant | null {
+    const key = owner.toLowerCase();
+    return this.github()?.grants.find((g) => g.owner.toLowerCase() === key) ?? null;
+  }
+
+  /** ok: every grant has time left. expiring: one is under ten minutes or past its expiry. */
   githubAuth(): { state: GithubAuthState; login?: string } {
     const cred = this.github();
     if (!cred) return { state: 'missing' };
-    return cred.login ? { state: 'ok', login: cred.login } : { state: 'ok' };
+    const now = this.now();
+    return cred.grants.some((g) => g.expiresAt - now < GRANT_EXPIRING_MS) ? { state: 'expiring' } : { state: 'ok' };
   }
 
-  /** Returns false when the value is not a usable credential. */
+  /** Replaces the stored grants; returns false when the value is not a usable grant set. */
   putGithub(raw: unknown): boolean {
-    const cred = normalizeGithub(raw, this.now());
+    const cred = normalizeGrants(raw, this.now());
     if (!cred) return false;
     writeFileAtomicSync(this.githubFile, JSON.stringify(cred), 0o600);
-    this.deps.log.info('credentials.github', { login: cred.login, expiresAt: cred.expiresAt });
+    this.deps.log.info('credentials.github', {
+      owners: cred.grants.map((g) => g.owner),
+      expiresAt: Math.min(...cred.grants.map((g) => g.expiresAt)),
+    });
     return true;
   }
 

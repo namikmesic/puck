@@ -1,7 +1,7 @@
 /**
  * sessions.json: every harness session of this environment (the
- * orchestrator's and, later, each worker's), keyed by session id. The
- * provider resume id lives here and never leaves the daemon.
+ * orchestrator's and each worker's), keyed by session id. The provider
+ * resume id lives here and never leaves the daemon.
  */
 
 import * as path from 'node:path';

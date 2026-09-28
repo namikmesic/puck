@@ -22,6 +22,14 @@
  *     one), then starts the next queued input.
  *
  * Interrupting a turn cancels its open questions and aborts the adapter.
+ * An interrupt from shutdown or upgrade leaves the session `interrupted`,
+ * so the next boot resumes it like a crash would.
+ *
+ * Worker sessions belong to work items: `canStart` keeps them from starting
+ * on their own (the scheduler starts them), `onTurnEnd` hands each finished
+ * turn to the item logic before the next queued input may start, and
+ * `routeAsk` decides whether a question waits for the user or the
+ * orchestrator.
  */
 
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
@@ -65,13 +73,47 @@ export interface TurnsDeps {
   peekNotices(): Notice[];
   /** Fsync the pending list once its first `count` notices are in the transcript. */
   commitNotices(count: number): void;
+  /** False keeps a session's queued input waiting (a worker whose item holds no slot). Default: true. */
+  canStart?(session: SessionRecord): boolean;
+  /** Awaited after every turn, before the session's next queued input may start. */
+  onTurnEnd?(session: SessionRecord, outcome: TurnOutcome): Promise<void> | void;
+  /** Where a new question waits. Default: the user. */
+  routeAsk?(session: SessionRecord, askId: string, questions: AskQuestion[]): 'user' | 'orchestrator';
+  /** A question was answered or cancelled. */
+  onAskClosed?(session: SessionRecord, askId: string, by: AskCloser): void;
+  /**
+   * The input queued when a restart resumes a turn that had reached the
+   * harness. Default: a short continue. Null queues nothing (the owner of
+   * the session supplies its own input later).
+   */
+  resumeText?(session: SessionRecord): string | null;
+  /** Extra summary fields (the orchestrator's auto-wake state). */
+  summaryExtra?(session: SessionRecord): Partial<SessionSummary>;
   now?: () => number;
+}
+
+export type AskCloser = 'user' | 'orchestrator' | 'cancelled';
+
+/** Why a turn was cut short: a user (or cancel) interrupt, or daemon shutdown/upgrade. */
+export type InterruptReason = 'user' | 'restart';
+
+export interface TurnOutcome {
+  turnId: string;
+  /** The last top-level error of the turn, when it failed. */
+  error: string | null;
+  interrupted: InterruptReason | null;
+  /** The recorded turn (null when it never started). */
+  entry: TurnEntry | null;
+  /** Notices this turn delivered (orchestrator only). */
+  notices: Notice[];
 }
 
 interface PendingAsk {
   sessionId: string;
   turnId: string;
   questions: AskQuestion[];
+  routedTo: 'user' | 'orchestrator';
+  note?: string;
   resolve(answers: Record<string, string> | null): void;
 }
 
@@ -80,6 +122,7 @@ interface ActiveTurn {
   startedAt: number;
   started: boolean;
   interrupted: boolean;
+  reason: InterruptReason | null;
   /** Interrupt hooks of the current attempt. */
   interruptFns: Array<() => void>;
   aborter: AbortController;
@@ -89,14 +132,18 @@ interface ActiveTurn {
 const ZERO_STATS: TurnStats = { inputTokens: 0, outputTokens: 0, durationMs: 0 };
 
 /** Sent when a restart resumes an interrupted turn. Kept in the input queue, not a new store. */
-const RESUME_PROMPT = 'Continue.';
+export const RESUME_PROMPT = 'Continue.';
 
 /** Reconcile closes an interrupted turn with this error so replay can tell it from a finished one. */
 const RESTART_ERROR = 'The environment restarted during this turn.';
 
 /** Notices as the orchestrator reads them at the top of its prompt. */
 export function noticePrompt(notices: Notice[]): string {
-  return ['[Puck] Updates since your last turn:', ...notices.map((n) => `- ${n.text}`)].join('\n');
+  return [
+    '[Puck] Updates since your last turn:',
+    ...notices.map((n) => `- ${n.text}`),
+    'Decide what to do next. If nothing needs doing, reply in one sentence.',
+  ].join('\n');
 }
 
 export class Turns {
@@ -174,11 +221,16 @@ export class Turns {
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
       queued: this.queues.get(session.id)?.length ?? 0,
+      ...this.deps.summaryExtra?.(session),
     };
   }
 
-  private upsert(session: SessionRecord): void {
+  upsert(session: SessionRecord): void {
     this.deps.emit({ kind: 'session.upsert', session: this.summary(session) });
+  }
+
+  private canStart(session: SessionRecord): boolean {
+    return this.deps.canStart ? this.deps.canStart(session) : true;
   }
 
   private emitSafe(ev: DaemonEvent): void {
@@ -239,11 +291,13 @@ export class Turns {
       if (session.status !== 'interrupted') continue;
       const queue = this.queues.get(session.id) ?? [];
       const handoff = session.handoff;
+      const resumeText = this.deps.resumeText ? this.deps.resumeText(session) : RESUME_PROMPT;
       if (handoff && !handoff.handedOff) {
         if (handoff.inputs.length && !startsWithInputs(queue, handoff.inputs)) queue.unshift(...handoff.inputs.map(copyInput));
-      } else if (!queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
-        queue.unshift({ text: RESUME_PROMPT, author: 'system' });
+      } else if (resumeText !== null && !queue.some((item) => item.author === 'system' && item.text === resumeText)) {
+        queue.unshift({ text: resumeText, author: 'system' });
       }
+      delete session.handoff;
       this.queues.set(session.id, queue);
       this.persistQueue(session);
       resumed.push(session);
@@ -255,7 +309,7 @@ export class Turns {
   startRestored(): void {
     if (!this.accepting) return;
     for (const session of this.list()) {
-      if (session.status === 'closed' || this.active.has(session.id)) continue;
+      if (session.status === 'closed' || this.active.has(session.id) || !this.canStart(session)) continue;
       if (this.queues.get(session.id)?.length) this.startTurn(session);
     }
   }
@@ -285,21 +339,60 @@ export class Turns {
     queue.push({ text, author });
     this.queues.set(sessionId, queue);
     this.persistQueue(session);
-    if (this.active.has(sessionId)) {
+    if (this.active.has(sessionId) || !this.canStart(session)) {
       this.upsert(session);
       return { queued: true };
     }
     return { queued: false, turnId: this.startTurn(session) };
   }
 
+  /**
+   * Start a turn on an idle session when it has input: queued text, or for
+   * the orchestrator, pending notices alone. Returns the turn id, or null
+   * when nothing started.
+   */
+  kick(sessionId: string): string | null {
+    const session = this.get(sessionId);
+    if (!session || session.status === 'closed' || !this.accepting) return null;
+    if (this.active.has(sessionId) || !this.canStart(session)) return null;
+    const queued = this.queues.get(sessionId)?.length ?? 0;
+    const notices = session.kind === 'orchestrator' ? this.deps.peekNotices().length : 0;
+    if (!queued && !notices) return null;
+    return this.startTurn(session);
+  }
+
+  /** Inputs waiting behind (or instead of) a running turn. */
+  queueLength(sessionId: string): number {
+    return this.queues.get(sessionId)?.length ?? 0;
+  }
+
+  /** The last `last` transcript entries of a session. */
+  transcriptPage(sessionId: string, last: number): TranscriptEntry[] {
+    return this.deps.transcripts.get(sessionId).log.slice(-Math.max(1, last));
+  }
+
+  /** Drop every queued input of a session (a cancelled work item). */
+  clearQueue(sessionId: string): void {
+    const session = this.get(sessionId);
+    if (!session) return;
+    this.queues.set(sessionId, []);
+    this.persistQueue(session);
+  }
+
   isRunning(sessionId: string): boolean {
     return this.active.has(sessionId);
   }
 
-  interrupt(sessionId: string): boolean {
+  /** The turn running on a session, if any. */
+  activeTurnId(sessionId: string): string | null {
+    return this.active.get(sessionId)?.turnId ?? null;
+  }
+
+  interrupt(sessionId: string, reason: InterruptReason = 'user'): boolean {
     const turn = this.active.get(sessionId);
     if (!turn) return false;
     turn.interrupted = true;
+    turn.reason ??= reason;
     this.cancelAsks(sessionId);
     for (const fn of turn.interruptFns) {
       try {
@@ -314,7 +407,7 @@ export class Turns {
 
   /** Interrupt every running turn and wait for all of them to end. */
   async interruptAll(): Promise<void> {
-    for (const sessionId of [...this.active.keys()]) this.interrupt(sessionId);
+    for (const sessionId of [...this.active.keys()]) this.interrupt(sessionId, 'restart');
     await this.idle();
   }
 
@@ -323,20 +416,71 @@ export class Turns {
     while (this.active.size) await Promise.allSettled([...this.active.values()].map((t) => t.done));
   }
 
-  answer(sessionId: string, askId: string, answers: Record<string, string> | null): boolean {
+  answer(
+    sessionId: string,
+    askId: string,
+    answers: Record<string, string> | null,
+    by: 'user' | 'orchestrator' = 'user',
+  ): boolean {
     const ask = this.asks.get(askId);
     if (!ask || ask.sessionId !== sessionId) return false;
-    this.closeAsk(askId, answers, 'user');
+    this.closeAsk(askId, answers, by);
     return true;
   }
 
-  private closeAsk(askId: string, answers: Record<string, string> | null, by: 'user' | 'orchestrator' | 'cancelled'): void {
+  /** Attach a note to an open question and emit it with the original questions. */
+  annotateAsk(askId: string, note: string): void {
+    const ask = this.asks.get(askId);
+    const text = note.trim();
+    if (!ask || !text) return;
+    ask.note = text;
+    const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
+    if (entry) {
+      for (const event of entry.events) {
+        if (event.kind === 'ask' && event.askId === askId) event.note = text;
+      }
+      this.deps.transcripts.saveSoon(ask.sessionId);
+    }
+    this.emitSafe({
+      kind: 'turn.event',
+      sessionId: ask.sessionId,
+      turnId: ask.turnId,
+      event: { kind: 'ask', askId, questions: ask.questions, note: text, ts: this.now() },
+    });
+  }
+
+  /** Hand an open question to someone else (the orchestrator escalating to the user). */
+  routeAsk(askId: string, to: 'user' | 'orchestrator'): boolean {
+    const ask = this.asks.get(askId);
+    if (!ask) return false;
+    if (ask.routedTo !== to) {
+      ask.routedTo = to;
+      this.emitSafe({ kind: 'ask.routed', sessionId: ask.sessionId, askId, to });
+    }
+    return true;
+  }
+
+  /** An open question's questions, or null once it closed. */
+  openAsk(askId: string): { sessionId: string; questions: AskQuestion[]; routedTo: 'user' | 'orchestrator'; note?: string } | null {
+    const ask = this.asks.get(askId);
+    return ask ? { sessionId: ask.sessionId, questions: ask.questions, routedTo: ask.routedTo, ...(ask.note ? { note: ask.note } : {}) } : null;
+  }
+
+  private closeAsk(askId: string, answers: Record<string, string> | null, by: AskCloser): void {
     const ask = this.asks.get(askId);
     if (!ask) return;
     this.asks.delete(askId);
     const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
     if (entry && recordAskAnswer(entry, askId, answers)) this.deps.transcripts.saveSoon(ask.sessionId);
     this.emitSafe({ kind: 'ask.closed', sessionId: ask.sessionId, askId, answers, by });
+    const session = this.get(ask.sessionId);
+    if (session && this.deps.onAskClosed) {
+      try {
+        this.deps.onAskClosed(session, askId, by);
+      } catch (err) {
+        this.deps.log.error('ask.closed-failed', err, { sessionId: ask.sessionId });
+      }
+    }
     ask.resolve(answers);
   }
 
@@ -359,7 +503,8 @@ export class Turns {
       turnId: a.turnId,
       askId,
       questions: a.questions,
-      routedTo: 'user',
+      routedTo: a.routedTo,
+      ...(a.note ? { note: a.note } : {}),
     }));
   }
 
@@ -370,6 +515,7 @@ export class Turns {
       startedAt: this.now(),
       started: false,
       interrupted: false,
+      reason: null,
       interruptFns: [],
       aborter: new AbortController(),
       done: Promise.resolve(),
@@ -380,7 +526,9 @@ export class Turns {
       .finally(() => {
         this.active.delete(session.id);
         const next = this.queues.get(session.id);
-        if (turn.started && next?.length && this.accepting && session.status !== 'closed') this.startTurn(session);
+        if (turn.started && next?.length && this.accepting && session.status !== 'closed' && this.canStart(session)) {
+          this.startTurn(session);
+        }
         else {
           try {
             this.upsert(session);
@@ -430,10 +578,12 @@ export class Turns {
 
     let ended = false;
     let thinking = false;
+    let lastError: string | null = null;
     let stats: TurnStats = { ...ZERO_STATS };
     const forward = (event: HarnessEvent): void => {
       const now = this.now();
       if (event.kind === 'thinking') thinking = event.active;
+      if (event.kind === 'error') lastError = event.message;
       if (event.kind === 'turn-end') {
         if (ended) return; // one turn-end per turn, whatever the adapter does
         ended = true;
@@ -549,7 +699,8 @@ export class Turns {
         if (tokens > 0) session.lastTurnTokens = tokens;
         if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
         session.lastActiveAt = this.now();
-        if (session.status === 'running') session.status = 'idle';
+        // Cut off by shutdown or upgrade: the next boot resumes it.
+        if (session.status === 'running') session.status = turn.reason === 'restart' ? 'interrupted' : 'idle';
         delete session.handoff;
         const t = transcripts.get(session.id);
         t.turns = session.turns;
@@ -570,6 +721,20 @@ export class Turns {
           inputTokens: stats.inputTokens,
           outputTokens: stats.outputTokens,
         });
+        if (this.deps.onTurnEnd) {
+          const outcome: TurnOutcome = {
+            turnId: turn.turnId,
+            error: turn.interrupted ? null : lastError,
+            interrupted: turn.interrupted ? turn.reason ?? 'user' : null,
+            entry: record,
+            notices,
+          };
+          try {
+            await this.deps.onTurnEnd(session, outcome);
+          } catch (err) {
+            log.error('turn.end-hook-failed', err, { sessionId: session.id });
+          }
+        }
       }
     }
   }
@@ -697,9 +862,10 @@ export class Turns {
     if (turn.interrupted) return Promise.resolve(null);
     const askId = newId('ask', this.now());
     return new Promise((resolve) => {
-      this.asks.set(askId, { sessionId: session.id, turnId: turn.turnId, questions, resolve });
+      const routedTo = this.deps.routeAsk ? this.deps.routeAsk(session, askId, questions) : 'user';
+      this.asks.set(askId, { sessionId: session.id, turnId: turn.turnId, questions, routedTo, resolve });
       forward({ kind: 'ask', askId, questions });
-      this.emitSafe({ kind: 'ask.routed', sessionId: session.id, askId, to: 'user' });
+      this.emitSafe({ kind: 'ask.routed', sessionId: session.id, askId, to: routedTo });
     });
   }
 }

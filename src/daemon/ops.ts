@@ -9,7 +9,7 @@
 import {
   COMMAND_LIMITS,
   type ErrorCode,
-  type GithubTokenPair,
+  type GithubGrant,
   type ItemPosition,
   type Op,
   type OpArgs,
@@ -178,8 +178,8 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   'credentials.get': none,
   'github.put': (args) => {
     const o = obj(args);
-    if (!o.token || typeof o.token !== 'object' || Array.isArray(o.token)) bad('token must be a device-flow token pair.');
-    return { token: o.token as GithubTokenPair };
+    if (!Array.isArray(o.grants) || o.grants.length === 0) bad('grants must be a non-empty list.');
+    return { grants: o.grants as GithubGrant[] };
   },
   'secrets.put': (args) => {
     const o = obj(args);

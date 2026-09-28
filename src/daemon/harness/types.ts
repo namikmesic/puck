@@ -105,3 +105,39 @@ function passthrough(source: Record<string, unknown>): Record<string, unknown> {
 export function applyOverrides(target: Record<string, unknown>, req: AdapterRequest): void {
   Object.assign(target, passthrough(req.settings), passthrough(req.agent.advanced));
 }
+
+/* ---------- Orchestrator tools ---------- */
+
+/** What an in-process MCP tool returns to the model. */
+export interface ToolResult {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+}
+
+/**
+ * One orchestrator tool. `shape` builds its zod raw shape from the zod the
+ * SDK loaded (the daemon does not bundle zod); `run` executes in the
+ * daemon (root), whatever user the harness CLI runs as. It returns a
+ * JSON-able value or throws an Error whose message is the one-line reason
+ * the model sees.
+ */
+export interface OrchestratorTool {
+  name: string;
+  description: string;
+  shape(z: unknown): Record<string, unknown>;
+  run(args: Record<string, unknown>): Promise<unknown> | unknown;
+}
+
+/** Run a tool and shape its outcome for the model; failures become `isError` with one line. */
+export async function invokeTool(tool: OrchestratorTool, args: unknown, onCall?: (name: string, ok: boolean) => void): Promise<ToolResult> {
+  try {
+    const value = await tool.run(args && typeof args === 'object' ? (args as Record<string, unknown>) : {});
+    onCall?.(tool.name, true);
+    const text = typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 1);
+    return { content: [{ type: 'text', text }] };
+  } catch (err) {
+    onCall?.(tool.name, false);
+    const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 300);
+    return { content: [{ type: 'text', text: reason }], isError: true };
+  }
+}

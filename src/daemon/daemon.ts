@@ -6,36 +6,60 @@
  * Boot: migrate the state format (a failure leaves the daemon `failed`,
  * answering only the handshake, snapshots and logs) → open the socket so
  * the app can watch → ingest the inbox → provision → reconcile what a
- * restart interrupted → make sure the orchestrator session exists →
- * resume those turns → ready.
+ * restart interrupted (sessions become interrupted; running work items go
+ * back to queued without counting an attempt) → make sure the orchestrator
+ * session exists → resume those turns → ready → start the scheduler and
+ * the orchestrator's wake loop.
+ *
+ * Orchestration lives in its own modules: items.ts (state machine and
+ * backlog), scheduler.ts, work.ts (dispatch, worktrees, results, worker
+ * questions), publish.ts, orchestrator.ts (notices and wake) and tools.ts
+ * (the orchestrator's in-process tools). This class wires them to the turn
+ * loop and to the protocol's commands.
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   PROTOCOL_VERSION,
   PROVISION_STAGES,
   UPGRADE_EXIT,
   COMMAND_LIMITS,
-  type Capacity,
   type DaemonEvent,
   type InstanceState,
   type Op,
+  type Pin,
   type ProvisionStage,
   type Snapshot,
 } from '../harness/daemon-protocol';
 import { harnessDescriptors } from '../harness/providers';
-import type { Notice } from '../harness/transcript';
-import { newId } from '../harness/ulid';
 import { Credentials } from './credentials';
-import { readDefinition, referencedHarnesses, type DaemonAgent, type DaemonDefinition } from './definition';
+import {
+  changeClasses,
+  definitionChanges,
+  readDefinition,
+  referencedHarnesses,
+  type DaemonAgent,
+  type DaemonDefinition,
+} from './definition';
 import { EventLog } from './eventlog';
 import { runCommand, type CommandRunner } from './exec';
 import { createAdapters } from './harness';
 import { harnessEnv } from './harness/spawn';
-import type { HarnessAdapter } from './harness/types';
+import type { HarnessAdapter, OrchestratorTool } from './harness/types';
 import { testAdapters } from './harness/test-adapters';
+import { Git } from './git';
+import { Backlog, itemLabel, ItemStateError, publicItem } from './items';
 import { tailLog, type Logger } from './log';
 import { dispatch, OpError, type Handlers } from './ops';
+import { Orchestrator } from './orchestrator';
+import { orchestratorPreamble } from './prompts';
+import { Publisher } from './publish';
+import { capacityOf, runningCounts, Scheduler, type SchedulerView } from './scheduler';
+import { itemsStore } from './store/items';
+import type { SessionRecord } from './store/sessions';
+import { orchestratorTools } from './tools';
+import { Work, WorkError } from './work';
 import { PUCK_GID, PUCK_UID, type DaemonPaths } from './paths';
 import { provision, provisionFingerprint, ProvisionError } from './provision';
 import { DaemonServer } from './server';
@@ -46,7 +70,7 @@ import { noticesStore } from './store/notices';
 import { sessionsStore } from './store/sessions';
 import type { JsonStore } from './store/store';
 import { TranscriptBook } from './transcripts';
-import { Turns, TurnsError } from './turns';
+import { RESUME_PROMPT, Turns, TurnsError, type TurnOutcome } from './turns';
 import type { DaemonIdentity } from './version';
 
 /** How long SIGTERM waits for interrupted turns before persisting anyway. */
@@ -80,11 +104,17 @@ export class Daemon {
   private instance!: JsonStore<InstanceRecord | null>;
   private turns!: Turns;
   private transcripts!: TranscriptBook;
-  private notices!: ReturnType<typeof noticesStore>;
   private credentials!: Credentials;
   private events!: EventLog;
   private server!: DaemonServer;
-  private schedulerPaused = false;
+  private backlog!: Backlog;
+  private work!: Work;
+  private scheduler!: Scheduler;
+  private orchestrator!: Orchestrator;
+  private tools: OrchestratorTool[] = [];
+  private git!: Git;
+  /** True while a reprovision is waiting or provisioning. */
+  private reprovisioning = false;
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
   private exited = false;
@@ -118,19 +148,91 @@ export class Daemon {
     });
     if (migrated.ok) {
       this.instance = instanceStore(paths.state);
-      this.notices = noticesStore(paths.state);
       this.transcripts = new TranscriptBook(paths.transcripts, this.now);
+      this.backlog = new Backlog({ store: itemsStore(paths.state), emit: (ev) => this.emit(ev), now: this.now });
+      const asPuck = this.opts.privileged ? { uid: PUCK_UID, gid: PUCK_GID } : {};
+      const git = (this.git = new Git({ paths, run: this.run, asPuck }));
+      const test = testAdapters !== null;
+      const publisher = new Publisher({
+        git,
+        tmpDir: path.join(paths.state, 'tmp'),
+        grantFor: (owner) => this.credentials.grantFor(owner),
+        definition: () => this.definition,
+        envName: () => this.instance.get()?.name || this.definition?.name || '',
+        apiBase: (test && this.opts.env.PUCK_TEST_GITHUB_API) || undefined,
+        log,
+        now: this.now,
+      });
+      this.orchestrator = new Orchestrator({
+        notices: noticesStore(paths.state),
+        turns: {
+          orchestrator: () => this.turns.orchestrator(),
+          isRunning: (id) => this.turns.isRunning(id),
+          kick: (id) => this.turns.kick(id),
+          upsert: (session) => this.turns.upsert(session),
+        },
+        settings: () => this.definition?.orchestrator ?? null,
+        canWake: () => this.running(),
+        log,
+        now: this.now,
+      });
       this.turns = new Turns({
-        adapters: this.opts.adapters ?? createAdapters({ log, daemonVersion: this.opts.identity.daemonVersion, orchestratorTools: () => [] }),
+        adapters:
+          this.opts.adapters ??
+          createAdapters({ log, daemonVersion: this.opts.identity.daemonVersion, orchestratorTools: () => this.tools }),
         sessions: sessionsStore(paths.state),
         transcripts: this.transcripts,
         emit: (ev) => this.emit(ev),
         log,
-        agentFor: (s) => this.agentFor(s.agent, s.kind === 'worker'),
+        agentFor: (s) => this.agentFor(s),
         envFor: () => this.harnessEnv(),
-        peekNotices: () => this.peekNotices(),
-        commitNotices: (count) => this.commitNotices(count),
+        peekNotices: () => this.orchestrator.pending(),
+        commitNotices: (count) => this.orchestrator.commit(count),
+        canStart: (s) => this.work.canStart(s),
+        onTurnEnd: (s, outcome) => this.turnEnded(s, outcome),
+        routeAsk: (s, askId, questions) => this.work.routeAsk(s, askId, questions),
+        onAskClosed: (s, askId) => this.work.askClosed(s, askId),
+        // A worker resumes when the scheduler dispatches it again, with its own continue input.
+        resumeText: (s) => (s.kind === 'worker' ? null : RESUME_PROMPT),
+        summaryExtra: (s) => (s.kind === 'orchestrator' ? { autoWakePaused: this.orchestrator.autoWakePaused() } : {}),
         now: this.now,
+      });
+      this.work = new Work({
+        backlog: this.backlog,
+        turns: this.turns,
+        git,
+        publisher,
+        definition: () => this.definition,
+        notify: (kind, text, itemId) => {
+          this.orchestrator.push(kind, text, itemId);
+        },
+        slotsChanged: () => {
+          this.emitCapacity();
+          this.scheduler.request();
+        },
+        requestTick: () => this.scheduler.request(),
+        reprovisioning: () => this.reprovisioning,
+        log,
+        now: this.now,
+      });
+      this.scheduler = new Scheduler({
+        view: () => this.schedulerView(),
+        canRun: () => this.running() && !this.reprovisioning,
+        dispatch: (itemId) => this.work.dispatch(itemId),
+        log,
+      });
+      this.tools = orchestratorTools({
+        work: this.work,
+        backlog: this.backlog,
+        definition: () => this.definition,
+        instance: () => {
+          const record = this.instance.get();
+          return { name: record?.name ?? '', pin: record?.pin ?? null, sha: record?.sha ?? null };
+        },
+        running: () => {
+          const view = this.schedulerView();
+          return view ? runningCounts(view).perAgent : {};
+        },
       });
     }
     this.server = new DaemonServer({
@@ -158,23 +260,8 @@ export class Daemon {
     if (!def.ok) return this.fail(`The environment definition is invalid: ${def.error}`);
     this.definition = def.value;
 
-    const test = testAdapters !== null;
     try {
-      const stages = await provision({
-        paths,
-        log,
-        run: this.run,
-        credentials: this.credentials,
-        definition: def.value,
-        sha: record.sha,
-        skipPackages: test && this.opts.env.PUCK_SKIP_PACKAGES === '1',
-        gitBase: (test && this.opts.env.PUCK_TEST_GIT_BASE) || 'https://github.com/',
-        prior: record.provisioned?.stages ?? {},
-        privileged: this.opts.privileged,
-        onStage: (stage, detail) => this.onStage(stage, detail),
-      });
-      record.provisioned = { fingerprint: provisionFingerprint(record.sha, stages), at: this.now(), stages };
-      this.instance.save();
+      await this.provisionNow(record, def.value);
     } catch (err) {
       const stage = err instanceof ProvisionError ? err.stage : this.state.stage;
       return this.fail((err as Error).message, stage);
@@ -182,19 +269,131 @@ export class Daemon {
     this.homeReady = true;
 
     const interrupted = this.turns.reconcile();
+    const requeued = this.work.reconcile();
     this.ensureOrchestrator(def.value);
     const resumed = this.turns.resumeInterrupted();
-    if (resumed.length) {
-      const names = resumed.map((s) => (s.kind === 'orchestrator' ? 'the orchestrator' : s.agent));
-      this.pushNotice(
-        'environment.restarted',
-        `The environment restarted; interrupted turns were resumed (${names.join(', ')}).`,
-      );
-    }
+    this.restartNotice(resumed, requeued);
     this.turns.startRestored();
     this.setState({ status: 'ready' });
-    this.emit({ kind: 'capacity', ...this.capacity() });
-    log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length });
+    this.emitCapacity();
+    this.scheduler.start();
+    this.orchestrator.schedule();
+    log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length, requeued: requeued.length });
+  }
+
+  /** Tell the orchestrator what a restart interrupted and how it resumes. */
+  private restartNotice(resumed: SessionRecord[], requeued: ReturnType<Work['reconcile']>): void {
+    const parts: string[] = [];
+    const turns = resumed.filter((s) => s.kind === 'orchestrator');
+    if (turns.length) parts.push(`interrupted turns were resumed (${turns.map(() => 'the orchestrator').join(', ')})`);
+    if (requeued.length) {
+      const list = requeued.map((i) => `${itemLabel(i)} "${i.title}"`).join(', ');
+      parts.push(`requeued without counting an attempt, each continuing its existing worker session: ${list}`);
+    }
+    if (parts.length) this.orchestrator.push('environment.restarted', `The environment restarted; ${parts.join('; ')}.`);
+  }
+
+  /** The environment takes work: ready (or degraded after a failed update) and not stopping. */
+  private running(): boolean {
+    return (this.state.status === 'ready' || this.state.status === 'degraded') && this.phase === 'serving';
+  }
+
+  /** Run the provisioning stages for a definition and record their fingerprints. */
+  private async provisionNow(record: InstanceRecord, def: DaemonDefinition): Promise<void> {
+    const test = testAdapters !== null;
+    const stages = await provision({
+      paths: this.opts.paths,
+      log: this.opts.log,
+      run: this.run,
+      credentials: this.credentials,
+      definition: def,
+      sha: record.sha,
+      skipPackages: test && this.opts.env.PUCK_SKIP_PACKAGES === '1',
+      gitBase: (test && this.opts.env.PUCK_TEST_GIT_BASE) || 'https://github.com/',
+      prior: record.provisioned?.stages ?? {},
+      privileged: this.opts.privileged,
+      onStage: (stage, detail) => this.onStage(stage, detail),
+    });
+    record.provisioned = { fingerprint: provisionFingerprint(record.sha, stages), at: this.now(), stages };
+    this.instance.save();
+  }
+
+  /* ---------- Definition updates ---------- */
+
+  /**
+   * Apply a new resolution of this environment's definition (`UpdateClass`
+   * in src/harness/definitions/types.ts). Hot changes take effect with the
+   * next turn and dispatch. While a reprovision runs, the scheduler does
+   * not start work. A change that needs a rebuild is refused: the app
+   * recreates the container itself.
+   */
+  private applyDefinition(raw: unknown, pin: Pin): { classes: string[] } {
+    if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');
+    if (this.reprovisioning) throw new OpError('invalid-state', 'An update is already being applied.');
+    const record = this.instance.get();
+    const prev = this.definition;
+    if (!record || !prev) throw new OpError('not-ready', 'The environment is still starting.');
+    const parsed = readDefinition(raw);
+    if (!parsed.ok) throw new OpError('invalid-args', `The definition is invalid: ${parsed.error}`);
+    const next = parsed.value;
+    if (next.name !== prev.name) throw new OpError('invalid-args', `This environment runs "${prev.name}", not "${next.name}".`);
+    const changes = definitionChanges(record.definition, prev, raw, next);
+    const classes = changeClasses(changes);
+    if (classes.includes('rebuild')) {
+      const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
+      throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+    }
+    this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
+    this.definition = next;
+    this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
+    this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
+    if (changes.length) {
+      const shown = changes.slice(0, 8).map((c) => c.summary);
+      const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
+      this.orchestrator.push(
+        'definition.applied',
+        `The environment definition was updated to ${pin.name} (${pin.sha.slice(0, 7)}): ${shown.join('; ')}${more}.`,
+      );
+    }
+    this.ensureOrchestrator(next);
+    this.emitCapacity();
+    this.scheduler.request();
+    if (classes.includes('reprovision')) {
+      this.reprovisioning = true;
+      void this.reprovision();
+    }
+    return { classes };
+  }
+
+  private async reprovision(): Promise<void> {
+    const { log } = this.opts;
+    try {
+      await this.turns.idle();
+      await this.work.idlePrepares();
+      const record = this.instance.get();
+      const def = this.definition;
+      if (this.phase !== 'serving' || !record || !def) return;
+      // Hold every repository's git chain: the mirror fetch (--prune) must not
+      // race a publish that has fetched a branch from its bundle but not pushed it.
+      const locked = def.repos.reduce<() => Promise<void>>(
+        (inner, repo) => () => this.git.serial(repo.dir, inner),
+        () => this.provisionNow(record, def),
+      );
+      await locked();
+      this.setState({ status: 'ready' });
+    } catch (err) {
+      log.error('definition.reprovision-failed', err);
+      const stage = err instanceof ProvisionError ? err.stage : undefined;
+      if (this.phase === 'serving') {
+        this.setState({ status: 'degraded', ...(stage ? { stage } : {}), error: `The update could not be provisioned: ${(err as Error).message}` });
+      }
+    } finally {
+      this.reprovisioning = false;
+      if (this.phase === 'serving') this.turns.startRestored();
+      this.emitCapacity();
+      this.scheduler.request();
+      this.orchestrator.schedule();
+    }
   }
 
   private onStage(stage: ProvisionStage, detail?: string): void {
@@ -241,11 +440,16 @@ export class Daemon {
 
   /* ---------- Agents, env, notices ---------- */
 
-  private agentFor(name: string, worker: boolean): DaemonAgent | null {
+  /**
+   * The effective agent of a session: a worker's agent plus its assignment's
+   * instructions; the orchestrator's agent plus the orchestration preamble.
+   */
+  private agentFor(session: SessionRecord): DaemonAgent | null {
     const def = this.definition;
-    const agent = def?.agentDefs[name];
+    const agent = def?.agentDefs[session.agent];
     if (!def || !agent) return null;
-    const extra = worker ? def.agents.find((a) => a.agent === name)?.instructions ?? '' : '';
+    const extra =
+      session.kind === 'worker' ? def.agents.find((a) => a.agent === session.agent)?.instructions ?? '' : orchestratorPreamble(def);
     return { ...agent, instructions: [agent.instructions, extra].filter(Boolean).join('\n\n') };
   }
 
@@ -257,32 +461,27 @@ export class Daemon {
     return harnessEnv({ home: this.opts.paths.home, lang: this.opts.env.LANG, definitionEnv: def?.env, secrets });
   }
 
-  private pushNotice(kind: 'environment.restarted', text: string): void {
-    this.notices.get().pending.push({ id: newId('ntc', this.now()), kind, at: this.now(), text });
-    this.notices.save();
-  }
-
-  private peekNotices(): Notice[] {
-    return this.notices.get().pending.slice();
-  }
-
-  private commitNotices(count: number): void {
-    if (count <= 0) return;
-    const pending = this.notices.get().pending;
-    const removed = pending.splice(0, count);
-    try {
-      this.notices.commit();
-    } catch (err) {
-      pending.unshift(...removed);
-      throw err;
-    }
-  }
-
-  private capacity(): Capacity {
+  private schedulerView(): SchedulerView | null {
     const def = this.definition;
-    const agents: Capacity['agents'] = {};
-    for (const a of def?.agents ?? []) agents[a.agent] = { running: 0, max: a.maxParallel };
-    return { agents, workers: { running: 0, max: def?.limits.maxWorkers ?? 0 }, paused: this.schedulerPaused };
+    if (!def || !this.backlog) return null;
+    return {
+      items: this.backlog.list(),
+      assignments: Object.fromEntries(def.agents.map((a) => [a.agent, a.maxParallel])),
+      maxWorkers: def.limits.maxWorkers,
+    };
+  }
+
+  private emitCapacity(): void {
+    this.emit({ kind: 'capacity', ...capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false) });
+  }
+
+  private async turnEnded(session: SessionRecord, outcome: TurnOutcome): Promise<void> {
+    if (session.kind === 'worker') {
+      await this.work.workerTurnEnded(session, outcome);
+      return;
+    }
+    this.work.orchestratorTurnEnded(outcome);
+    this.orchestrator.turnEnded();
   }
 
   /* ---------- Commands ---------- */
@@ -294,18 +493,21 @@ export class Daemon {
     if (this.phase !== 'serving' && op !== 'snapshot.get' && op !== 'logs.tail') {
       return Promise.reject(new OpError('not-ready', 'The environment daemon is stopping.'));
     }
-    if (READY_OPS.has(op) && this.state.status !== 'ready') {
+    if (READY_OPS.has(op) && !this.running()) {
       return Promise.reject(new OpError('not-ready', 'The environment is still starting.'));
     }
     return dispatch(this.handlers, op, args).catch((err: unknown) => {
-      if (err instanceof TurnsError) throw new OpError(err.code, err.message);
+      if (err instanceof TurnsError || err instanceof WorkError) throw new OpError(err.code, err.message);
+      if (err instanceof ItemStateError) throw new OpError('invalid-state', err.message);
       throw err;
     });
   }
 
-  private unavailable = (): never => {
-    throw new OpError('invalid-state', 'Work items and definition updates are not available in this daemon version.');
-  };
+  /** Item ops need the backlog, which exists once state migrated. */
+  private get items(): Work {
+    if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
+    return this.work;
+  }
 
   private readonly handlers: Handlers = {
     'snapshot.get': () => this.snapshot(),
@@ -317,7 +519,12 @@ export class Daemon {
       const target = sessionId ?? this.turns.orchestrator()?.id;
       if (!target) throw new OpError('not-ready', 'This environment has no orchestrator session yet.');
       const session = this.turns.get(target);
-      if (session?.kind === 'worker') throw new OpError('invalid-state', 'Worker follow-ups are not available in this daemon version.');
+      if (session?.kind === 'worker') {
+        const item = session.itemId ? this.backlog.get(session.itemId) : null;
+        if (!item || item.sessionId !== session.id) throw new OpError('invalid-state', 'This worker session no longer belongs to a work item.');
+        return this.items.followUp(item.id, text, 'user');
+      }
+      if (session?.kind === 'orchestrator') this.orchestrator.userMessage();
       return this.turns.send(target, text, 'user');
     },
     'session.interrupt': ({ sessionId }) => {
@@ -329,16 +536,26 @@ export class Daemon {
       if (!this.turns?.answer(sessionId, askId, answers)) throw new OpError('not-found', 'That question is no longer open.');
       return {};
     },
-    'item.create': this.unavailable,
-    'item.update': this.unavailable,
-    'item.move': this.unavailable,
-    'item.assign': this.unavailable,
-    'item.cancel': this.unavailable,
-    'item.retry': this.unavailable,
-    'item.accept': this.unavailable,
-    'item.publish': this.unavailable,
-    'item.delete': this.unavailable,
-    'definition.apply': this.unavailable,
+    'item.create': ({ title, body, agent, repo, position }) => publicItem(this.items.create({ title, body, agent, repo, position }, 'user')),
+    'item.update': ({ itemId, title, body, repo }) =>
+      publicItem(
+        this.items.update(
+          itemId,
+          { ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(repo !== undefined ? { repo } : {}) },
+          'user',
+        ),
+      ),
+    'item.move': ({ itemId, position }) => ({ order: this.items.move(itemId, position) }),
+    'item.assign': ({ itemId, agent }) => publicItem(this.items.assign(itemId, agent, 'user')),
+    'item.cancel': ({ itemId }) => publicItem(this.items.cancel(itemId, 'user')),
+    'item.retry': ({ itemId }) => publicItem(this.items.retry(itemId)),
+    'item.accept': ({ itemId }) => publicItem(this.items.accept(itemId)),
+    'item.publish': ({ itemId }) => this.items.publish(itemId, {}, 'user'),
+    'item.delete': async ({ itemId }) => {
+      await this.items.remove(itemId);
+      return {};
+    },
+    'definition.apply': ({ definition, pin }) => this.applyDefinition(definition, pin),
     'credentials.put': async ({ harness }) => {
       for (const { id, content } of harness) {
         try {
@@ -353,8 +570,8 @@ export class Daemon {
       const ids = this.definition ? referencedHarnesses(this.definition) : harnessDescriptors.map((d) => d.id);
       return { harness: await this.credentials.getHarness(ids) };
     },
-    'github.put': ({ token }) => {
-      if (!this.credentials.putGithub(token)) throw new OpError('invalid-args', 'That is not a usable GitHub credential.');
+    'github.put': ({ grants }) => {
+      if (!this.credentials.putGithub({ grants })) throw new OpError('invalid-args', 'That is not a usable set of GitHub grants.');
       this.emit({ kind: 'github.auth', ...this.credentials.githubAuth() });
       return {};
     },
@@ -363,13 +580,13 @@ export class Daemon {
       return {};
     },
     'scheduler.pause': () => {
-      this.schedulerPaused = true;
-      this.emit({ kind: 'capacity', ...this.capacity() });
+      this.scheduler?.pause();
+      this.emitCapacity();
       return {};
     },
     'scheduler.resume': () => {
-      this.schedulerPaused = false;
-      this.emit({ kind: 'capacity', ...this.capacity() });
+      this.scheduler?.resume();
+      this.emitCapacity();
       return {};
     },
     'daemon.upgrade': ({ mode }) => this.upgrade(mode),
@@ -389,9 +606,9 @@ export class Daemon {
       github: this.credentials.githubAuth(),
       sessions: sessions.map((s) => this.turns.summary(s)),
       orchestratorSessionId: this.turns?.orchestrator()?.id ?? null,
-      items: [],
-      order: [],
-      capacity: this.capacity(),
+      items: this.backlog ? this.backlog.list().map(publicItem) : [],
+      order: this.backlog ? this.backlog.order() : [],
+      capacity: capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false),
       inflight: this.turns ? this.turns.inflight() : [],
       asks: this.turns ? this.turns.openAsks() : [],
     };
@@ -401,7 +618,7 @@ export class Daemon {
 
   /**
    * Swap in the bundle staged at puckd.next.js. Refused unless the daemon
-   * is ready and serving. Stops taking input, waits for running turns
+   * is serving and ready (or degraded after a failed update). Stops taking input, waits for running turns
    * (drain) or interrupts them within the shutdown grace (now), then
    * persists, renames the bundle into place, and exits 75. The response
    * goes out before that work. If the grace runs out, or persist or the
@@ -411,7 +628,7 @@ export class Daemon {
    */
   private upgrade(mode: 'drain' | 'now'): Record<string, never> {
     if (this.phase !== 'serving') throw new OpError('invalid-state', 'An upgrade or shutdown is already in progress.');
-    if (this.state.status !== 'ready') throw new OpError('not-ready', 'The environment is still starting.');
+    if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');
     const { paths, log } = this.opts;
     let st: fs.Stats;
     try {
@@ -425,6 +642,8 @@ export class Daemon {
       this.emit({ kind: 'daemon.upgrading', mode });
       log.info('daemon.upgrade', { mode });
       this.turns?.stopAccepting();
+      this.scheduler?.stop();
+      this.orchestrator?.stop();
     } catch (err) {
       log.error('daemon.upgrade-failed', err);
       void this.finishExit(1);
@@ -477,6 +696,8 @@ export class Daemon {
     this.phase = 'shutting-down';
     this.server?.stopAccepting();
     this.turns?.stopAccepting();
+    this.scheduler?.stop();
+    this.orchestrator?.stop();
     this.opts.log.info('daemon.shutdown');
     let code = 0;
     try {

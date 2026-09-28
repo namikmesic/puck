@@ -13,6 +13,8 @@
 
 import { harnessDescriptorById } from '../harness/providers';
 import type { SettingsMap } from '../harness/options';
+import { diffEnvironments } from '../harness/definitions/diff';
+import type { DefinitionChange, ResolvedEnvironment, UpdateClass } from '../harness/definitions/types';
 
 export interface DaemonAgent {
   name: string;
@@ -194,4 +196,52 @@ function parse(raw: unknown): DaemonDefinition {
 /** Harness ids the definition's agents use (provisioning installs only these). */
 export function referencedHarnesses(def: DaemonDefinition): string[] {
   return [...new Set(Object.values(def.agentDefs).map((a) => a.harness))];
+}
+
+/**
+ * A delivered definition as the update-class diff reads it. The daemon keeps
+ * the raw JSON the app delivered and reads it leniently, so both sides of an
+ * update are rebuilt from the daemon's reading (defaults applied the same
+ * way) plus the container fields only the raw JSON carries.
+ */
+function diffable(raw: unknown, def: DaemonDefinition): ResolvedEnvironment {
+  const r = isObj(raw) ? raw : {};
+  const resources = isObj(r.resources) ? r.resources : {};
+  const rawAgents = isObj(r.agentDefinitions) ? r.agentDefinitions : {};
+  const agentDefinitions: ResolvedEnvironment['agentDefinitions'] = {};
+  for (const [name, a] of Object.entries(def.agentDefs)) {
+    const rawAgent = isObj(rawAgents[name]) ? (rawAgents[name] as Obj) : {};
+    agentDefinitions[name] = { ...a, instructionsFile: str(rawAgent.instructionsFile) || null };
+  }
+  return {
+    resolverVersion: 1,
+    source: { repo: '', pin: { kind: 'commit', name: '', sha: '' }, path: '' },
+    name: def.name,
+    description: def.description,
+    image: typeof r.image === 'string' ? r.image : null,
+    dockerfile: isObj(r.dockerfile) ? { path: str(r.dockerfile.path), blob: str(r.dockerfile.blob) } : null,
+    resources: {
+      cpus: typeof resources.cpus === 'number' ? resources.cpus : null,
+      memory: typeof resources.memory === 'string' ? resources.memory : null,
+    },
+    repos: def.repos,
+    orchestrator: def.orchestrator,
+    agents: def.agents,
+    limits: def.limits,
+    policies: def.policies,
+    git: def.git,
+    env: def.env,
+    secrets: def.secrets,
+    agentDefinitions,
+  };
+}
+
+/** What changed between the applied definition and a new one, each change classed hot, reprovision or rebuild. */
+export function definitionChanges(prevRaw: unknown, prev: DaemonDefinition, nextRaw: unknown, next: DaemonDefinition): DefinitionChange[] {
+  return diffEnvironments(diffable(prevRaw, prev), diffable(nextRaw, next));
+}
+
+export function changeClasses(changes: readonly DefinitionChange[]): UpdateClass[] {
+  const order: UpdateClass[] = ['hot', 'reprovision', 'rebuild'];
+  return order.filter((cls) => changes.some((c) => c.class === cls));
 }

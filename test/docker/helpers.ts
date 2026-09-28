@@ -99,7 +99,10 @@ export interface Env {
  * bundle and the inbox files are copied in (root-owned), exactly as the app
  * will deliver them; nothing from the host is mounted.
  */
-export async function startEnv(inbox: Record<string, unknown>): Promise<Env> {
+export async function startEnv(
+  inbox: Record<string, unknown>,
+  opts: { env?: Record<string, string>; definition?: Record<string, unknown>; installPackages?: boolean } = {},
+): Promise<Env> {
   const envId = newId('env');
   const tag = envId.slice(-10).toLowerCase();
   const container = `puck-test-${tag}`;
@@ -116,10 +119,10 @@ export async function startEnv(inbox: Record<string, unknown>): Promise<Env> {
     'unless-stopped',
     '--security-opt',
     'no-new-privileges:true',
-    '-e',
-    'PUCK_SKIP_PACKAGES=1',
+    ...(opts.installPackages ? [] : ['-e', 'PUCK_SKIP_PACKAGES=1']),
     '-e',
     'PUCK_TEST_GIT_BASE=file:///srv/git/',
+    ...Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     '-v',
     `${volumes[0]}:/puck`,
     '-v',
@@ -134,7 +137,8 @@ export async function startEnv(inbox: Record<string, unknown>): Promise<Env> {
     fs.mkdirSync(path.join(stage, 'opt', 'puck'), { recursive: true });
     fs.copyFileSync(TEST_BUNDLE, path.join(stage, 'opt', 'puck', 'puckd.js'));
     fs.mkdirSync(path.join(stage, 'puck', 'inbox'), { recursive: true });
-    for (const [name, body] of Object.entries({ 'instance.json': { envId, name: 'Example', definition: definition() }, ...inbox })) {
+    const instance = { envId, name: 'Example', definition: opts.definition ?? definition() };
+    for (const [name, body] of Object.entries({ 'instance.json': instance, ...inbox })) {
       fs.writeFileSync(path.join(stage, 'puck', 'inbox', name), typeof body === 'string' ? body : JSON.stringify(body));
     }
     await must(['cp', `${stage}/.`, `${container}:/`]);
@@ -250,6 +254,72 @@ export async function waitReady(container: string, timeoutMs = 120_000): Promise
 export async function exec(container: string, args: string[], user?: string): Promise<Result> {
   return docker(['exec', ...(user ? ['-u', user] : []), container, ...args]);
 }
+
+/** Copy a file into a running container. */
+export async function copyIn(container: string, content: string, dest: string): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-copy-'));
+  try {
+    const file = path.join(dir, path.basename(dest));
+    fs.writeFileSync(file, content);
+    await must(['cp', file, `${container}:${dest}`]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Poll `snapshot.get` until `pred` holds for the snapshot. */
+export async function untilSnapshot(
+  client: ReturnType<typeof attachClient>,
+  pred: (snap: Snapshot) => boolean,
+  timeoutMs = 60_000,
+): Promise<Snapshot> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const snap = await client.cmd<Snapshot>('snapshot.get');
+    if (pred(snap)) return snap;
+    if (Date.now() > deadline) throw new Error(`snapshot never matched: ${JSON.stringify(snap.items).slice(0, 2000)}`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/**
+ * A stand-in for GitHub's pull request API, run inside the container on
+ * 127.0.0.1:8787. It keeps pull requests in memory and appends every
+ * request (method, path, authorization, body) to /srv/github.log.
+ */
+export const FAKE_GITHUB = `
+const http = require('http');
+const fs = require('fs');
+const pulls = [];
+http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => (body += d));
+  req.on('end', () => {
+    const json = body ? JSON.parse(body) : null;
+    fs.appendFileSync('/srv/github.log', JSON.stringify({ method: req.method, url: req.url, auth: req.headers.authorization || null, body: json }) + '\\n');
+    const url = new URL(req.url, 'http://x');
+    const send = (status, value) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
+    const m = /^\\/repos\\/([^/]+)\\/([^/]+)\\/pulls(?:\\/(\\d+))?$/.exec(url.pathname);
+    if (!m) return send(404, { message: 'Not Found' });
+    if (req.method === 'GET') {
+      const head = url.searchParams.get('head');
+      return send(200, pulls.filter((p) => p.state === 'open' && (!head || head === m[1] + ':' + p.head.ref)));
+    }
+    if (req.method === 'POST') {
+      const pr = { number: pulls.length + 1, html_url: 'https://github.com/' + m[1] + '/' + m[2] + '/pull/' + (pulls.length + 1), state: 'open', draft: !!json.draft, title: json.title, body: json.body, head: { ref: json.head, sha: '' }, base: { ref: json.base } };
+      pulls.push(pr);
+      return send(201, pr);
+    }
+    if (req.method === 'PATCH') {
+      const pr = pulls.find((p) => p.number === Number(m[3]));
+      if (!pr) return send(404, { message: 'Not Found' });
+      Object.assign(pr, json);
+      return send(200, pr);
+    }
+    send(405, { message: 'Method not allowed' });
+  });
+}).listen(8787, '127.0.0.1');
+`;
 
 /** Every harness event of one turn, in order. */
 export function turnEvents(frames: EventFrame[], turnId: string) {
