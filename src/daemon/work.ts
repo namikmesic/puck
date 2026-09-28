@@ -294,7 +294,23 @@ export class Work {
   accept(ref: string, note?: string): ItemRecord {
     const item = this.item(ref);
     const acceptNote = note?.trim() ? note.trim() : null;
-    return this.guard(() => this.deps.backlog.transition(item, 'accept', { lastError: null, ...(acceptNote ? { acceptNote } : {}) }));
+    const held = holdsSlot(item.status);
+    const sessionId = item.sessionId;
+    const stop = !!sessionId && (item.status === 'queued' || held);
+    const updated = this.guard(() =>
+      this.deps.backlog.transition(item, 'accept', {
+        lastError: null,
+        requeue: null,
+        pendingAsk: null,
+        ...(acceptNote ? { acceptNote } : {}),
+      }),
+    );
+    if (stop && sessionId) {
+      this.deps.turns.clearQueue(sessionId);
+      this.deps.turns.interrupt(sessionId, 'user');
+    }
+    if (held) this.deps.slotsChanged();
+    return updated;
   }
 
   /**

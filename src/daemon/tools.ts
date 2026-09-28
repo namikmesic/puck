@@ -178,7 +178,7 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
     },
     {
       name: 'work_accept',
-      description: 'Accept a work item in review: it moves to done.',
+      description: 'Accept a work item and move it to done. One that is queued, running or waiting stops its worker and drops follow-ups still queued.',
       shape: (z) => ({ item: itemRef(zod(z)), note: zod(z).string().max(2000).optional() }),
       run: (a: Args) => compact(work.accept(str(a.item), typeof a.note === 'string' ? a.note : undefined)),
     },

@@ -230,8 +230,9 @@ export class GitHubApi {
     return this.poll(repo, `${repoPath(repo)}/pulls/${number}/comments?per_page=100`);
   }
 
-  replyToReviewComment(repo: string, pull: number, commentId: number, body: string): Promise<GhComment> {
-    return this.post(repo, `${repoPath(repo)}/pulls/${pull}/comments/${commentId}/replies`, { body });
+  /** Repository permission for `login`: `admin`, `maintain`, `write`, `triage`, `read` or `none`. */
+  collaboratorPermission(repo: string, login: string): Promise<{ permission?: string }> {
+    return this.get(repo, `${repoPath(repo)}/collaborators/${seg(login)}/permission`);
   }
 
   checkRuns(repo: string, sha: string): Promise<Polled<{ check_runs: GhCheckRun[] }>> {

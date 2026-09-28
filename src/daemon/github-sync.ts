@@ -16,18 +16,20 @@
  *     dispatch and edited in place. Its hidden marker names the
  *     environment and the item, so a comment whose id was never recorded
  *     (a crash right after creating it) is found again, not duplicated.
- *   - Published pull requests: merged moves an item in review to done;
+ *   - Published pull requests: merged moves the item to done, including
+ *     one queued, running or waiting on a follow-up (that worker stops);
  *     closed without merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
- *     redacted log tails of failed workflow jobs. The settled result is a
- *     notice; `ci: fix` also queues a follow-up to the worker, up to
- *     `maxCiFixAttempts`.
+ *     redacted log tails of failed workflow jobs. A success or failure is
+ *     a notice; `ci: fix` also queues a follow-up whenever the item can
+ *     take one, up to `maxCiFixAttempts`. Nothing reported settles as
+ *     neutral and stays watched, so a check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback
- *     from people with write access (author association OWNER, MEMBER or
- *     COLLABORATOR, never a bot) reaches an agent; the rest is kept,
- *     marked untrusted, for the user only. `reviews: address` also queues
- *     the feedback to the worker, at most MAX_REVIEW_ROUNDS times, and
- *     after the next publish Puck answers each addressed thread once.
+ *     from a person whose repository permission is admin, maintain or
+ *     write reaches an agent; a bot, a weaker permission, or a permission
+ *     that could not be read does not. The rest is kept, marked untrusted,
+ *     for the user only. `reviews: address` also queues the feedback to
+ *     the worker, at most MAX_REVIEW_ROUNDS times.
  *
  * Puck writes only to issues linked to its own items, and never labels,
  * assignees, Projects fields or thread resolutions. CI never changes an
@@ -91,8 +93,8 @@ export const LIMITS = {
   toolBytes: 16 * 1024,
 } as const;
 
-/** Author associations that mean write access to the repository. */
-export const WRITE_ACCESS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+/** Repository permissions that may write. Anything else, including a permission that could not be read, is not trusted. */
+const WRITE_PERMISSIONS: ReadonlySet<string> = new Set(['admin', 'maintain', 'write']);
 const CLOSED: ReadonlySet<WorkItem['status']> = new Set(['done', 'cancelled']);
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
 
@@ -128,11 +130,6 @@ export interface GithubSyncDeps {
 
 export function isBot(user: { login?: string; type?: string } | null | undefined): boolean {
   return !user || user.type === 'Bot' || /\[bot\]$/i.test(user.login ?? '');
-}
-
-/** The trust filter: write access, and a person rather than a bot. */
-export function trusted(entry: { user: { login?: string; type?: string } | null; author_association?: string }): boolean {
-  return !isBot(entry.user) && WRITE_ACCESS.has(String(entry.author_association ?? '').toUpperCase());
 }
 
 export function statusMarker(envId: string, itemId: string): string {
@@ -247,6 +244,8 @@ export class GithubSync {
   private blockedUntil = 0;
   /** Poll targets skipped for want of a token; they run as soon as grants arrive. */
   private readonly waitingForGrant = new Set<string>();
+  /** `repo\0login` → write / no / unread, for the current poll only. */
+  private readonly access = new Map<string, 'write' | 'no' | 'unread'>();
   private readonly now: () => number;
   private readonly timers: Timers;
 
@@ -336,6 +335,7 @@ export class GithubSync {
     const def = this.deps.definition();
     if (!def || !this.deps.canRun()) return;
     if (this.now() < this.blockedUntil) return;
+    this.access.clear();
     this.prune();
     const gh = def.policies.github;
     if (gh.intake === 'label') {
@@ -349,7 +349,7 @@ export class GithubSync {
       const s = this.deps.store.get().items[item.id];
       if (item.pr && this.watchesPull(item, s)) await this.step(`pull:${item.id}`, POLL.pullMs, () => this.pollPull(item.id));
       const ci = this.deps.store.get().items[item.id]?.ci;
-      if (item.pr && ci?.state === 'pending' && this.watchesPull(item, s)) {
+      if (item.pr && ci && ci.notified !== ci.sha && this.watchesPull(item, s)) {
         await this.step(`checks:${item.id}`, POLL.checksMs, () => this.pollChecks(item.id));
       }
       if (item.source && gh.statusComment) {
@@ -429,6 +429,23 @@ export class GithubSync {
 
   private label(item: ItemRecord): string {
     return `${itemLabel(item)} "${oneLine(item.title, 120)}"`;
+  }
+
+  private async repoAccess(repo: string, user: { login?: string; type?: string } | null | undefined): Promise<'write' | 'no' | 'unread'> {
+    if (isBot(user) || !user?.login) return 'no';
+    const key = `${repo.toLowerCase()}\0${user.login.toLowerCase()}`;
+    const hit = this.access.get(key);
+    if (hit) return hit;
+    let result: 'write' | 'no' | 'unread';
+    try {
+      const body = await this.deps.api.collaboratorPermission(repo, user.login);
+      result = WRITE_PERMISSIONS.has(String(body?.permission ?? '').toLowerCase()) ? 'write' : 'no';
+    } catch (err) {
+      if (err instanceof GitHubRateLimitError) throw err;
+      result = err instanceof GitHubApiError && err.status === 404 ? 'no' : 'unread';
+    }
+    this.access.set(key, result);
+    return result;
   }
 
   /** Patch the public pull request fields (no event when nothing changed). */
@@ -562,7 +579,12 @@ export class GithubSync {
     let comments: IssueComment[] | null;
     try {
       const { data } = await this.deps.api.issueComments(src.repo, src.number, 0);
-      const kept = (Array.isArray(data) ? data : []).filter((c) => trusted(c) && !isStatusComment(c.body));
+      const list = Array.isArray(data) ? data : [];
+      const kept: typeof list = [];
+      for (const c of list) {
+        if (isStatusComment(c.body)) continue;
+        if ((await this.repoAccess(src.repo, c.user)) === 'write') kept.push(c);
+      }
       comments = [];
       let bytes = 0;
       // Newest first while they fit, then shown newest last.
@@ -632,8 +654,20 @@ export class GithubSync {
       (c) => !s.issueSeen.includes(c.id) && parseTime(c.created_at, 0) >= createdAt,
     );
     if (!fresh.length) return;
-    s.issueSeen = [...s.issueSeen, ...fresh.map((c) => c.id)].slice(-LIMITS.seenKept);
-    const passed = fresh.filter((c) => c.id !== s.statusCommentId && !isStatusComment(c.body) && trusted(c));
+    const decided: number[] = [];
+    const passed: GhComment[] = [];
+    for (const c of fresh) {
+      if (c.id === s.statusCommentId || isStatusComment(c.body) || isBot(c.user)) {
+        decided.push(c.id);
+        continue;
+      }
+      const access = await this.repoAccess(src.repo, c.user);
+      if (access === 'unread') continue;
+      decided.push(c.id);
+      if (access === 'write') passed.push(c);
+    }
+    if (!decided.length) return;
+    s.issueSeen = [...s.issueSeen, ...decided].slice(-LIMITS.seenKept);
     if (passed.length) {
       const said = passed.map((c) => `@${c.user?.login ?? 'someone'} commented: "${oneLine(c.body ?? '', 300)}"`).join(' ');
       this.deps.notify('issue.commented', `Issue ${ref} (${this.label(item)}): ${said}`, item.id);
@@ -690,7 +724,7 @@ export class GithubSync {
 
   /* ---------- Pull requests ---------- */
 
-  /** After a publish: watch the new head's CI, and answer the threads the last review follow-up addressed. */
+  /** After a publish: watch the new head's CI. */
   async published(itemId: string): Promise<void> {
     const item = this.deps.backlog.get(itemId);
     const repo = item ? this.repoOf(item) : null;
@@ -706,20 +740,8 @@ export class GithubSync {
     s.headSha = pr.lastPushedSha;
     s.ci = this.watch(pr.lastPushedSha);
     this.last.set(`checks:${item.id}`, this.now());
-    const replies = s.pendingReplies.filter((id) => !s.replied.includes(id));
-    s.pendingReplies = [];
     this.save();
     this.patchPr(item, { state: 'open', checks: { sha: pr.lastPushedSha, state: 'pending', failing: [] } });
-    for (const id of replies) {
-      try {
-        await this.deps.api.replyToReviewComment(repo.github, pr.number, id, `Addressed in ${pr.lastPushedSha.slice(0, 7)}.`);
-        s.replied = [...s.replied, id].slice(-LIMITS.seenKept);
-      } catch (err) {
-        if (!isGone(err)) s.pendingReplies.push(id);
-        this.failed(`reply:${item.id}`, err);
-      }
-    }
-    this.save();
     this.kick();
   }
 
@@ -752,11 +774,18 @@ export class GithubSync {
       this.save();
       this.patchPr(item, { state });
       if (state === 'merged') {
-        const moved = item.status === 'review';
-        if (moved) this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub.`);
+        const duringFollowUp = item.status === 'queued' || holdsSlot(item.status);
+        const moved = item.status === 'review' || duringFollowUp;
+        if (moved) {
+          const during = duringFollowUp ? ' during a follow-up' : '';
+          this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}.`);
+        }
+        const stayed = this.deps.backlog.get(item.id)?.status ?? item.status;
         this.deps.notify(
           'pr.merged',
-          `${this.label(item)}: pull request #${pr.number} was merged on GitHub${moved ? ', so the item is done' : `; the item is ${item.status}`}.`,
+          moved
+            ? `${this.label(item)}: pull request #${pr.number} was merged on GitHub${duringFollowUp ? ' during a follow-up' : ''}, so the item is done.`
+            : `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is ${stayed}.`,
           item.id,
         );
       } else if (state === 'closed') {
@@ -776,44 +805,41 @@ export class GithubSync {
     ]);
     const fresh: Feedback[] = [];
     const seen = new Set(s.seen);
-    const add = (f: Feedback): void => {
-      seen.add(f.key);
-      fresh.push(f);
+    const take = async (
+      key: string,
+      user: { login?: string; type?: string } | null,
+      build: (trusted: boolean) => Feedback,
+    ): Promise<void> => {
+      if (seen.has(key)) return;
+      if (isBot(user)) {
+        seen.add(key);
+        return;
+      }
+      const access = await this.repoAccess(repo.github, user);
+      if (access === 'unread') return;
+      seen.add(key);
+      fresh.push(build(access === 'write'));
     };
     for (const r of (Array.isArray(reviews.data) ? reviews.data : []) as GhReview[]) {
-      const key = `r${r.id}`;
-      if (seen.has(key) || r.state === 'PENDING') continue;
-      if (isBot(r.user)) {
-        seen.add(key);
-        continue;
-      }
-      add(this.entry('review', r, { state: r.state, at: parseTime(r.submitted_at, this.now()) }));
+      if (r.state === 'PENDING') continue;
+      await take(`r${r.id}`, r.user, (trusted) => this.entry('review', r, trusted, { state: r.state, at: parseTime(r.submitted_at, this.now()) }));
     }
     for (const c of (Array.isArray(inline.data) ? inline.data : []) as GhReviewComment[]) {
-      const key = `c${c.id}`;
-      if (seen.has(key)) continue;
-      if (isBot(c.user)) {
-        seen.add(key);
-        continue;
-      }
-      add(
-        this.entry('inline', c, {
+      await take(`c${c.id}`, c.user, (trusted) =>
+        this.entry('inline', c, trusted, {
           path: c.path,
           line: c.line ?? c.original_line ?? null,
           diffHunk: capBytes(c.diff_hunk ?? '', LIMITS.hunkBytes),
-          thread: c.in_reply_to_id ?? c.id,
           at: parseTime(c.created_at, this.now()),
         }),
       );
     }
     for (const c of (Array.isArray(convo.data) ? convo.data : []) as GhComment[]) {
-      const key = `i${c.id}`;
-      if (seen.has(key)) continue;
-      if (isBot(c.user) || isStatusComment(c.body)) {
-        seen.add(key);
+      if (isStatusComment(c.body)) {
+        seen.add(`i${c.id}`);
         continue;
       }
-      add(this.entry('comment', c, { at: parseTime(c.created_at, this.now()) }));
+      await take(`i${c.id}`, c.user, (trusted) => this.entry('comment', c, trusted, { at: parseTime(c.created_at, this.now()) }));
     }
     s.seen = [...seen].slice(-LIMITS.seenKept);
     if (!fresh.length) return;
@@ -827,6 +853,7 @@ export class GithubSync {
   private entry(
     kind: Feedback['kind'],
     c: { id: number; user: { login?: string } | null; author_association?: string; body: string | null; html_url: string },
+    trusted: boolean,
     extra: Partial<Feedback> & { at: number },
   ): Feedback {
     return {
@@ -835,7 +862,7 @@ export class GithubSync {
       id: c.id,
       author: c.user?.login ?? 'someone',
       association: String(c.author_association ?? 'NONE'),
-      trusted: trusted(c as Parameters<typeof trusted>[0]),
+      trusted,
       body: capBytes((c.body ?? '').trim(), LIMITS.feedbackBodyBytes),
       url: c.html_url,
       ...extra,
@@ -868,8 +895,6 @@ export class GithubSync {
         extra = ` The automatic review rounds (${MAX_REVIEW_ROUNDS}) are used up; read it with pr_read and decide.`;
       } else if (open && item.sessionId) {
         s.reviewRounds += 1;
-        const threads = actionable.filter((f) => f.kind === 'inline' && f.thread !== undefined).map((f) => f.thread as number);
-        s.pendingReplies = [...new Set([...s.pendingReplies, ...threads])].filter((id) => !s.replied.includes(id));
         this.save();
         const text = reviewPrompt(
           pr.number,
@@ -896,7 +921,7 @@ export class GithubSync {
     const repo = item ? this.repoOf(item) : null;
     const s = this.deps.store.get().items[itemId];
     const ci = s?.ci;
-    if (!item?.pr || !repo || !ci || ci.state !== 'pending') return;
+    if (!item?.pr || !repo || !ci || ci.notified === ci.sha) return;
     const [runs, status] = await Promise.all([this.deps.api.checkRuns(repo.github, ci.sha), this.deps.api.combinedStatus(repo.github, ci.sha)]);
     const result = evaluateChecks(runs.data?.check_runs ?? [], status.data ?? null);
     const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
@@ -913,10 +938,7 @@ export class GithubSync {
     ci.state = state;
     this.save();
     this.patchPr(item, { checks: { sha: ci.sha, state, failing: ci.failing } });
-    if (state === 'pending' || ci.notified === ci.sha) return;
-    ci.notified = ci.sha;
-    this.save();
-    if (state === 'neutral') return; // nothing reported: nothing to say
+    if (state === 'pending' || state === 'neutral' || ci.notified === ci.sha) return;
     this.ciSettled(item, ci, result.passed);
   }
 
@@ -946,27 +968,30 @@ export class GithubSync {
     if (!def || !pr) return;
     const s = this.syncOf(item.id);
     const gh = def.policies.github;
+    let text: string;
     if (ci.state === 'success') {
       s.ciFixAttempts = 0;
-      this.save();
-      this.deps.notify('pr.checks', `${itemLabel(item)} PR #${pr.number}: all ${plural(passed, 'check')} passed.`, item.id);
-      return;
-    }
-    const names = ci.failing.map((f) => f.name);
-    const shown = names.slice(0, 6).join(', ') + (names.length > 6 ? `, and ${names.length - 6} more` : '');
-    let extra = ' Read them with ci_read.';
-    if (gh.ci === 'fix') {
-      if (s.ciFixAttempts >= gh.maxCiFixAttempts) {
-        extra = ` The automatic fix attempts (${gh.maxCiFixAttempts}) are used up; read them with ci_read and decide.`;
-      } else if (item.status === 'review' && item.sessionId) {
-        s.ciFixAttempts += 1;
-        this.save();
-        const text = ciFixPrompt({ pr: pr.number, sha: ci.sha, failing: ci.failing, logs: ci.logs });
-        this.deps.work.followUp(item.id, text, 'system').catch((err: unknown) => this.failed(`ci-follow-up:${item.id}`, err));
-        extra = ` Queued a fix to the worker (attempt ${s.ciFixAttempts} of ${gh.maxCiFixAttempts}).`;
+      text = `${itemLabel(item)} PR #${pr.number}: all ${plural(passed, 'check')} passed.`;
+    } else {
+      const names = ci.failing.map((f) => f.name);
+      const shown = names.slice(0, 6).join(', ') + (names.length > 6 ? `, and ${names.length - 6} more` : '');
+      let extra = ' Read them with ci_read.';
+      const canFollowUp = !!item.sessionId && (item.status === 'review' || item.status === 'queued' || holdsSlot(item.status));
+      if (gh.ci === 'fix') {
+        if (s.ciFixAttempts >= gh.maxCiFixAttempts) {
+          extra = ` The automatic fix attempts (${gh.maxCiFixAttempts}) are used up; read them with ci_read and decide.`;
+        } else if (canFollowUp) {
+          s.ciFixAttempts += 1;
+          const fix = ciFixPrompt({ pr: pr.number, sha: ci.sha, failing: ci.failing, logs: ci.logs });
+          this.deps.work.followUp(item.id, fix, 'system').catch((err: unknown) => this.failed(`ci-follow-up:${item.id}`, err));
+          extra = ` Queued a fix to the worker (attempt ${s.ciFixAttempts} of ${gh.maxCiFixAttempts}).`;
+        }
       }
+      text = `${itemLabel(item)} PR #${pr.number}: ${plural(ci.failing.length, 'check')} failed (${shown}).${extra}`;
     }
-    this.deps.notify('pr.checks', `${itemLabel(item)} PR #${pr.number}: ${plural(ci.failing.length, 'check')} failed (${shown}).${extra}`, item.id);
+    this.deps.notify('pr.checks', text, item.id);
+    ci.notified = ci.sha;
+    this.save();
   }
 
   /* ---------- Tool reads ---------- */

@@ -1,7 +1,7 @@
 /**
  * github.json: what the GitHub workflow remembers per work item, so a
- * restart neither repeats a notice nor loses a thread to answer. The
- * status comment's id and last text; the pull request's state and head;
+ * restart neither repeats a notice nor misses one that was not delivered.
+ * The status comment's id and last text; the pull request's state and head;
  * which comments and reviews were already seen; feedback kept for
  * `pr_read` (and, marked untrusted, for the user only); CI results and
  * their redacted log tails; and the follow-up counters that stop loops.
@@ -27,8 +27,6 @@ export interface Feedback {
   path?: string;
   line?: number | null;
   diffHunk?: string;
-  /** The thread an inline comment belongs to (its root comment). */
-  thread?: number;
   body: string;
   url: string;
   at: number;
@@ -44,7 +42,7 @@ export interface CiWatch {
   logs: { name: string; text: string }[];
   /** Failed workflow runs, for ci_rerun. */
   failedRuns: number[];
-  /** The sha whose settled state was last reported to the orchestrator. */
+  /** The sha whose success or failure was reported. Neutral is not reported, so a later check still is. */
   notified: string | null;
 }
 
@@ -60,9 +58,6 @@ export interface ItemSync {
   headSha: string | null;
   seen: string[];
   feedback: Feedback[];
-  /** Inline threads a queued review follow-up addressed; answered after the next publish. */
-  pendingReplies: number[];
-  replied: number[];
   reviewRounds: number;
   ci: CiWatch | null;
   ciFixAttempts: number;
@@ -84,8 +79,6 @@ export function emptySync(): ItemSync {
     headSha: null,
     seen: [],
     feedback: [],
-    pendingReplies: [],
-    replied: [],
     reviewRounds: 0,
     ci: null,
     ciFixAttempts: 0,
@@ -107,8 +100,6 @@ function normalizeSync(raw: Partial<ItemSync>): ItemSync {
     headSha: typeof raw.headSha === 'string' ? raw.headSha : null,
     seen: Array.isArray(raw.seen) ? raw.seen.filter((k): k is string => typeof k === 'string') : [],
     feedback: Array.isArray(raw.feedback) ? raw.feedback.filter((f) => f && typeof f.key === 'string') : [],
-    pendingReplies: nums(raw.pendingReplies),
-    replied: nums(raw.replied),
     reviewRounds: typeof raw.reviewRounds === 'number' ? raw.reviewRounds : 0,
     ci: raw.ci && typeof raw.ci.sha === 'string' ? { ...raw.ci, logs: raw.ci.logs ?? [], failedRuns: nums(raw.ci.failedRuns) } : base.ci,
     ciFixAttempts: typeof raw.ciFixAttempts === 'number' ? raw.ciFixAttempts : 0,
