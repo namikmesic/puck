@@ -99,7 +99,7 @@ export interface TurnsDeps {
   /** Extra summary fields (the orchestrator's auto-wake state). */
   summaryExtra?(session: SessionRecord): Partial<SessionSummary>;
   now?: () => number;
-  /** How often a held `turn.end` is retried. */
+  /** How often a held end is retried: the transcript commit, then `turn.end`, then a start that waited. */
   endRetryMs?: number;
 }
 
@@ -556,7 +556,8 @@ export class Turns {
 
   /**
    * Queue an input. Starts a turn right away when the session is idle and
-   * no `turn.end` for it is still unsent; otherwise the input waits.
+   * its previous end has been released, including `turn.end`; otherwise
+   * the input waits.
    */
   send(sessionId: string, text: string, author: EntryAuthor = 'user'): { queued: boolean; turnId?: string } {
     const session = this.get(sessionId);
@@ -667,7 +668,7 @@ export class Turns {
     await this.idle();
   }
 
-  /** Resolves once no turn is running (queued inputs still start turns while accepting). */
+  /** Resolves once no turn is running and no end release is in flight (queued inputs still start turns while accepting). */
   async idle(): Promise<void> {
     for (;;) {
       const pending = [...this.active.values()].map((t) => t.done);
@@ -770,7 +771,8 @@ export class Turns {
   }
 
   private startTurn(session: SessionRecord): string | null {
-    if (this.active.has(session.id)) return this.active.get(session.id)!.turnId;
+    const running = this.active.get(session.id);
+    if (running) return running.turnId;
     if (this.needsRelease(session.id)) {
       void this.releaseTurn(session).then((ok) => this.afterHeld(session, ok));
       return null;

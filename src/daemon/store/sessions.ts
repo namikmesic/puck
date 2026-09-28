@@ -37,7 +37,7 @@ export interface SessionRecord {
   resumeId?: string;
   /** Inputs acknowledged but not yet part of a turn. Empty once their turn starts. */
   queue: QueuedInput[];
-  /** Present from the turn-start commit until the turn ends. */
+  /** Present from the turn-start commit until the turn-end transcript and session commits land. */
   handoff?: TurnHandoff;
   turns: number;
   lastTurnTokens: number;

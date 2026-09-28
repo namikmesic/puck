@@ -6,8 +6,9 @@
  * Boot: migrate the state format (a failure leaves the daemon `failed`,
  * answering only the handshake, snapshots and logs) → open the socket so
  * the app can watch → ingest the inbox → provision → reconcile what a
- * restart interrupted (sessions become interrupted; running work items go
- * back to queued without counting an attempt) → make sure the orchestrator
+ * restart interrupted (an unfinished turn becomes interrupted; a transcript
+ * that already finished is left idle and is not resumed; running work items
+ * go back to queued without counting an attempt) → make sure the orchestrator
  * session exists → resume those turns → ready → start the scheduler and
  * the orchestrator's wake loop.
  *
