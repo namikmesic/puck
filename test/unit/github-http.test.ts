@@ -85,6 +85,13 @@ describe('GitHub transport', () => {
     expect(gh.requests).toHaveLength(4); // first try + 3 retries
   });
 
+  it('bounds the total wait per request, so an unguided secondary limit waits once, not per retry', async () => {
+    const { gh, http } = client(() => ({ status: 403, body: { message: 'You have exceeded a secondary rate limit' } }));
+    await expect(http.request('/user')).rejects.toBeInstanceOf(GitHubRateLimitError);
+    expect(gh.sleeps).toEqual([60_000]);
+    expect(gh.requests).toHaveLength(2);
+  });
+
   it('does not treat a permission 403 as a rate limit', async () => {
     const { gh, http } = client([
       { status: 403, headers: { 'x-ratelimit-remaining': '4999' }, body: { message: 'Resource not accessible by integration' } },

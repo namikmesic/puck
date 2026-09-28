@@ -93,7 +93,7 @@ export interface HttpClientOptions {
   token(): Promise<string>;
   deps?: Partial<GitHubDeps>;
   apiBase?: string;
-  /** Longest wait worth taking on a rate limit before failing instead (default 60 s). */
+  /** Longest total rate-limit wait per request before failing instead (default 60 s). */
   maxWaitMs?: number;
   /** Rate-limit retries per request (default 3). */
   maxRetries?: number;
@@ -172,12 +172,14 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
   async function request<T>(path: string, ro: RequestOptions = {}): Promise<GitHubResponse<T>> {
     const url = path.startsWith('https://') ? path : `${base}${path}`;
     const accept = ro.accept ?? JSON_MEDIA;
+    let waited = 0;
     for (let attempt = 0; ; attempt++) {
       // A budget known to be spent fails (or waits) without another request.
       if (rate.remaining === 0 && rate.resetAt !== null && rate.resetAt > deps.now()) {
         const wait = rate.resetAt - deps.now();
-        if (wait > maxWaitMs) throw new GitHubRateLimitError(rate.resetAt, path);
+        if (waited + wait > maxWaitMs) throw new GitHubRateLimitError(rate.resetAt, path);
         await deps.sleep(wait, ro.signal);
+        waited += wait;
         rate.remaining = null;
       }
       const token = await opts.token();
@@ -204,10 +206,11 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
       const message = errorMessage(parseBody(text), text);
       const wait = rateLimitWait(res.status, res.headers, message);
       if (wait !== null) {
-        if (attempt >= maxRetries || wait > maxWaitMs) {
+        if (attempt >= maxRetries || waited + wait > maxWaitMs) {
           throw new GitHubRateLimitError(deps.now() + wait, path, res.status);
         }
         await deps.sleep(wait, ro.signal);
+        waited += wait;
         continue;
       }
       throw new GitHubApiError(`GitHub ${res.status} on ${path}: ${message || res.statusText}`, res.status, path);

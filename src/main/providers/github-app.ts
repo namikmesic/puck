@@ -16,8 +16,12 @@
  */
 export const GITHUB_APP_CLIENT_ID = 'PLACEHOLDER-unregistered-github-app';
 
-/** The app's URL slug (github.com/apps/<slug>); set with the registration. */
-export const GITHUB_APP_SLUG = 'puck';
+/**
+ * PLACEHOLDER - the app's URL slug (github.com/apps/<slug>), set together
+ * with the client id at registration. Until then no install link is
+ * offered unless PUCK_GITHUB_APP_SLUG is set alongside PUCK_GITHUB_CLIENT_ID.
+ */
+export const GITHUB_APP_SLUG = 'PLACEHOLDER-unregistered-github-app';
 
 /** Development override for the client id (and slug) of a test app. */
 export const CLIENT_ID_ENV = 'PUCK_GITHUB_CLIENT_ID';
@@ -34,13 +38,21 @@ export function githubClientId(env: NodeJS.ProcessEnv = process.env): string | n
   return isPlaceholder(GITHUB_APP_CLIENT_ID) ? null : GITHUB_APP_CLIENT_ID;
 }
 
-export function githubAppSlug(env: NodeJS.ProcessEnv = process.env): string {
-  return env[APP_SLUG_ENV]?.trim() || GITHUB_APP_SLUG;
+/** The app slug, or null while only the placeholder exists. */
+export function githubAppSlug(env: NodeJS.ProcessEnv = process.env): string | null {
+  const override = env[APP_SLUG_ENV]?.trim();
+  if (override) return override;
+  return isPlaceholder(GITHUB_APP_SLUG) ? null : GITHUB_APP_SLUG;
 }
 
-/** Where a user installs the app on an account (then Puck re-checks installations). */
-export function githubInstallUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return `https://github.com/apps/${encodeURIComponent(githubAppSlug(env))}/installations/new`;
+/**
+ * Where a user installs the app on an account (then Puck re-checks
+ * installations), or null unless both the client id and the slug are set.
+ */
+export function githubInstallUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const slug = githubAppSlug(env);
+  if (slug === null || githubClientId(env) === null) return null;
+  return `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
 }
 
 /** Pre-filled fine-grained personal access token page (the fallback). */

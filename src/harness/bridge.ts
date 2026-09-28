@@ -218,8 +218,8 @@ export interface GitHubStatus {
   mode: GitHubMode;
   /** `owner/name` of the config repo, or null until one is chosen. */
   configRepo: string | null;
-  /** Where to install the GitHub App on an account. */
-  installUrl: string;
+  /** Where to install the GitHub App on an account; null until the app's client id and slug are both set. */
+  installUrl: string | null;
   /** False while the build carries the placeholder client id and no override is set. */
   appConfigured: boolean;
   /** The device code of a sign-in in progress, if any. */

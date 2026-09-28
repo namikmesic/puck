@@ -111,11 +111,14 @@ function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInf
   const list = el('ul', 'pv-list');
   list.appendChild(el('li', 'pv-loading', 'Loading…'));
   box.appendChild(list);
-  const install = button('btn-ghost', 'Install Puck on an account');
-  install.addEventListener('click', () => void ctx.bridge.openExternal(info.github.installUrl));
-  const foot = el('div', 'card-foot');
-  foot.appendChild(install);
-  box.appendChild(foot);
+  const installUrl = info.github.installUrl;
+  if (installUrl) {
+    const install = button('btn-ghost', 'Install Puck on an account');
+    install.addEventListener('click', () => void ctx.bridge.openExternal(installUrl));
+    const foot = el('div', 'card-foot');
+    foot.appendChild(install);
+    box.appendChild(foot);
+  }
 
   void ctx.bridge
     .githubInstallations()

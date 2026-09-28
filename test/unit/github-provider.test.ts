@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CLIENT_ID_ENV, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
+import { APP_SLUG_ENV, CLIENT_ID_ENV, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
 import {
   account,
   githubProvider,
@@ -65,11 +65,20 @@ describe('GitHub App identity', () => {
   it('ships a placeholder that disables app sign-in until PUCK_GITHUB_CLIENT_ID is set', async () => {
     expect(githubClientId({})).toBeNull();
     expect(githubClientId({ [CLIENT_ID_ENV]: ' Iv1.dev ' })).toBe('Iv1.dev');
-    expect(githubInstallUrl({})).toBe('https://github.com/apps/puck/installations/new');
     delete process.env[CLIENT_ID_ENV];
     expect(githubProvider.state().appConfigured).toBe(false);
     await expect(githubProvider.auth.start()).rejects.toThrow(/not registered/);
     expect(githubProvider.auth.status().detail).toMatch(/personal access token/);
+  });
+
+  it('offers an install link only when both the client id and the slug are set', () => {
+    expect(githubInstallUrl({})).toBeNull();
+    expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev' })).toBeNull();
+    expect(githubInstallUrl({ [APP_SLUG_ENV]: 'puck-dev' })).toBeNull();
+    expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe(
+      'https://github.com/apps/puck-dev/installations/new',
+    );
+    expect(githubProvider.state().installUrl).toBeNull();
   });
 });
 

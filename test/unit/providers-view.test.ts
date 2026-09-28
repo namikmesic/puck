@@ -282,6 +282,16 @@ describe('GitHub card', () => {
     expect(githubSetConfigRepo).toHaveBeenCalledWith('me/other');
   });
 
+  it('offers no install link while the app slug is unconfigured', async () => {
+    const githubInstallations = vi.fn(async () => []);
+    const { els, view } = mount([gh({ login: 'me', installUrl: null }, { connected: true })], { githubInstallations });
+    await view.render();
+    await settle();
+    const ghCard = card(els.integrationCards, 'github');
+    expect(ghCard.querySelector('.pv-installs')).not.toBeNull();
+    expect([...ghCard.querySelectorAll('button')].some((b) => b.textContent === 'Install Puck on an account')).toBe(false);
+  });
+
   it('token mode hides installations; Sign out calls logout', async () => {
     const { els, view, bridge } = mount([gh({ login: 'me', mode: 'pat' }, { connected: true })]);
     await view.render();
