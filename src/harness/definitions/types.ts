@@ -149,7 +149,7 @@ export interface TreeBlob {
   sha: string;
 }
 
-/** The config repo at one commit: every blob path, plus the files Puck read. */
+/** One commit of the config repo. `tree` omits symlink entries; `files` holds the texts Puck read. */
 export interface RepoSnapshot {
   sha: string;
   tree: Record<string, TreeBlob>;

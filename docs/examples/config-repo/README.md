@@ -16,7 +16,7 @@ prompts/**                  # optional; referenced by an agent's instructionsFil
 
 A file's `name` must equal its file name without `.yaml`.
 Names use lowercase letters, digits and dashes.
-Referenced instruction files are read; every other path is ignored.
+Referenced instruction files are read. A symlink is not the file it names. Every other path is ignored.
 
 The example defines three agents and one environment:
 
