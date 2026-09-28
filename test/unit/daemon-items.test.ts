@@ -155,6 +155,16 @@ describe('backlog', () => {
     expect(backlog.get(a.id)?.status).toBe('backlog');
   });
 
+  it('does not write back an item that was already deleted', () => {
+    const a = make('A');
+    backlog.transition(a, 'delete');
+    const before = events.length;
+    backlog.patch(a, { title: 'zombie', acceptNote: 'back' });
+    expect(events.slice(before)).toEqual([]);
+    expect(backlog.get(a.id)).toBeNull();
+    expect(backlog.list()).toEqual([]);
+  });
+
   it('keeps daemon-only fields out of what clients see', () => {
     const a = make('A', 'implementer');
     backlog.transition(a, 'dispatch', { requeue: null, pushedSha: 'f'.repeat(40) });

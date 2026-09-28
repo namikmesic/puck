@@ -301,6 +301,7 @@ export class Work {
   async publish(ref: string, req: PublishRequest, actor: Actor): Promise<{ prUrl: string }> {
     const item = this.item(ref);
     return this.exclusive(item.id, async () => {
+      if (!this.deps.backlog.get(item.id)) throw new WorkError('not-found', `No work item ${ref}.`);
       if (actor === 'orchestrator' && this.def().policies.publish !== 'orchestrator') {
         throw new WorkError('invalid-state', 'Publishing is manual in this environment: the user publishes from the work view.');
       }
@@ -325,17 +326,20 @@ export class Work {
   async remove(ref: string): Promise<void> {
     const item = this.item(ref);
     const def = this.deps.definition();
-    this.guard(() => this.deps.backlog.transition(item, 'delete'));
-    if (item.sessionId) this.deps.turns.close(item.sessionId);
-    if (item.worktree && def) {
-      const repo = def.repos.find((r) => r.dir === item.repo);
-      if (repo) {
-        const worktree = item.worktree;
-        await this.deps.git.serial(repo.dir, () => this.deps.git.removeWorktree(repo.dir, worktree)).catch((err: unknown) => {
-          this.deps.log.warn('item.worktree-remove-failed', { itemId: item.id, detail: (err as Error).message });
-        });
+    await this.exclusive(item.id, async () => {
+      if (!this.deps.backlog.get(item.id)) return;
+      this.guard(() => this.deps.backlog.transition(item, 'delete'));
+      if (item.sessionId) this.deps.turns.close(item.sessionId);
+      if (item.worktree && def) {
+        const repo = def.repos.find((r) => r.dir === item.repo);
+        if (repo) {
+          const worktree = item.worktree;
+          await this.deps.git.serial(repo.dir, () => this.deps.git.removeWorktree(repo.dir, worktree)).catch((err: unknown) => {
+            this.deps.log.warn('item.worktree-remove-failed', { itemId: item.id, detail: (err as Error).message });
+          });
+        }
       }
-    }
+    });
   }
 
   /* ---------- Dispatch ---------- */

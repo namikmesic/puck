@@ -51,6 +51,7 @@ type HarnessEventBody =
       /** Recorded renderer-side once answered (null = dismissed), so replayed
        *  history can show the question and what was chosen. */
       answers?: Record<string, string> | null;
+      note?: string;
     }
   | { kind: 'error'; message: string }
   | { kind: 'turn-end'; stats: TurnStats };

@@ -196,6 +196,7 @@ export interface OpenAsk {
   askId: string;
   questions: AskQuestion[];
   routedTo: 'orchestrator' | 'user';
+  note?: string;
 }
 
 /** Everything a client needs to render an environment, except transcripts. */

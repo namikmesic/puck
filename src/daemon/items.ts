@@ -200,6 +200,7 @@ export class Backlog {
 
   /** Mutate an item (not its status) and persist. */
   patch(item: ItemRecord, change: Partial<Omit<ItemRecord, 'id' | 'number' | 'status'>>): ItemRecord {
+    if (!this.get(item.id)) return item;
     Object.assign(item, change, { updatedAt: this.now() });
     this.deps.store.commit();
     this.upsert(item);

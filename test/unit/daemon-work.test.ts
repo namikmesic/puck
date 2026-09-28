@@ -148,7 +148,20 @@ function client() {
     return res.result as T;
   }
   const events = (): DaemonEvent[] => frames.flatMap((f) => (f.t === 'event' ? [f.ev] : []));
-  return { cmd, raw, events };
+  /** Several commands in one write, so the daemon accepts them in one turn. */
+  function burst(list: { op: string; args?: unknown }[]): Promise<Array<Extract<DaemonFrame, { t: 'res' }>>> {
+    const ids = list.map(() => `c${++n}`);
+    socket.write(list.map((item, i) => JSON.stringify({ t: 'cmd', id: ids[i], op: item.op, args: item.args ?? {} }) + '\n').join(''));
+    return vi.waitFor(
+      () => {
+        const found = ids.map((id) => frames.find((f): f is Extract<DaemonFrame, { t: 'res' }> => f.t === 'res' && f.id === id));
+        expect(found.every(Boolean)).toBe(true);
+        return found as Array<Extract<DaemonFrame, { t: 'res' }>>;
+      },
+      { timeout: 3000, interval: 5 },
+    );
+  }
+  return { cmd, raw, events, burst };
 }
 
 async function item(c: ReturnType<typeof client>, number: number): Promise<WorkItem> {
@@ -423,20 +436,80 @@ describe('work items through the daemon', () => {
       fetchMock.mockRestore();
     }
   });
+
+  it('does not restore an item deleted while its publish is waiting on GitHub', async () => {
+    const c = client();
+    await c.cmd('item.create', { title: 'Publish me', agent: 'implementer' });
+    const reviewed = await until(c, 1, 'review');
+    await c.cmd('item.accept', { itemId: reviewed.id });
+    await c.cmd('github.put', {
+      grants: [{ owner: 'octo', installationId: 9, repos: ['octo/app'], token: 'ghs_octotoken', expiresAt: Date.now() + 60_000 }],
+    });
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchWaiting = false;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      fetchWaiting = true;
+      await fetchGate;
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') return new Response('[]', { status: 200 });
+      const body = init?.body ? (JSON.parse(String(init.body)) as { draft?: boolean }) : {};
+      return new Response(JSON.stringify({ number: 7, html_url: 'https://github.com/octo/app/pull/7', draft: body.draft ?? true }), { status: 201 });
+    });
+    try {
+      const publishing = c.cmd<{ prUrl: string }>('item.publish', { itemId: reviewed.id });
+      await vi.waitFor(() => expect(fetchWaiting).toBe(true));
+      let deleted = false;
+      const deleting = c.cmd('item.delete', { itemId: reviewed.id }).then((result) => {
+        deleted = true;
+        return result;
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      expect(deleted).toBe(false);
+      releaseFetch();
+      await publishing;
+      await deleting;
+      expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === reviewed.id)).toBeUndefined();
+      const ev = c.events();
+      const removedAt = ev.findIndex((e) => e.kind === 'item.removed' && e.itemId === reviewed.id);
+      expect(removedAt).toBeGreaterThanOrEqual(0);
+      expect(ev.slice(removedAt + 1).some((e) => e.kind === 'item.upsert' && e.item.id === reviewed.id)).toBe(false);
+    } finally {
+      releaseFetch();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('a second delete while the first still holds the item does not emit it again', async () => {
+    const c = client();
+    await c.cmd('item.create', { title: 'Gone', agent: 'implementer' });
+    const reviewed = await until(c, 1, 'review');
+    await c.cmd('item.accept', { itemId: reviewed.id });
+    const results = await c.burst([
+      { op: 'item.delete', args: { itemId: reviewed.id } },
+      { op: 'item.delete', args: { itemId: reviewed.id } },
+    ]);
+    expect(results.map((r) => r.ok)).toEqual([true, true]);
+    expect(c.events().filter((e) => e.kind === 'item.removed' && e.itemId === reviewed.id)).toHaveLength(1);
+    expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === reviewed.id)).toBeUndefined();
+  });
 });
 
 describe('tool notes', () => {
   it('stores cancel reasons and accept notes on the item and the escalate note on the question, never in the log', async () => {
     const reason = 'drop this approach entirely';
     const accept = 'shipped with the redirect fix';
-    const escalate = 'the user should pick the database';
+    const escalate = `the user should pick the database ${'n'.repeat(2000)}`;
     const c = client();
     const tools = (daemon as unknown as { tools: Array<{ name: string; run(a: Record<string, unknown>): unknown }> }).tools;
     const tool = (name: string) => defined(tools.find((t) => t.name === name));
+    let answer: Record<string, string> | null | undefined;
     workerSteps = [
       say('Done.'),
       async (req, ctx) => {
-        await ctx.askUser([{ question: 'Which DB?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: '' }] }]);
+        answer = await ctx.askUser([{ question: 'Which DB?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: '' }] }]);
         end(ctx);
       },
     ];
@@ -462,11 +535,19 @@ describe('tool notes', () => {
     const snap = await c.cmd<Snapshot>('snapshot.get');
     const ask = defined(snap.asks.find((a) => a.sessionId === sessionId));
     expect(ask.routedTo).toBe('user');
-    expect(ask.questions[0]?.question).toContain(escalate);
+    expect(ask.questions[0]?.question).toBe('Which DB?');
+    expect(ask.note).toBe(escalate);
+    const streamed = c.events().filter((e) => e.kind === 'turn.event' && e.event.kind === 'ask' && e.event.note === escalate);
+    expect(streamed).toHaveLength(1);
+    const streamedAsk = streamed[0];
+    expect(streamedAsk.kind === 'turn.event' && streamedAsk.event.kind === 'ask' ? streamedAsk.event.questions[0]?.question : '').toBe('Which DB?');
     const recorded = (await history(c, sessionId))
       .flatMap((entry) => (entry.kind === 'turn' ? entry.events : []))
       .find((event) => event.kind === 'ask');
-    expect(recorded && recorded.kind === 'ask' ? recorded.questions[0]?.question : '').toContain(escalate);
+    expect(recorded && recorded.kind === 'ask' ? recorded.questions[0]?.question : '').toBe('Which DB?');
+    expect(recorded && recorded.kind === 'ask' ? recorded.note : '').toBe(escalate);
+    await c.cmd('ask.answer', { sessionId, askId: waiting.pendingAsk?.askId, answers: { 'Which DB?': 'Postgres' } });
+    await vi.waitFor(() => expect(answer).toEqual({ 'Which DB?': 'Postgres' }));
 
     const log = await c.cmd<{ text: string }>('logs.tail', { lines: 400 });
     expect(log.text).not.toContain(reason);

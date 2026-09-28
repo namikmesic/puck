@@ -113,6 +113,7 @@ interface PendingAsk {
   turnId: string;
   questions: AskQuestion[];
   routedTo: 'user' | 'orchestrator';
+  note?: string;
   resolve(answers: Record<string, string> | null): void;
 }
 
@@ -427,15 +428,25 @@ export class Turns {
     return true;
   }
 
-  /** Append a note to an open question, where the user reads it. */
+  /** Attach a note to an open question and emit it with the original questions. */
   annotateAsk(askId: string, note: string): void {
     const ask = this.asks.get(askId);
     const text = note.trim();
-    if (!ask || !text || ask.questions.length === 0) return;
-    const question = ask.questions[0];
-    if (question.question.endsWith(`\n\n${text}`)) return;
-    question.question = `${question.question}\n\n${text}`;
-    this.deps.transcripts.saveSoon(ask.sessionId);
+    if (!ask || !text) return;
+    ask.note = text;
+    const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
+    if (entry) {
+      for (const event of entry.events) {
+        if (event.kind === 'ask' && event.askId === askId) event.note = text;
+      }
+      this.deps.transcripts.saveSoon(ask.sessionId);
+    }
+    this.emitSafe({
+      kind: 'turn.event',
+      sessionId: ask.sessionId,
+      turnId: ask.turnId,
+      event: { kind: 'ask', askId, questions: ask.questions, note: text, ts: this.now() },
+    });
   }
 
   /** Hand an open question to someone else (the orchestrator escalating to the user). */
@@ -450,9 +461,9 @@ export class Turns {
   }
 
   /** An open question's questions, or null once it closed. */
-  openAsk(askId: string): { sessionId: string; questions: AskQuestion[]; routedTo: 'user' | 'orchestrator' } | null {
+  openAsk(askId: string): { sessionId: string; questions: AskQuestion[]; routedTo: 'user' | 'orchestrator'; note?: string } | null {
     const ask = this.asks.get(askId);
-    return ask ? { sessionId: ask.sessionId, questions: ask.questions, routedTo: ask.routedTo } : null;
+    return ask ? { sessionId: ask.sessionId, questions: ask.questions, routedTo: ask.routedTo, ...(ask.note ? { note: ask.note } : {}) } : null;
   }
 
   private closeAsk(askId: string, answers: Record<string, string> | null, by: AskCloser): void {
@@ -493,6 +504,7 @@ export class Turns {
       askId,
       questions: a.questions,
       routedTo: a.routedTo,
+      ...(a.note ? { note: a.note } : {}),
     }));
   }
 
