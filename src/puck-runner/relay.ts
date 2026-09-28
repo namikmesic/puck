@@ -249,6 +249,9 @@ export class RelayConnection {
   }
 
   private async open(frame: Record<string, unknown>): Promise<void> {
+    // Bound to the socket that received this open. Docker inspect can outlive
+    // it, and a reconnect numbers channels from 1 again, so a late close,
+    // accept, or exec must not land on the new socket.
     const socket = this.ws;
     const same = (): boolean => socket !== null && this.ws === socket && !this.stopped && socket.readyState === WebSocket.OPEN;
     const { ch, appCh, kind } = frame;

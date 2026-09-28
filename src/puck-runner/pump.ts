@@ -4,14 +4,15 @@
  * open pull requests while the app is closed.
  *
  * Tokens live an hour. For each running environment the pump opens a short
- * daemon connection, reads `github.auth` from the snapshot, and when it is
- * not `ok` or expires within REFRESH_BEFORE_MS, asks the server for fresh
- * grants and pushes them with `github.put`. It then sleeps until that
- * margin before the earliest expiry, but never longer than CHECK_EVERY_MS,
- * so a daemon that reports `expiring` or `missing` for any reason (a
- * restart, a rebuilt container) is noticed within minutes. Tokens pass
- * through the runner's memory only: never argv, never a file on the host,
- * never a log line.
+ * daemon connection, reads `github.auth` from the snapshot, and closes that
+ * connection before it asks the server for fresh grants. `github.put` goes
+ * over a new connection, so the link's timer never covers the mint. It
+ * refreshes when the snapshot is not `ok` or expires within
+ * REFRESH_BEFORE_MS, then sleeps until that margin before the earliest
+ * expiry, but never longer than CHECK_EVERY_MS, so a daemon that reports
+ * `expiring` or `missing` for any reason (a restart, a rebuilt container)
+ * is noticed within minutes. Tokens pass through the runner's memory only:
+ * never argv, never a file on the host, never a log line.
  *
  * Failures back off. A daemon that is not up yet is retried within seconds;
  * an environment the server no longer mints for (removed from the index,

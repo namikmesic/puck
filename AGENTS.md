@@ -122,7 +122,8 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 
 - *Agent* = a named provider configuration (`AgentConfig`).
   The Task-tool sub-agents inside a chat are "sub-agents".
-  The process today's containers run is "the runner"; `puckd` is the environment daemon built beside it.
+  The process today's containers run is the container runner (`src/main/runner/runner.js`); `puckd` is the environment daemon built beside it.
+  `puck-runner` (`src/puck-runner/`) is the program installed on a machine that hosts environments; the app does not use it yet. See `src/puck-runner/README.md`.
   A `kind: Agent` file in a config repo is a definition (`src/harness/definitions/`), not this record.
 - `AgentConfig.options` = sparse schema-option overrides.
   `TurnRequest.settings` = the *compiled* SDK fragment, whose wire field names are frozen until the next protocol-revision bump.
@@ -144,6 +145,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   `definitions/` holds agent and environment definitions: YAML parse, validation, resolution, JSON Schema, and update-class diff.
   `provisioning.ts` is the container package plan, `daemon-protocol.ts` the puckd protocol, and `transcript.ts` transcript format v2.
 - `src/daemon/` - puckd. Not launched by environment start. Entry `main.ts`.
+- `src/puck-runner/` - the host runner. Contract: `src/puck-runner/README.md`.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.
 - `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.

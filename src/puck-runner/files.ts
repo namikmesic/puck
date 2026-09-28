@@ -102,6 +102,7 @@ export function writeFileAtomic(file: string, content: string | Buffer, mode: nu
   fs.renameSync(tmp, file);
 }
 
+/** True only when `.runner` exists. A key or `.credentials` without it is an unfinished registration. */
 export function isConfigured(paths: RunnerPaths): boolean {
   return fs.existsSync(paths.config);
 }

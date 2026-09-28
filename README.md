@@ -217,6 +217,8 @@ npm run test:e2e    # boots the real app isolated and smoke-checks the UI
 npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
 npm run build:server  # the Puck server as one file, .webpack/server/puck-server.js
 npm run build:daemon
+npm run build:runner   # puck-runner bundle; see src/puck-runner/README.md
+npm run package:runner
 npm run test:docker # real containers; needs a Docker engine
 npm run make        # the release ZIP and its checksum, see RELEASE.md
 ```

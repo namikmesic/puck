@@ -285,6 +285,8 @@ export class Control {
       }),
     'instance.rebuild': (args, emit) =>
       this.serial(args.envId, async () => {
+        // A missing container whose volumes remain is a rebuild that already
+        // removed it. Recreate on those volumes so a failed rebuild can be retried.
         if ((await this.deps.ops.state(args.envId)) === null && !(await this.deps.ops.volumesPresent(args.envId))) {
           throw new ControlError('not-found', 'This environment has no container on this runner.');
         }

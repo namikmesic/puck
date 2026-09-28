@@ -5,6 +5,10 @@
  * daemon accepts several connections at once, so this never disturbs an
  * app's attach channel. Access to `docker exec` on this host is what
  * authenticates it, exactly as for the relay.
+ *
+ * The link's timer starts at open and is not reset on welcome. Close the
+ * link before any slow work of your own; the token pump does that before
+ * it asks the server to mint.
  */
 
 import {

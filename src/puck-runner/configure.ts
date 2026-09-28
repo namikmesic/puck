@@ -9,7 +9,11 @@
  * generates the Ed25519 key pair and writes `.runner_key` (0600) before
  * anything leaves the machine, registers with the registration token, and
  * writes `.runner` (0644) and `.credentials` (0600). The token itself is
- * never stored.
+ * never stored. Only `.runner` counts as configured (`isConfigured`). A
+ * key or `.credentials` left when registration did not finish is removed
+ * before a new key is written, and again if registration or those writes
+ * fail; the message then says to pass `--replace` if the server already
+ * kept the name.
  *
  * Remove asks whether to keep or delete the environments on this machine
  * when any exist, uninstalls the service, deletes environments when asked

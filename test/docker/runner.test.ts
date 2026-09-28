@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Snapshot } from '../../src/harness/daemon-protocol';
 import type { RunnerInfo } from '../../src/harness/runner-protocol';
+import { newId } from '../../src/harness/ulid';
 import { ControlClient, DaemonClient, RelayApp } from '../relay-client';
 import { call, type SignedIn } from '../unit/server-fakes';
 import { definition, docker, exec, IMAGE, TEST_BUNDLE, turnEvents } from './helpers';
@@ -255,5 +256,107 @@ describe('Docker scenarios: puck-runner', () => {
     const volumes = await docker(['volume', 'ls', '-q', '--filter', `label=puck.env=${id}`]);
     expect(volumes.stdout.trim()).toBe('');
     expect((await call(server, 'GET', `/v1/instances/${id}`, { token: session.accessToken })).status).toBe(404);
+  });
+
+  it('7. config.sh treats a key with no registration as unfinished, and a failed registration leaves no key', async () => {
+    fs.writeFileSync(path.join(dirA, '.runner_key'), 'orphan-key\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(dirA, '.credentials'), '{}\n', { mode: 0o600 });
+    const token = await tokenFor(server, session, 'registration');
+    const recovered = await sh(dirA, 'config.sh', ['--url', server.base, '--token', token, '--name', 'suite-again', '--unattended']);
+    expect(recovered.code, recovered.out).toBe(0);
+    expect(recovered.out).toContain('A previous registration did not finish');
+    expect(recovered.out).toContain('--replace');
+    const key = fs.readFileSync(path.join(dirA, '.runner_key'), 'utf8');
+    expect(key).toContain('BEGIN PRIVATE KEY');
+    expect(key).not.toContain('orphan-key');
+    expect(fs.existsSync(path.join(dirA, '.runner'))).toBe(true);
+
+    // The server already kept the name. Drop the local registration the way a crash after acceptance would, and leave the key.
+    fs.rmSync(path.join(dirA, '.runner'));
+    fs.rmSync(path.join(dirA, '.credentials'));
+    const blocked = await sh(dirA, 'config.sh', ['--url', server.base, '--token', await tokenFor(server, session, 'registration'), '--name', 'suite-again', '--unattended']);
+    expect(blocked.code, blocked.out).not.toBe(0);
+    expect(blocked.out).toContain('--replace');
+    expect(fs.existsSync(path.join(dirA, '.runner_key'))).toBe(false);
+    expect(fs.existsSync(path.join(dirA, '.credentials'))).toBe(false);
+    expect(fs.existsSync(path.join(dirA, '.runner'))).toBe(false);
+
+    const replaced = await sh(dirA, 'config.sh', [
+      '--url',
+      server.base,
+      '--token',
+      await tokenFor(server, session, 'registration'),
+      '--name',
+      'suite-again',
+      '--unattended',
+      '--replace',
+    ]);
+    expect(replaced.code, replaced.out).toBe(0);
+    expect(JSON.parse(fs.readFileSync(path.join(dirA, '.runner'), 'utf8')).name).toBe('suite-again');
+
+    const badDir = runnerDir();
+    try {
+      const bad = await sh(badDir, 'config.sh', ['--url', server.base, '--token', 'PRT_nottherealtokenatall', '--name', 'nope', '--unattended']);
+      expect(bad.code, bad.out).not.toBe(0);
+      expect(bad.out).toMatch(/unknown, revoked or expired/);
+      expect(fs.existsSync(path.join(badDir, '.runner_key'))).toBe(false);
+      expect(fs.existsSync(path.join(badDir, '.credentials'))).toBe(false);
+      expect(fs.existsSync(path.join(badDir, '.runner'))).toBe(false);
+    } finally {
+      fs.rmSync(badDir, { recursive: true, force: true });
+    }
+  });
+
+  it('8. refuses an inbox the daemon would discard, and creates no container', async () => {
+    const { runnerId } = await configureRunner(server, session, dirB, 'suite-guard');
+    runnerB = new RunnerProcess(dirB);
+    const view = await waitFor('the guard runner online', async () => {
+      const v = await runnerView(server, session, runnerId);
+      return v && v.status !== 'offline' ? v : undefined;
+    });
+    const control = new ControlClient(await app.open(runnerId, String(view.publicKey), 'control'));
+    await control.welcome();
+
+    const refused: string[] = [];
+    const attempt = async (over: Record<string, unknown>, pattern: RegExp) => {
+      const id = newId('env');
+      refused.push(id);
+      const inbox = {
+        instance: { envId: id, name: 'Example', definition: definition() },
+        ...over,
+      };
+      await expect(
+        control.cmd('instance.create', { envId: id, image: 'node:22', bundleSha: 'ab'.repeat(32), inbox }),
+      ).rejects.toThrow(pattern);
+    };
+
+    try {
+      await attempt({ secrets: { PUCK_TOKEN: 'x' } }, /invalid-args: Secret names must be variable names that do not start with PUCK_/);
+      await attempt({ secrets: { 'not a name': 'x' } }, /invalid-args: Secret names must be variable names/);
+      await attempt({ harness: [{ id: 'claude-code', content: 'not-json' }] }, /invalid-args: Each harness credential must be JSON/);
+      await attempt({ harness: [{ id: 'nope', content: '{}' }] }, /invalid-args: Each harness credential must be JSON/);
+      const brokenId = newId('env');
+      refused.push(brokenId);
+      await expect(
+        control.cmd('instance.create', {
+          envId: brokenId,
+          image: 'node:22',
+          bundleSha: 'ab'.repeat(32),
+          inbox: { instance: { envId: brokenId, name: 'Example', definition: { name: 'example' }, pin: { kind: 'tag', name: 'v1', sha: 'zz' } } },
+        }),
+      ).rejects.toThrow(/invalid-args/);
+
+      const sessionLog = runnerB.log().slice(runnerB.log().lastIndexOf('runner.start'));
+      for (const id of refused) {
+        const listed = await docker(['ps', '-a', '--filter', `name=puck-${id}`, '--format', '{{.Names}}']);
+        expect(listed.stdout.trim(), id).toBe('');
+        expect(sessionLog).not.toContain(id);
+      }
+      expect(sessionLog).not.toContain('instance.created');
+    } finally {
+      await removeEnvironments(refused);
+      await runnerB?.stop();
+      runnerB = null;
+    }
   });
 });

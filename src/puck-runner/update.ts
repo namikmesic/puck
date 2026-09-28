@@ -10,10 +10,12 @@
  *
  * Restarting the runner never touches environments: containers run under
  * the Docker engine with their own restart policy, and the runner only
- * relays. The update still waits until no control operation (a create, a
- * rebuild) is in flight. `--disableupdate` at configuration turns this off;
- * a server that requires a newer version then refuses the runner until it
- * is updated by hand.
+ * relays. Once a newer release is chosen, the runner refuses new control
+ * commands for the download and the swap, and waits until every command
+ * already running has finished before it swaps (`Control.drain` in
+ * control.ts). If the update fails, it accepts commands again.
+ * `--disableupdate` at configuration turns this off; a server that requires
+ * a newer version then refuses the runner until it is updated by hand.
  */
 
 import { execFile } from 'node:child_process';
