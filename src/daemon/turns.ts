@@ -19,11 +19,13 @@
  *     content, the id is dropped and the turn silently retries once fresh.
  *     An id we only attempted is never persisted, even when echoed back;
  *   - always ends with a turn-end (synthesized if the adapter did not send
- *     one). The transcript is fsynced before the session record says the
- *     turn is over and before `turn.end` is published, and the next queued
- *     input starts only after that publish. A failed transcript fsync keeps
- *     the handoff and is retried; a `turn.end` the event log refuses is
- *     retried until appended.
+ *     one). The transcript is fsynced before the turn is finalized, before
+ *     the session record says the turn is over, and before `turn.end` is
+ *     published. Queued text or pending notices start only after that. A
+ *     failed transcript fsync keeps the handoff and the chosen end status
+ *     (idle, or interrupted after shutdown or upgrade) and is retried until
+ *     it lands, even if the session was closed meanwhile. A `turn.end` the
+ *     event log refuses is retried until appended.
  *
  * Interrupting a turn cancels its open questions and aborts the adapter.
  * An interrupt from shutdown or upgrade leaves the session `interrupted`,
@@ -31,9 +33,9 @@
  *
  * Worker sessions belong to work items: `canStart` keeps them from starting
  * on their own (the scheduler starts them), `onTurnEnd` hands each finished
- * turn to the item logic before the next queued input may start, and
- * `routeAsk` decides whether a question waits for the user or the
- * orchestrator.
+ * turn to the item logic only after the turn-end transcript fsync and before
+ * the next queued input may start, and `routeAsk` decides whether a question
+ * waits for the user or the orchestrator.
  */
 
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
@@ -82,7 +84,7 @@ export interface TurnsDeps {
   commitNotices(count: number): void;
   /** False keeps a session's queued input waiting (a worker whose item holds no slot). Default: true. */
   canStart?(session: SessionRecord): boolean;
-  /** Awaited after every turn, before the session's next queued input may start. */
+  /** Awaited once the turn-end transcript is durable, before the end status is committed and before the next input may start. */
   onTurnEnd?(session: SessionRecord, outcome: TurnOutcome): Promise<void> | void;
   /** Where a new question waits. Default: the user. */
   routeAsk?(session: SessionRecord, askId: string, questions: AskQuestion[]): 'user' | 'orchestrator';
@@ -118,6 +120,15 @@ export interface TurnOutcome {
 }
 
 type TurnEndEvent = Extract<DaemonEvent, { kind: 'turn.end' }>;
+
+interface HeldEnd {
+  ev: TurnEndEvent;
+  status: 'idle' | 'interrupted';
+  outcome: TurnOutcome;
+  landed: boolean;
+  finalized: boolean;
+  released: boolean;
+}
 
 interface PendingAsk {
   sessionId: string;
@@ -167,8 +178,10 @@ export class Turns {
   private readonly now: () => number;
   /** `turn.end` events not yet appended, by turn id, until an append succeeds. */
   private readonly unsentEnds = new Map<string, TurnEndEvent>();
+  private readonly heldEnds = new Map<string, HeldEnd>();
+  private readonly releasing = new Map<string, Promise<boolean>>();
   private endTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Sessions whose start waited on a held `turn.end`; started once it lands. */
+  /** Sessions whose start waited on a held end; started once it lands. */
   private readonly blockedStarts = new Set<string>();
 
   constructor(private readonly deps: TurnsDeps) {
@@ -278,6 +291,7 @@ export class Turns {
     let dirty = false;
     for (const session of this.list()) {
       if (session.status !== 'running' && session.status !== 'interrupted') continue;
+      if (this.needsRelease(session.id)) continue;
       const log = this.deps.transcripts.get(session.id).log;
       const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
       if (
@@ -323,7 +337,7 @@ export class Turns {
     }
     const running = new Set([...this.active.values()].map((t) => t.turnId));
     for (const { sessionId, turnId } of open.values()) {
-      if (running.has(turnId) || this.unsentEnds.has(turnId)) continue;
+      if (running.has(turnId) || this.unsentEnds.has(turnId) || this.heldEnds.has(turnId)) continue;
       this.publishEnd({ kind: 'turn.end', sessionId, turnId, stats: this.statsFor(sessionId, turnId) });
     }
   }
@@ -346,33 +360,11 @@ export class Turns {
     this.sendEnds(ev.sessionId);
   }
 
-  private holdEnd(ev: TurnEndEvent): void {
-    this.unsentEnds.set(ev.turnId, ev);
-    this.blockedStarts.add(ev.sessionId);
-    this.armEndRetry();
-  }
-
-  private endDurable(ev: TurnEndEvent): boolean {
-    const session = this.get(ev.sessionId);
-    return !session || session.status !== 'running' || session.handoff?.turnId !== ev.turnId;
-  }
-
-  private transcriptPending(sessionId: string): boolean {
-    for (const ev of this.unsentEnds.values()) {
-      if (ev.sessionId === sessionId && !this.endDurable(ev)) return true;
-    }
-    return false;
-  }
-
   /** Retry held `turn.end`s (one session's, or all). True when none of them is left. */
   private sendEnds(sessionId?: string): boolean {
     let left = false;
     for (const [turnId, ev] of [...this.unsentEnds]) {
       if (sessionId !== undefined && ev.sessionId !== sessionId) continue;
-      if (!this.endDurable(ev)) {
-        left = true;
-        continue;
-      }
       try {
         this.deps.emit(ev);
         this.unsentEnds.delete(turnId);
@@ -385,17 +377,113 @@ export class Turns {
     return !left;
   }
 
-  private retryHeldTranscripts(): void {
-    const ids = new Set<string>(this.blockedStarts);
-    for (const ev of this.unsentEnds.values()) if (!this.endDurable(ev)) ids.add(ev.sessionId);
-    for (const sessionId of ids) {
-      const session = this.get(sessionId);
-      if (session) this.finishDurable(session);
+  private needsRelease(sessionId: string): boolean {
+    for (const held of this.heldEnds.values()) if (held.ev.sessionId === sessionId && !held.released) return true;
+    return false;
+  }
+
+  private shouldWake(session: SessionRecord): boolean {
+    if ((this.queues.get(session.id)?.length ?? 0) > 0) return true;
+    return session.kind === 'orchestrator' && this.deps.peekNotices().length > 0;
+  }
+
+  private releaseTurn(session: SessionRecord): Promise<boolean> {
+    const existing = this.releasing.get(session.id);
+    if (existing) return existing;
+    let resolve: (ok: boolean) => void = () => undefined;
+    const job = new Promise<boolean>((r) => {
+      resolve = r;
+    });
+    this.releasing.set(session.id, job);
+    void this.finishRelease(session).then(
+      (ok) => {
+        if (this.releasing.get(session.id) === job) this.releasing.delete(session.id);
+        resolve(ok);
+      },
+      (err) => {
+        if (this.releasing.get(session.id) === job) this.releasing.delete(session.id);
+        this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+        resolve(false);
+      },
+    );
+    return job;
+  }
+
+  private async finishRelease(session: SessionRecord): Promise<boolean> {
+    const held = [...this.heldEnds.values()].find((h) => h.ev.sessionId === session.id && !h.released);
+    if (!held) return true;
+    if (!held.landed) {
+      try {
+        this.deps.transcripts.commit(session.id);
+        held.landed = true;
+      } catch (err) {
+        this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+        return false;
+      }
+    }
+    if (!held.finalized) {
+      held.finalized = true;
+      if (this.deps.onTurnEnd) {
+        try {
+          await this.deps.onTurnEnd(session, held.outcome);
+        } catch (err) {
+          this.deps.log.error('turn.end-hook-failed', err, { sessionId: session.id });
+        }
+      }
+    }
+    const previousStatus = session.status;
+    const previousHandoff = session.handoff;
+    if (session.status !== 'closed') session.status = held.status;
+    delete session.handoff;
+    try {
+      this.deps.sessions.commit();
+    } catch (err) {
+      session.status = previousStatus;
+      if (previousHandoff) session.handoff = previousHandoff;
+      else delete session.handoff;
+      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+      return false;
+    }
+    held.released = true;
+    this.heldEnds.delete(held.ev.turnId);
+    this.publishEnd(held.ev);
+    return true;
+  }
+
+  private afterHeld(session: SessionRecord, ok: boolean): void {
+    if (!ok || this.endHeld(session.id)) {
+      this.blockedStarts.add(session.id);
+      this.armEndRetry();
+      return;
+    }
+    this.blockedStarts.delete(session.id);
+    if (session.status === 'closed' || !this.accepting || this.active.has(session.id) || !this.canStart(session)) return;
+    if (this.shouldWake(session) && this.startTurn(session) === null) {
+      this.blockedStarts.add(session.id);
+      this.armEndRetry();
     }
   }
 
+  private async retryHeld(): Promise<void> {
+    const ids = new Set<string>(this.blockedStarts);
+    for (const held of this.heldEnds.values()) if (!held.released) ids.add(held.ev.sessionId);
+    for (const sessionId of ids) {
+      const session = this.get(sessionId);
+      if (session && this.needsRelease(sessionId)) await this.releaseTurn(session);
+    }
+    this.sendEnds();
+    for (const sessionId of [...this.blockedStarts]) {
+      if (this.endHeld(sessionId)) continue;
+      this.blockedStarts.delete(sessionId);
+      const session = this.get(sessionId);
+      if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId) || !this.canStart(session)) continue;
+      if (this.shouldWake(session) && this.startTurn(session) === null) this.blockedStarts.add(sessionId);
+    }
+    this.armEndRetry();
+  }
+
   private armEndRetry(): void {
-    if (this.unsentEnds.size === 0 && this.blockedStarts.size === 0) {
+    if (this.unsentEnds.size === 0 && this.blockedStarts.size === 0 && this.heldEnds.size === 0) {
       if (this.endTimer) clearTimeout(this.endTimer);
       this.endTimer = null;
       return;
@@ -403,16 +491,7 @@ export class Turns {
     if (this.endTimer) return;
     this.endTimer = setTimeout(() => {
       this.endTimer = null;
-      this.retryHeldTranscripts();
-      this.sendEnds();
-      for (const sessionId of [...this.blockedStarts]) {
-        if (this.endHeld(sessionId)) continue;
-        this.blockedStarts.delete(sessionId);
-        const session = this.get(sessionId);
-        if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId) || !this.canStart(session)) continue;
-        if (this.queues.get(sessionId)?.length && this.startTurn(session) === null) this.blockedStarts.add(sessionId);
-      }
-      this.armEndRetry();
+      void this.retryHeld();
     }, this.deps.endRetryMs ?? END_RETRY_MS);
     this.endTimer.unref?.();
   }
@@ -492,14 +571,16 @@ export class Turns {
       this.upsert(session);
       return { queued: true };
     }
-    if (this.transcriptPending(sessionId) && (!this.finishDurable(session) || !this.sendEnds(sessionId))) {
+    if (this.needsRelease(sessionId)) {
       this.blockedStarts.add(sessionId);
+      void this.releaseTurn(session).then((ok) => this.afterHeld(session, ok));
       this.armEndRetry();
       this.upsert(session);
       return { queued: true };
     }
     if (this.endHeld(sessionId)) {
       this.blockedStarts.add(sessionId);
+      this.armEndRetry();
       this.upsert(session);
       return { queued: true };
     }
@@ -518,6 +599,7 @@ export class Turns {
   }
 
   private endHeld(sessionId: string): boolean {
+    if (this.needsRelease(sessionId)) return true;
     for (const ev of this.unsentEnds.values()) if (ev.sessionId === sessionId) return true;
     return false;
   }
@@ -531,9 +613,7 @@ export class Turns {
     const session = this.get(sessionId);
     if (!session || session.status === 'closed' || !this.accepting) return null;
     if (this.active.has(sessionId) || !this.canStart(session)) return null;
-    const queued = this.queues.get(sessionId)?.length ?? 0;
-    const notices = session.kind === 'orchestrator' ? this.deps.peekNotices().length : 0;
-    if (!queued && !notices) return null;
+    if (!this.shouldWake(session)) return null;
     return this.startTurn(session);
   }
 
@@ -589,7 +669,12 @@ export class Turns {
 
   /** Resolves once no turn is running (queued inputs still start turns while accepting). */
   async idle(): Promise<void> {
-    while (this.active.size) await Promise.allSettled([...this.active.values()].map((t) => t.done));
+    for (;;) {
+      const pending = [...this.active.values()].map((t) => t.done);
+      const settling = [...this.releasing.values()];
+      if (pending.length === 0 && settling.length === 0) return;
+      await Promise.allSettled([...pending, ...settling]);
+    }
   }
 
   answer(
@@ -684,30 +769,12 @@ export class Turns {
     }));
   }
 
-  private finishDurable(session: SessionRecord): boolean {
-    if (session.status !== 'running' || !session.handoff || this.active.has(session.id)) return true;
-    const handoff = session.handoff;
-    const log = this.deps.transcripts.get(session.id).log;
-    const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
-    if (!last || last.turnId !== handoff.turnId || !finishedTurn(last.events)) return false;
-    try {
-      this.deps.transcripts.commit(session.id);
-    } catch (err) {
-      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
-      return false;
-    }
-    session.status = 'idle';
-    delete session.handoff;
-    try {
-      this.deps.sessions.commit();
-    } catch (err) {
-      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
-    }
-    return true;
-  }
-
   private startTurn(session: SessionRecord): string | null {
-    if (!this.finishDurable(session)) return null;
+    if (this.active.has(session.id)) return this.active.get(session.id)!.turnId;
+    if (this.needsRelease(session.id)) {
+      void this.releaseTurn(session).then((ok) => this.afterHeld(session, ok));
+      return null;
+    }
     // The event log must close the previous turn before this one is allocated.
     // The inputs stay queued for a later start.
     if (!this.sendEnds(session.id)) {
@@ -905,33 +972,32 @@ export class Turns {
         if (tokens > 0) session.lastTurnTokens = tokens;
         if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
         session.lastActiveAt = this.now();
-        const previousStatus = session.status;
-        const previousHandoff = session.handoff;
-        // Cut off by shutdown or upgrade: the next boot resumes it.
-        if (session.status === 'running') session.status = turn.reason === 'restart' ? 'interrupted' : 'idle';
-        delete session.handoff;
         const t = transcripts.get(session.id);
         t.turns = session.turns;
         t.lastTurnTokens = session.lastTurnTokens;
         t.lastActiveAt = session.lastActiveAt;
-        // The reply is durable before the record says the turn is over. If the
-        // transcript cannot be written, the record on disk stays running and
-        // handed off, so a restart resumes the turn instead of dropping it.
-        let transcriptLanded = false;
+        // Cut off by shutdown or upgrade: the next boot resumes it.
+        const held: HeldEnd = {
+          ev: { kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats },
+          status: turn.reason === 'restart' ? 'interrupted' : 'idle',
+          outcome: {
+            turnId: turn.turnId,
+            error: turn.interrupted ? null : lastError,
+            interrupted: turn.interrupted ? turn.reason ?? 'user' : null,
+            entry: record,
+            notices,
+          },
+          landed: false,
+          finalized: false,
+          released: false,
+        };
+        this.heldEnds.set(turn.turnId, held);
         try {
           transcripts.commit(session.id);
-          transcriptLanded = true;
-          this.deps.sessions.commit();
+          held.landed = true;
         } catch (err) {
-          if (!transcriptLanded) {
-            session.status = previousStatus;
-            if (previousHandoff) session.handoff = previousHandoff;
-            else delete session.handoff;
-          }
           log.error('turn.end-failed', err, { sessionId: session.id });
         }
-        if (transcriptLanded) this.publishEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
-        else this.holdEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
         log.info('turn.end', {
           sessionId: session.id,
           turnId: turn.turnId,
@@ -940,18 +1006,14 @@ export class Turns {
           inputTokens: stats.inputTokens,
           outputTokens: stats.outputTokens,
         });
-        if (this.deps.onTurnEnd) {
-          const outcome: TurnOutcome = {
-            turnId: turn.turnId,
-            error: turn.interrupted ? null : lastError,
-            interrupted: turn.interrupted ? turn.reason ?? 'user' : null,
-            entry: record,
-            notices,
-          };
-          try {
-            await this.deps.onTurnEnd(session, outcome);
-          } catch (err) {
-            log.error('turn.end-hook-failed', err, { sessionId: session.id });
+        if (!held.landed) {
+          this.blockedStarts.add(session.id);
+          this.armEndRetry();
+        } else {
+          const released = await this.releaseTurn(session);
+          if (!released) {
+            this.blockedStarts.add(session.id);
+            this.armEndRetry();
           }
         }
       }

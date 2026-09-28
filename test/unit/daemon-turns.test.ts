@@ -1388,4 +1388,162 @@ describe('daemon turns: crash windows and storage failures', () => {
     expect(starts).toHaveLength(2);
     expect(ends).toEqual(starts);
   });
+
+  it('finalizes a turn only after the turn-end transcript write lands', async () => {
+    let failing = true;
+    const order: string[] = [];
+    const mine: DaemonEvent[] = [];
+    let sessionId = '';
+    let finalized = false;
+    turns = build({
+      endRetryMs: 5,
+      emit: (ev) => mine.push(ev),
+      onTurnEnd: () => {
+        if (finalized) return;
+        finalized = true;
+        order.push(lastTurnKinds(diskLog(sessionId)).includes('turn-end') ? 'hook-after-transcript' : 'hook-before-transcript');
+        order.push(mine.some((e) => e.kind === 'turn.end') ? 'hook-after-end' : 'hook-before-end');
+      },
+    });
+    failFinishedCommit(() => failing);
+    const s = orchestrator();
+    sessionId = s.id;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        await gate;
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+      (_req, ctx) => {
+        order.push('next-turn');
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'hello');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'next')).toEqual({ queued: true });
+    release();
+    await turns.idle();
+    expect(order).toEqual([]);
+    expect(mine.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    expect(lastTurnKinds(diskLog(s.id))).not.toContain('turn-end');
+    expect(turns.get(s.id)?.status).toBe('running');
+
+    failing = false;
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(order).toEqual(['hook-after-transcript', 'hook-before-end', 'next-turn']);
+    expect(calls.map((c) => c.prompt)).toEqual(['hello', 'next']);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+  });
+
+  it('keeps a shutdown interrupt interrupted when the retried transcript write lands', async () => {
+    let failing = true;
+    const hookDisk: string[] = [];
+    const mine: DaemonEvent[] = [];
+    let sessionId = '';
+    turns = build({
+      endRetryMs: 5,
+      emit: (ev) => mine.push(ev),
+      onTurnEnd: () => {
+        hookDisk.push(lastTurnKinds(diskLog(sessionId)).includes('turn-end') ? 'landed' : 'missing');
+      },
+    });
+    failFinishedCommit(() => failing);
+    const s = orchestrator();
+    sessionId = s.id;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        await gate;
+        ctx.emit({ kind: 'text-delta', text: 'partial' });
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'hello');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.interrupt(s.id, 'restart')).toBe(true);
+    release();
+    await turns.idle();
+    expect(hookDisk).toEqual([]);
+    expect(turns.get(s.id)?.status).toBe('running');
+    expect(turns.get(s.id)?.handoff?.handedOff).toBe(true);
+    expect(mine.filter((e) => e.kind === 'turn.end')).toEqual([]);
+
+    failing = false;
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(hookDisk).toEqual(['landed']);
+    expect(turns.get(s.id)?.status).toBe('interrupted');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { status: string; handoff?: unknown }>;
+    expect(saved[s.id].status).toBe('interrupted');
+    expect(saved[s.id].handoff).toBeUndefined();
+    expect(lastTurnKinds(diskLog(s.id))).toEqual(['text-delta', 'turn-end']);
+    expect(mine.filter((e) => e.kind === 'turn.end')).toHaveLength(1);
+  });
+
+  it('writes the turn-end transcript after the session is closed, and still publishes turn.end', async () => {
+    let failing = true;
+    const mine: DaemonEvent[] = [];
+    turns = build({ endRetryMs: 5, emit: (ev) => mine.push(ev) });
+    failFinishedCommit(() => failing);
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+    ];
+    await send(s.id, 'hello');
+    expect(lastTurnKinds(diskLog(s.id))).not.toContain('turn-end');
+    expect(mine.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    turns.close(s.id);
+    expect(turns.get(s.id)?.status).toBe('closed');
+
+    failing = false;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(lastTurnKinds(diskLog(s.id))).toEqual(['text-delta', 'turn-end']);
+    expect(mine.filter((e) => e.kind === 'turn.end')).toHaveLength(1);
+    expect(turns.get(s.id)?.status).toBe('closed');
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { status: string; handoff?: unknown }>;
+    expect(saved[s.id].status).toBe('closed');
+    expect(saved[s.id].handoff).toBeUndefined();
+  });
+
+  it('starts a notice-only wake once a held turn-end transcript write lands', async () => {
+    let failing = true;
+    const notice = { id: 'ntc_late', kind: 'environment.restarted' as const, at: 2, text: 'A worker finished.' };
+    const mine: DaemonEvent[] = [];
+    turns = build({ endRetryMs: 5, emit: (ev) => mine.push(ev) });
+    failFinishedCommit(() => failing);
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+      (_req, ctx) => ctx.emit(END),
+    ];
+    await send(s.id, 'hello');
+    expect(turns.get(s.id)?.status).toBe('running');
+    expect(mine.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    pendingNotices.push(notice);
+    expect(turns.kick(s.id)).toBeNull();
+    expect(calls.map((c) => c.prompt)).toEqual(['hello']);
+
+    failing = false;
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['hello', noticePrompt([notice])]);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    const starts = mine.flatMap((e) => (e.kind === 'turn.start' ? [e.turnId] : []));
+    const ends = mine.flatMap((e) => (e.kind === 'turn.end' ? [e.turnId] : []));
+    expect(ends).toEqual(starts);
+    expect(lastTurnKinds(diskLog(s.id))).toContain('turn-end');
+  });
 });
