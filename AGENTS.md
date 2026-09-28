@@ -87,7 +87,8 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   Never call `page.setViewportSize` on the live app.
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.
-- **Provider logins** run in the system browser (RFC 8252).
+- **Provider logins** for harnesses run in the system browser (RFC 8252).
+  GitHub uses the OAuth device flow with a client id only (`src/main/providers/github-app.ts`, overridden by `PUCK_GITHUB_CLIENT_ID`) - never add a client secret.
   The authorize URL goes through `shell.openExternal`.
   The redirect lands on the shared loopback listener `src/main/providers/loopback.ts` (127.0.0.1 only, one request, state check, timeout).
   Claude binds an ephemeral port (`http://localhost:<port>/callback`, the shape Claude Code registers).
@@ -132,8 +133,9 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   Keep this directory free of node/electron imports.
   `bridge.ts` holds the types and `PuckBridge`, `channels.ts` the IPC channel table, `types.ts` the `HarnessEvent` wire protocol.
   `options.ts` holds the provider option schema and `ipc.ts` the `IpcHarness`.
-- `src/main/providers/` - the Provider interface and registry.
-  See its README header comment for what a new provider needs.
+  `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
+- `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
+  The header comments say what a new provider needs.
 - `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.
 - `src/main/environments.ts` - Puck lifecycle state, Docker lifecycle, bootstrap, credential and secret injection, credential purge on logout (all registry-driven, no provider names).
 - `src/main/runner.ts` - docker-exec stdio bridge (handshake, watchdog, stderr diagnostics, `WIRE` contract).
@@ -156,6 +158,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   - `settings/cards.ts` and `settings/env-rail.ts` - card-grid kit and the ONE environment op ladder (list cards and detail header share it).
   - `env-progress.ts` - lifecycle presentation: status chip, "stage · elapsed" line, and composer gate text.
     Its tracker merges pushed lifecycle events and runs the elapsed-time ticker.
+  - `settings/providers.ts` - the Providers section grouped by kind, with `github.ts` and `ssh-hosts.ts` for its cards.
   - `settings/support.ts` - the Support section: version, data paths, and the support-bundle export button.
   - `nav.ts` - pure nav state machine (`navTransition`, `escapeTarget`).
   - `options.ts`, `util.ts`, `dom.ts`, `format.ts`, `markdown.ts`.

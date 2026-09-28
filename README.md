@@ -13,9 +13,10 @@ Every turn executes inside a Docker container you configure.
 - **Environments** are persistent Docker containers with a host directory mounted at `/workspace`.
   Puck installs the provider CLIs and SDKs into the container, deploys a small runner agent, and speaks NDJSON to it over `docker exec` stdio.
   The container is the safety boundary: agents run with full tool access inside it, and the workspace folder is the only host folder they reach.
-- **Providers** implement one interface (`src/main/providers/`): descriptor metadata, OAuth, and container integration (packages, credential mirroring, environment).
-  Sign-in happens in the system browser with a loopback callback, RFC 8252 style, and tokens are encrypted via the OS keychain.
-  Adding a provider is one descriptor module, one registry entry, and one entry in the container runner's `PROVIDERS` table.
+- **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH), and integrations (GitHub).
+  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in with the device flow or a personal access token.
+  Tokens are encrypted via the OS keychain.
+  Adding a harness is one pure descriptor under `src/harness/providers/`, its host half, one registry entry, and one entry in the container runner's `PROVIDERS` table.
 
 Turns stream live.
 Text renders as markdown, tool calls collapse into a per-turn card that opens full-screen, and sub-agents get their own nested chats.
