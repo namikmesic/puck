@@ -756,6 +756,43 @@ describe('restart', () => {
     const restarted = defined(notices(await history(d, orch)).find((n) => n.kind === 'environment.restarted'));
     expect(restarted.text).toContain('requeued without counting an attempt, each continuing its existing worker session: W-1 "Big job"');
   });
+
+  it('gives the worker its full prompt when a shutdown interrupted the first worktree prepare', async () => {
+    let stopping: Promise<void> | undefined;
+    onGit = async (argv) => {
+      if (stopping || !argv.includes('worktree') || !argv.includes('add')) return;
+      // Stop taking input while the worktree is created: the session exists before its prompt can be queued.
+      stopping = daemon.shutdown();
+    };
+    const c = client();
+    await c.cmd('item.create', { title: 'Cut short', agent: 'implementer' });
+    await vi.waitFor(() => expect(stopping).toBeDefined());
+    await stopping;
+    onGit = null;
+    expect(workerCalls).toHaveLength(0);
+
+    workerSteps = [say('Started after the restart.')];
+    await launch();
+    const d = client();
+    const after = await until(d, 1, 'review');
+    expect(after.attempts).toBe(1);
+    expect(workerCalls).toHaveLength(1);
+    const worktree = path.join(root.paths.workspace, '.puck', 'worktrees', 'W-1');
+    expect(workerCalls[0]).toMatchObject({
+      sessionId: after.sessionId,
+      prompt: workerPrompt({
+        number: 1,
+        title: 'Cut short',
+        body: after.body,
+        github: 'octo/app',
+        cwd: worktree,
+        branch: defined(after.branch),
+        base: defined(after.base),
+      }),
+    });
+    const snap = await d.cmd<Snapshot>('snapshot.get');
+    expect(snap.sessions.filter((s) => s.kind === 'worker')).toHaveLength(1);
+  });
 });
 
 describe('definition.apply', () => {
