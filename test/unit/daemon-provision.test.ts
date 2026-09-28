@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Credentials } from '../../src/daemon/credentials';
-import { readDefinition, type DaemonDefinition } from '../../src/daemon/definition';
+import { readDefinition, type DaemonDefinition } from '../../src/harness/env-definition';
 import { nullLogger } from '../../src/daemon/log';
 import type { DaemonPaths } from '../../src/daemon/paths';
 import { askpassScript, provision, ProvisionError, RUNTIME_MESSAGE, type ProvisionDeps } from '../../src/daemon/provision';

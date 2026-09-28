@@ -11,10 +11,10 @@
  * `agentDefinitions` map keyed by agent name.
  */
 
-import { harnessDescriptorById } from '../harness/providers';
-import type { SettingsMap } from '../harness/options';
-import { diffEnvironments } from '../harness/definitions/diff';
-import type { DefinitionChange, ResolvedEnvironment, UpdateClass } from '../harness/definitions/types';
+import { diffEnvironments } from './definitions/diff';
+import type { DefinitionChange, ResolvedEnvironment, UpdateClass } from './definitions/types';
+import type { SettingsMap } from './options';
+import { harnessDescriptorById } from './providers';
 
 export interface DaemonAgent {
   name: string;

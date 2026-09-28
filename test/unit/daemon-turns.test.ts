@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { DaemonEvent } from '../../src/harness/daemon-protocol';
 import type { HarnessEvent } from '../../src/harness/types';
 import type { TurnEntry } from '../../src/harness/transcript';
-import type { DaemonAgent } from '../../src/daemon/definition';
+import type { DaemonAgent } from '../../src/harness/env-definition';
 import type { AdapterContext, AdapterRequest, HarnessAdapter } from '../../src/daemon/harness/types';
 import { EventLog } from '../../src/daemon/eventlog';
 import { nullLogger } from '../../src/daemon/log';

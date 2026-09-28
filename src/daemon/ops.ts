@@ -16,7 +16,8 @@ import {
   type OpResult,
   type Pin,
 } from '../harness/daemon-protocol';
-import { MAX_GRANTS, validPin } from './credentials';
+import { validPin } from '../harness/inbox';
+import { MAX_GRANTS } from './credentials';
 
 export class OpError extends Error {
   constructor(

@@ -11,7 +11,7 @@
 
 import type { AskQuestion, HarnessEvent, TurnStats } from '../../harness/types';
 import type { SettingsMap } from '../../harness/options';
-import type { DaemonAgent } from '../definition';
+import type { DaemonAgent } from '../../harness/env-definition';
 
 export interface AdapterRequest {
   sessionId: string;

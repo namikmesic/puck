@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readDefinition, referencedHarnesses, validBranch } from '../../src/daemon/definition';
+import { readDefinition, referencedHarnesses, validBranch } from '../../src/harness/env-definition';
 import { exampleDefinition } from './daemon-fakes';
 
 describe('daemon definition reader', () => {

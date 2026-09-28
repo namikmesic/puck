@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { ApiError, RunnerRemovedError, ServerApi, type Fetch } from './api';
+import { ApiError, RunnerRemovedError, ServerApi, type Fetch, type RegisterResponse } from './api';
 import type { DockerRunner } from './docker/client';
 import { dockerHealth } from './docker/health';
 import { DockerOps } from './docker/ops';
@@ -136,10 +136,15 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
   const labels = parseLabels(await ask('Additional labels, comma-separated [none]: ', opts.labels, ''));
   const maxEnvironments = parseMax(await ask('Most environments this machine may host [no limit]: ', opts.maxEnvironments, ''));
 
+  if (fs.existsSync(paths.key) || fs.existsSync(paths.credentials)) {
+    forgetRegistration(paths);
+    io.print('A previous registration did not finish. If the server already kept the name, pass --replace.');
+  }
   const key = createRunnerKey(paths);
   const api = new ServerApi(url.origin + url.pathname.replace(/\/+$/, ''), deps.fetch);
   io.print(`Registering with ${api.baseUrl}…`);
-  let res;
+  let res: RegisterResponse;
+  let accepted = false;
   try {
     res = await api.register({
       registrationToken: opts.token,
@@ -153,20 +158,22 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
       maxEnvironments,
       replace: opts.replace,
     });
+    accepted = true;
+    writeConfig(paths, {
+      runnerId: res.runnerId,
+      name: res.name,
+      serverUrl: res.serverUrl.replace(/\/+$/, ''),
+      labels: res.labels,
+      maxEnvironments,
+      disableUpdate: opts.disableUpdate,
+      owner: res.owner?.login ?? null,
+    });
+    writeCredentials(paths, { runnerId: res.runnerId, keyFile: '.runner_key', keyFingerprint: key.fingerprint });
   } catch (err) {
-    fs.rmSync(paths.key, { force: true });
-    throw new ConfigureError(err instanceof Error ? err.message : String(err));
+    forgetRegistration(paths);
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ConfigureError(accepted ? `${message} If the server already kept the name, pass --replace.` : message);
   }
-  writeConfig(paths, {
-    runnerId: res.runnerId,
-    name: res.name,
-    serverUrl: res.serverUrl.replace(/\/+$/, ''),
-    labels: res.labels,
-    maxEnvironments,
-    disableUpdate: opts.disableUpdate,
-    owner: res.owner?.login ?? null,
-  });
-  writeCredentials(paths, { runnerId: res.runnerId, keyFile: '.runner_key', keyFingerprint: key.fingerprint });
   io.print(`✓ Runner ${res.name} (${res.runnerId}) registered to @${res.owner?.login ?? 'you'}. Key ${key.fingerprint}`);
   io.print(
     deps.platform.os === 'macos'

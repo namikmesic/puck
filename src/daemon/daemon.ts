@@ -41,7 +41,7 @@ import {
   referencedHarnesses,
   type DaemonAgent,
   type DaemonDefinition,
-} from './definition';
+} from '../harness/env-definition';
 import { EventLog } from './eventlog';
 import { runCommand, type CommandRunner } from './exec';
 import { createAdapters } from './harness';

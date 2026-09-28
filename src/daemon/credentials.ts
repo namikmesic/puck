@@ -30,18 +30,15 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { GithubAuth, GithubGrant, Pin } from '../harness/daemon-protocol';
+import type { GithubAuth, GithubGrant } from '../harness/daemon-protocol';
+import { readDefinition } from '../harness/env-definition';
+import { validHarnessContent, validPin, validSecretValues } from '../harness/inbox';
 import { harnessDescriptorById } from '../harness/providers';
-import { readDefinition, ENV_KEY_RE } from './definition';
 import type { CommandRunner, RunOptions } from './exec';
 import type { Logger } from './log';
 import type { DaemonPaths } from './paths';
 import { readJsonFile, writeFileAtomicSync } from './store/jsonfile';
 import type { InstanceRecord } from './store/instance';
-
-/** A harness credential file is small JSON; anything bigger is not one. */
-const MAX_CREDENTIAL_BYTES = 64 * 1024;
-const MAX_SECRET_BYTES = 64 * 1024;
 
 /** An environment's repositories span at most this many installations (one grant each). */
 export const MAX_GRANTS = 20;
@@ -111,28 +108,6 @@ export function githubAuthOf(cred: GithubGrants | null, now: number): GithubAuth
   if (!live.length) return { state: 'missing', expiresAt: earliest };
   if (live.length < cred.grants.length || earliest - now < EXPIRING_WITHIN_MS) return { state: 'expiring', expiresAt: earliest };
   return { state: 'ok', expiresAt: earliest };
-}
-
-export function validSecretValues(raw: unknown): Record<string, string> | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (!ENV_KEY_RE.test(key) || key.startsWith('PUCK_')) return null;
-    if (typeof value !== 'string' || value.length > MAX_SECRET_BYTES) return null;
-    out[key] = value;
-  }
-  return out;
-}
-
-function validHarnessContent(id: string, content: unknown): content is string {
-  if (!harnessDescriptorById(id) || typeof content !== 'string') return false;
-  if (!content || Buffer.byteLength(content, 'utf8') > MAX_CREDENTIAL_BYTES) return false;
-  try {
-    JSON.parse(content);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export interface CredentialsDeps {
@@ -374,12 +349,4 @@ export class Credentials {
         return 'unknown inbox file';
     }
   }
-}
-
-export function validPin(raw: unknown): Pin | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const p = raw as Record<string, unknown>;
-  if (p.kind !== 'tag' && p.kind !== 'branch' && p.kind !== 'commit') return null;
-  if (typeof p.name !== 'string' || typeof p.sha !== 'string' || !/^[0-9a-f]{7,64}$/.test(p.sha)) return null;
-  return { kind: p.kind, name: p.name.slice(0, 200), sha: p.sha };
 }

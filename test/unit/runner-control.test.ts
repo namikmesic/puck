@@ -9,6 +9,7 @@ import { Control, controlTableTotal, VALIDATORS } from '../../src/puck-runner/co
 import type { DockerOptions, DockerResult } from '../../src/puck-runner/docker/client';
 import { DockerOps } from '../../src/puck-runner/docker/ops';
 import { createLogger, nullLogger } from '../../src/puck-runner/log';
+import { exampleDefinition } from './daemon-fakes';
 
 // The control channel's command table: every op validated before it reaches
 // Docker, the bundle cache upload, and create fetching the first GitHub
@@ -22,7 +23,7 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
-const instance = { envId: ENV, name: 'Example', definition: { name: 'example' } };
+const instance = { envId: ENV, name: 'Example', definition: exampleDefinition() };
 
 function harness(opts: { exists?: boolean; containers?: number; max?: number | null; mintFails?: boolean; volumes?: boolean; hold?: Promise<void> } = {}) {
   const calls: string[][] = [];
@@ -93,6 +94,49 @@ describe('runner control protocol', () => {
     expect(await h.cmd('nope.op', {})).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
     expect(await h.control.handle({ t: 'x' }, () => undefined)).toMatchObject({ t: 'error', code: 'bad-frame' });
     expect(h.calls).toEqual([]);
+  });
+
+  it('refuses an inbox the daemon would drop, before any Docker work', async () => {
+    const h = harness();
+    const bundle = Buffer.from('// puckd');
+    h.bundles.put(sha(bundle), 0, bundle, true);
+    const base = { envId: ENV, image: 'node:22', bundleSha: sha(bundle) };
+    const bad = async (args: unknown) => (await h.cmd('instance.create', args)) as { ok: boolean; error?: { code: string; message?: string } };
+    const withInbox = (over: Record<string, unknown>) => ({ ...base, inbox: { instance, ...over } });
+
+    expect((await bad(withInbox({ secrets: { PUCK_TOKEN: 'x' } }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ secrets: { OK: 'x', PUCK_TOKEN: 'x' } }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ secrets: { NPM_TOKEN: 'x'.repeat(64 * 1024 + 1) } }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ secrets: { 'not a name': 'x' } }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ harness: [{ id: 'nope', content: '{}' }] }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ harness: [{ id: 'claude-code', content: '' }] }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ harness: [{ id: 'claude-code', content: 'not-json' }] }))).error?.code).toBe('invalid-args');
+    expect((await bad(withInbox({ harness: [{ id: 'codex', content: JSON.stringify({ v: 'x'.repeat(64 * 1024) }) }] }))).error?.code).toBe('invalid-args');
+    const broken = await bad({ ...base, inbox: { instance: { ...instance, definition: { name: 'example' } } } });
+    expect(broken.error?.code).toBe('invalid-args');
+    expect(broken.error?.message).toMatch(/repos/);
+    expect((await bad({ ...base, inbox: { instance: { ...instance, pin: { kind: 'tag', name: 'v1', sha: 'zz' } } } })).error?.code).toBe('invalid-args');
+    expect(await h.cmd('instance.rebuild', { ...base, instance: { ...instance, pin: { kind: 'tag', name: 'v1', sha: 'zz' } } })).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-args' },
+    });
+    expect(await h.cmd('instance.rebuild', { ...base, instance: { ...instance, definition: { name: 'example' } } })).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-args' },
+    });
+    expect(h.calls).toEqual([]);
+
+    const res = await h.cmd('instance.create', withInbox({
+      secrets: { NPM_TOKEN: 's3cret' },
+      harness: [{ id: 'claude-code', content: '{"token":"abc"}' }],
+      instance: { ...instance, pin: { kind: 'tag', name: 'v1', sha: 'abc1234' } },
+    }));
+    expect(res).toMatchObject({ ok: true, result: {} });
+    const cp = h.inputs.find((input) => Buffer.isBuffer(input));
+    const archive = cp?.toString('utf8') ?? '';
+    expect(archive).toContain('NPM_TOKEN');
+    expect(archive).toContain('{"token":"abc"}');
+    expect(archive).toContain('abc1234');
   });
 
   it('caches a bundle uploaded in ordered chunks and checks its sha256', async () => {

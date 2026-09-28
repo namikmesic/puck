@@ -103,7 +103,7 @@ export function writeFileAtomic(file: string, content: string | Buffer, mode: nu
 }
 
 export function isConfigured(paths: RunnerPaths): boolean {
-  return fs.existsSync(paths.config) || fs.existsSync(paths.credentials) || fs.existsSync(paths.key);
+  return fs.existsSync(paths.config);
 }
 
 export function readConfig(paths: RunnerPaths): RunnerConfig {

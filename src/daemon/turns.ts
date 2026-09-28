@@ -52,7 +52,7 @@ import { isStaleResumeError } from '../harness/resume';
 import { harnessDescriptorById } from '../harness/providers';
 import { validateSettings } from '../harness/options';
 import { newId } from '../harness/ulid';
-import type { DaemonAgent } from './definition';
+import type { DaemonAgent } from '../harness/env-definition';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';

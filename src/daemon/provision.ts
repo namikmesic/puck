@@ -27,7 +27,7 @@ import {
   verifyScript,
 } from '../harness/provisioning';
 import type { Credentials } from './credentials';
-import { referencedHarnesses, type DaemonDefinition } from './definition';
+import { referencedHarnesses, type DaemonDefinition } from '../harness/env-definition';
 import { type CommandRunner, type RunOptions, tailOf } from './exec';
 import { codexWrapperScript, CODEX_AS_PUCK, HARNESS_PATH } from './harness/spawn';
 import type { Logger } from './log';

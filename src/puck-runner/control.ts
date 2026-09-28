@@ -27,6 +27,8 @@ import {
   type RunnerInfo,
 } from '../harness/runner-protocol';
 import type { GithubGrant } from '../harness/daemon-protocol';
+import { readDefinition } from '../harness/env-definition';
+import { validHarnessContent, validPin, validSecretValues } from '../harness/inbox';
 import { ApiError } from './api';
 import { BundleCache, BundleError, SHA_RE } from './bundles';
 import { DockerError } from './docker/client';
@@ -70,7 +72,6 @@ function sha(o: Obj, key: string): string {
 const IMAGE_RE = /^[a-z0-9][a-z0-9._/:@-]{0,254}$/i;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const MEMORY_RE = /^\d{1,12}(\.\d{1,3})?[bkmg]?$/i;
-const HARNESS_ID_RE = /^[a-z0-9-]{1,40}$/;
 
 function build(o: Obj): InstanceBuild {
   const out: InstanceBuild = { envId: envId(o), bundleSha: sha(o, 'bundleSha') };
@@ -114,8 +115,15 @@ function instanceFile(v: unknown, id: string): InstanceInbox['instance'] {
   const i = obj(v);
   if (i.envId !== id) bad('The instance file names another environment.');
   if (typeof i.name !== 'string' || !i.name || i.name.length > 200) bad('The instance file needs a name.');
-  if (!i.definition || typeof i.definition !== 'object') bad('The instance file needs the resolved definition.');
-  return { envId: id, name: i.name, pin: i.pin, definition: i.definition };
+  const def = readDefinition(i.definition);
+  if (!def.ok) bad(def.error);
+  const file: InstanceInbox['instance'] = { envId: id, name: i.name, definition: i.definition };
+  if (i.pin !== undefined && i.pin !== null) {
+    const pin = validPin(i.pin);
+    if (!pin) bad('The instance pin must be a tag, branch, or commit with a hex sha.');
+    file.pin = pin;
+  }
+  return file;
 }
 
 function inbox(v: unknown, id: string): InstanceInbox {
@@ -125,19 +133,16 @@ function inbox(v: unknown, id: string): InstanceInbox {
     if (!Array.isArray(o.harness) || o.harness.length > 8) bad('inbox.harness must be a short list.');
     out.harness = o.harness.map((h) => {
       const e = obj(h);
-      if (typeof e.id !== 'string' || !HARNESS_ID_RE.test(e.id) || typeof e.content !== 'string' || e.content.length > 64 * 1024) {
-        bad('Each harness credential needs an id and content.');
+      if (typeof e.id !== 'string' || !validHarnessContent(e.id, e.content)) {
+        bad('Each harness credential must be JSON for a known harness, at most 64KB.');
       }
       return { id: e.id, content: e.content };
     });
   }
   if (o.secrets !== undefined) {
-    const s = obj(o.secrets);
-    out.secrets = {};
-    for (const [key, value] of Object.entries(s)) {
-      if (!ENV_KEY_RE.test(key) || typeof value !== 'string') bad('Secret names must be variable names with string values.');
-      out.secrets[key] = value;
-    }
+    const secrets = validSecretValues(o.secrets);
+    if (!secrets) bad('Secret names must be variable names that do not start with PUCK_, and each value must be at most 64KB.');
+    out.secrets = secrets;
   }
   return out;
 }

@@ -102,6 +102,48 @@ describe('config.sh', { timeout: 20_000 }, () => {
     expect(isConfigured(paths)).toBe(false);
     await configure(base, { ...deps, docker: docker().run });
     await expect(configure(base, { ...deps, docker: docker().run })).rejects.toThrow(/already configured/);
+    expect(fs.existsSync(paths.key)).toBe(true);
+  });
+
+  it('treats a key with no .runner as not configured, and deletes it when registration or saving fails', async () => {
+    const session = await signIn(h, 'octo');
+    fs.writeFileSync(paths.key, 'orphan-key\n', { mode: 0o600 });
+    fs.writeFileSync(paths.credentials, '{}\n', { mode: 0o600 });
+    expect(isConfigured(paths)).toBe(false);
+    const t = io();
+    await configure(
+      { url: h.base, token: await token(session, 'registration'), name: 'fresh', unattended: true, replace: false, disableUpdate: false },
+      { paths, docker: docker().run, io: t, version: '0.1.0', platform: { os: 'linux', arch: 'x64' } },
+    );
+    expect(t.out.join('\n')).toMatch(/--replace/);
+    expect(isConfigured(paths)).toBe(true);
+    expect(fs.readFileSync(paths.key, 'utf8')).toContain('BEGIN PRIVATE KEY');
+    expect(fs.readFileSync(paths.key, 'utf8')).not.toContain('orphan-key');
+
+    const again = runnerPaths(path.join(dir, 'again'));
+    fs.mkdirSync(again.root, { recursive: true });
+    const reg = { url: h.base, token: await token(session, 'registration'), name: 'kept-name', unattended: true, replace: false, disableUpdate: false };
+    const deps = { paths: again, io: io(), version: '0.1.0', platform: { os: 'linux' as const, arch: 'x64' as const }, docker: docker().run };
+    await expect(configure({ ...reg, token: 'PRT_nottherealtokenatall' }, deps)).rejects.toThrow(/unknown, revoked or expired/);
+    expect(fs.existsSync(again.key)).toBe(false);
+    expect(fs.existsSync(again.credentials)).toBe(false);
+    expect(fs.existsSync(again.config)).toBe(false);
+
+    const readonly = path.join(again.root, 'readonly');
+    fs.mkdirSync(readonly, { mode: 0o555 });
+    const blocked = runnerPaths(again.root);
+    blocked.config = path.join(readonly, '.runner');
+    await expect(configure(reg, { ...deps, paths: blocked })).rejects.toThrow(/--replace/);
+    fs.chmodSync(readonly, 0o755);
+    expect(fs.existsSync(again.key)).toBe(false);
+    expect(fs.existsSync(again.credentials)).toBe(false);
+    expect(isConfigured(again)).toBe(false);
+
+    await expect(configure(reg, deps)).rejects.toThrow(/--replace/);
+    expect(fs.existsSync(again.key)).toBe(false);
+    await configure({ ...reg, replace: true }, deps);
+    expect(isConfigured(again)).toBe(true);
+    expect(readConfig(again).name).toBe('kept-name');
   });
 
   it('parses names, labels and limits the way the server accepts them', () => {

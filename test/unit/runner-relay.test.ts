@@ -16,6 +16,7 @@ import { loadRunnerKey } from '../../src/puck-runner/identity';
 import { createLogger, nullLogger } from '../../src/puck-runner/log';
 import { RelayConnection } from '../../src/puck-runner/relay';
 import { ControlClient, RelayApp } from '../relay-client';
+import { exampleDefinition } from './daemon-fakes';
 import { call, signIn, startServer, type Harness, type SignedIn } from './server-fakes';
 
 // A real runner connection (registration, token exchange, WebSocket,
@@ -225,7 +226,7 @@ describe('runner relay (in process, real server)', { timeout: 30_000 }, () => {
       envId,
       image: 'node:22-bookworm',
       bundleSha: sha,
-      inbox: { instance: { envId, name: 'Example', definition: { name: 'example' } } },
+      inbox: { instance: { envId, name: 'Example', definition: exampleDefinition() } },
     });
     state = 'running';
     expect(control.events().map((e) => e.stage)).toContain('starting-container');
