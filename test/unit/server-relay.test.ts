@@ -278,7 +278,8 @@ describe('sockets', () => {
   it('closes an app socket on the sweep after its session is revoked', async () => {
     const { s, app } = await setup();
     const session = await h.server.ctx.store.sessionByAccess(hashSecret(s.accessToken));
-    await h.server.ctx.store.revokeSession(session!.id, h.clock.now());
+    if (!session) throw new Error('session missing');
+    await h.server.ctx.store.revokeSession(session.id, h.clock.now());
     h.clock.advance(5_000);
     expect(await app.waitClosed()).toMatchObject({ code: 4401, reason: 'signed-out' });
   });

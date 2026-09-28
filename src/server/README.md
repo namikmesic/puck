@@ -38,16 +38,17 @@ Each secret can be given as `NAME` or as `NAME_FILE`, a path to a file holding i
 | `PUCK_SERVER_URL` | Public base URL. Apps and runners use it, the GitHub callback is built from it, and runner assertions must name it. |
 | `PUCK_SERVER_HOST`, `PUCK_SERVER_PORT` | Listen address (default `127.0.0.1:8080`; the image listens on `0.0.0.0:8080`). |
 | `PUCK_SERVER_DB` | SQLite file (the image uses `/data/puck-server.db`). |
-| `PUCK_SERVER_TOKEN_KEY[_FILE]` | 32 random bytes, base64. Encrypts users' GitHub tokens at rest. |
-| `PUCK_GITHUB_APP_ID`, `PUCK_GITHUB_CLIENT_ID`, `PUCK_GITHUB_APP_SLUG` | The Puck GitHub App's public identity. |
+| `PUCK_SERVER_TOKEN_KEY[_FILE]` | 32 random bytes, base64. Encrypts users' GitHub tokens at rest. Required when GitHub sign-in is on. |
+| `PUCK_GITHUB_APP_ID`, `PUCK_GITHUB_CLIENT_ID` | The GitHub App's id and OAuth client id. |
+| `PUCK_GITHUB_APP_SLUG` | Optional. When set, the server can link to the App's install page. |
 | `PUCK_GITHUB_CLIENT_SECRET[_FILE]` | The App's client secret, for the web-flow code exchange. |
 | `PUCK_GITHUB_PRIVATE_KEY[_FILE]` | The App's private key: PEM, or PEM base64-encoded on one line. Signs App JWTs. |
-| `PUCK_GITHUB_API_URL`, `PUCK_GITHUB_WEB_URL` | GitHub endpoints (default github.com). |
+| `PUCK_GITHUB_API_URL`, `PUCK_GITHUB_WEB_URL` | GitHub endpoints (default github.com). Optional. |
 | `PUCK_RUNNER_DOWNLOADS` | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz`. |
 | `PUCK_RUNNER_MIN_VERSION` | Runners older than this are refused. |
 
-GitHub is all or nothing: with none of its settings the server runs with sign-in disabled (GitHub routes answer 503 `github-not-configured`); a partial set stops the server at start.
-The GitHub App needs `<PUCK_SERVER_URL>/v1/auth/github/callback` as a callback URL, a client secret, and a private key, all set on GitHub by the App's owner.
+GitHub sign-in needs the App id, client id, client secret, and private key together, plus `PUCK_SERVER_TOKEN_KEY`. With none of those four App settings the server still starts, and GitHub routes answer 503 `github-not-configured`. Setting some of them but not all four, or setting all four without the token key, stops the server at start. The App slug and the GitHub endpoint URLs are optional.
+The GitHub App needs `<PUCK_SERVER_URL>/v1/auth/github/callback` as a callback URL, set on GitHub by the App's owner.
 
 With Compose, put the settings in `puck-server.env` at the repository root (start from `puck-server.env.example`).
 Compose reads that file on the host, so it works whatever your Docker VM shares; the values do become the container's environment, which is acceptable on your own machine.

@@ -6,10 +6,12 @@
  * how a secret store or an orchestrator's mounted secrets reach the server
  * without the value ever sitting in the container's environment.
  *
- * GitHub is optional as a whole: with none of its settings the server still
- * boots and answers its health check, and every route that needs GitHub
- * answers 503 `github-not-configured`. A partial GitHub configuration is a
- * start-up error, so a typo never silently disables sign-in.
+ * GitHub sign-in is optional. With none of the App id, client id, client
+ * secret, and private key, the server still boots, and every route that
+ * needs GitHub answers 503 `github-not-configured`. Setting some of those
+ * four but not all of them, or setting them without `PUCK_SERVER_TOKEN_KEY`,
+ * is a start-up error, so a typo never silently disables sign-in. The App
+ * slug and the GitHub endpoint URLs are optional.
  *
  * | Variable | Meaning |
  * | --- | --- |
@@ -17,7 +19,8 @@
  * | PUCK_SERVER_HOST, PUCK_SERVER_PORT | Listen address (default 127.0.0.1:8080) |
  * | PUCK_SERVER_DB | SQLite file (default `puck-server.db`; `:memory:` for tests) |
  * | PUCK_SERVER_TOKEN_KEY[_FILE] | 32 bytes, base64: encrypts GitHub user tokens at rest |
- * | PUCK_GITHUB_APP_ID, PUCK_GITHUB_CLIENT_ID, PUCK_GITHUB_APP_SLUG | The GitHub App's public identity |
+ * | PUCK_GITHUB_APP_ID, PUCK_GITHUB_CLIENT_ID | The GitHub App's id and OAuth client id |
+ * | PUCK_GITHUB_APP_SLUG | Optional. When set, the server can link to the App's install page |
  * | PUCK_GITHUB_CLIENT_SECRET[_FILE] | The App's client secret (web-flow code exchange) |
  * | PUCK_GITHUB_PRIVATE_KEY[_FILE] | The App's private key: PEM, or the PEM base64-encoded on one line (for env files) |
  * | PUCK_GITHUB_API_URL, PUCK_GITHUB_WEB_URL | GitHub endpoints (default github.com) |

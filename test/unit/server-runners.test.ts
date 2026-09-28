@@ -156,7 +156,8 @@ describe('register', () => {
       body: { runnerId: old.runnerId, definition: 'web', repos: ['namik/web'] },
     });
     expect(inst.status).toBe(201);
-    const current = (await h.server.ctx.store.getRunner(old.runnerId))!;
+    const current = await h.server.ctx.store.getRunner(old.runnerId);
+    if (!current) throw new Error('runner missing');
     await expect(
       h.server.ctx.store.replaceRunner(
         old.runnerId,
