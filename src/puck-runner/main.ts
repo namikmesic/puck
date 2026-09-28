@@ -47,6 +47,8 @@ Options:
   --unattended                Ask nothing; use the flags and the defaults
   --replace                   Replace a runner you registered under the same name
   --disableupdate             Do not update the runner automatically
+  --local-socket <path>       Also listen on this unix socket for Puck on this machine
+                              (the This Mac runner Puck installs uses it)
   -h, --help                  Show this help
 
 Remove options:
@@ -110,6 +112,7 @@ async function config(argv: string[]): Promise<number> {
       unattended: { type: 'boolean' },
       replace: { type: 'boolean' },
       disableupdate: { type: 'boolean' },
+      'local-socket': { type: 'string' },
       'keep-environments': { type: 'boolean' },
       'delete-environments': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -154,6 +157,7 @@ async function config(argv: string[]): Promise<number> {
         unattended: !!values.unattended,
         replace: !!values.replace,
         disableUpdate: !!values.disableupdate,
+        localSocket: values['local-socket'],
       },
       { paths, docker: realDocker, io, version: RUNNER_VERSION, platform },
     );

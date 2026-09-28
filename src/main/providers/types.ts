@@ -7,25 +7,18 @@
  *    credential file mirrored into containers. Execution lives
  *    container-side in runner/runner.js as the PROVIDERS table, the
  *    hand-synced mirror of the descriptors.
- *  - environment (Local Docker, Docker over SSH): the Docker engines
- *    containers run on, each a target with its own health check.
- *  - integration (GitHub): an external service Puck signs in to.
+ *  - environment (`runner`): the user's runners, listed by the Puck server,
+ *    with This Mac among them. The app never runs docker for them; it
+ *    opens channels to a runner, which runs Docker on its machine.
+ *  - integration (GitHub): an external service Puck signs in to, through
+ *    the Puck server.
  *
  * Provider ids are persisted and never renamed.
  */
 
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import type {
-  DeviceCodePrompt,
-  EnvTarget,
-  GitHubStatus,
-  ProviderAuthInfo,
-  ProviderKind,
-  ProviderStatus,
-  TargetHealth,
-} from '../../harness/bridge';
+import type { GitHubStatus, ProviderAuthInfo, ProviderKind, ProviderStatus, RunnersState } from '../../harness/bridge';
 import type { HarnessDescriptor } from '../../harness/providers';
-import type { DockerRunner } from '../docker-client';
+import type { RunnerTransport } from '../runners/channel';
 
 export type { ProviderKind, ProviderStatus } from '../../harness/bridge';
 export type { HarnessDescriptor, PinnedPackage } from '../../harness/providers';
@@ -97,29 +90,26 @@ export interface HarnessProvider extends ProviderBase, HarnessDescriptor {
 }
 
 /**
- * An environment provider: one or more Docker engines (targets). Container
- * operations address a target through its argv runner, so the same Docker
- * code serves the local engine and a remote one over SSH.
+ * The environment provider: runners. Its targets are the signed-in user's
+ * runners from the Puck server, This Mac among them when the app installed
+ * it. Channels to a runner go through the server's relay, end-to-end
+ * encrypted, or over This Mac's local socket.
  */
 export interface EnvironmentProvider extends ProviderBase {
   readonly kind: 'environment';
-  /** docker-local: the one target `local`; docker-ssh: one per configured host. */
-  targets(): EnvTarget[];
-  /** `docker version` against the target, with the failure classified. */
-  health(target: string): Promise<TargetHealth>;
-  /** Argv docker runner bound to the target. Throws for an unknown target. */
-  runner(target: string): DockerRunner;
-  /** Raw stdio docker process bound to the target (for long-lived exec bridges). */
-  spawn(target: string, args: string[]): ChildProcessWithoutNullStreams;
+  /** The runners, This Mac, and the server connection, without I/O. */
+  state(): RunnersState;
+  /** Opens channels to one runner. Throws for an unknown runner or a changed key. */
+  transport(runnerId: string): RunnerTransport;
 }
 
-/** Sign-in lifecycle of an integration: GitHub's device flow. */
+/** Sign-in lifecycle of an integration: signing in to the Puck server with GitHub. */
 export interface IntegrationAuth {
   status(): ProviderAuthInfo;
-  /** Requests a device code and starts polling; resolves with the code to show. */
-  start(): Promise<DeviceCodePrompt>;
+  /** Opens the sign-in page in the system browser; resolves with its URL. */
+  start(): Promise<string>;
   cancel(): void;
-  /** Sign out: a fence like the harness logout, then the local tokens are dropped. */
+  /** Sign out: a fence like the harness logout. */
   logout(): Promise<void>;
 }
 

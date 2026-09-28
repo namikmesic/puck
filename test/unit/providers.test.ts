@@ -20,9 +20,9 @@ const harnessInfos = async (): Promise<HarnessProviderInfo[]> =>
 
 describe('provider registry', () => {
   it('registers every kind, with frozen ids, claude-code the default harness', () => {
-    expect(providers.map((p) => p.id)).toEqual(['claude-code', 'codex', 'docker-local', 'docker-ssh', 'github']);
+    expect(providers.map((p) => p.id)).toEqual(['claude-code', 'codex', 'runner', 'github']);
     expect(byKind('harness').map((p) => p.id)).toEqual(['claude-code', 'codex']);
-    expect(byKind('environment').map((p) => p.id)).toEqual(['docker-local', 'docker-ssh']);
+    expect(byKind('environment').map((p) => p.id)).toEqual(['runner']);
     expect(byKind('integration').map((p) => p.id)).toEqual(['github']);
     expect(defaultHarness().id).toBe('claude-code');
     expect(new Set(providers.map((p) => p.id)).size).toBe(providers.length);
@@ -30,12 +30,12 @@ describe('provider registry', () => {
 
   it('looks up by id and throws on unknown ids', () => {
     expect(providerById('codex')?.label).toBe('Codex');
-    expect(providerById('docker-ssh')?.kind).toBe('environment');
+    expect(providerById('runner')?.kind).toBe('environment');
     expect(providerById('nope')).toBeUndefined();
     expect(() => requireProvider('nope')).toThrow(/Unknown provider/);
     // Agents and turns only ever resolve harnesses.
     expect(harnessById('github')).toBeUndefined();
-    expect(() => requireHarness('docker-local')).toThrow(/Unknown provider/);
+    expect(() => requireHarness('runner')).toThrow(/Unknown provider/);
     expect(requireHarness('codex').id).toBe('codex');
   });
 
@@ -107,11 +107,11 @@ describe('provider registry', () => {
         'thinkingLevels',
       ].sort(),
     );
-    expect(keys('docker-local')).toEqual(['id', 'kind', 'label', 'status', 'targets']);
+    expect(keys('runner')).toEqual(['id', 'kind', 'label', 'runners', 'status']);
     expect(keys('github')).toEqual(['auth', 'github', 'id', 'kind', 'label', 'status']);
     const gh = toInfo(requireProvider('github')) as Extract<ProviderInfo, { kind: 'integration' }>;
     expect(Object.keys(gh.github).sort()).toEqual(
-      ['appConfigured', 'configRepo', 'installUrl', 'login', 'pendingCode'].sort(),
+      ['configRepo', 'installUrl', 'login', 'server'].sort(),
     );
   });
 

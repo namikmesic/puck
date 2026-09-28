@@ -1,18 +1,19 @@
 /**
  * The Settings → Providers section, grouped by kind: Harnesses (Claude
- * Code, Codex: Connect / Cancel / Disconnect), Environments (Local Docker,
- * Docker over SSH, see ssh-hosts.ts) and Integrations (GitHub, see
- * github.ts). A sign-in completes outside the app (system browser or
- * github.com), so while main reports `auth.pending` the view polls until it
- * settles. Context/elements in, controller out, no DOM lookups inside.
+ * Code, Codex: Connect / Cancel / Disconnect), Runners (the machines that
+ * host environments, see runners.ts) and Integrations (GitHub, signing in
+ * to Puck, see github.ts). A sign-in completes in the system browser, so
+ * while main reports `auth.pending` the view polls until it settles.
+ * Runner events update the Runners card in place. Context/elements in,
+ * controller out, no DOM lookups inside.
  */
 
-import type { HarnessProviderInfo, ProviderInfo, PuckBridge } from '../../harness/bridge';
+import type { HarnessProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../../harness/bridge';
 import { el, statusEl } from '../dom';
 import { button, errText, latestToken } from '../util';
 import { cardShell, loadingInto } from './cards';
 import { githubCard } from './github';
-import { envProviderCard } from './ssh-hosts';
+import { initRunnersView } from './runners';
 
 export interface ProvidersElements {
   harnessCards: HTMLElement;
@@ -39,14 +40,19 @@ export interface ProvidersView {
   /**
    * The window regained focus: re-check (installations may have changed on
    * GitHub), keeping what the user was typing - they often switch away to
-   * try ssh in Terminal, and come back to finish.
+   * run the runner commands in a terminal, and come back to finish.
    */
   refresh(): Promise<void>;
+  /** A pushed runner-list or connection change. */
+  runnersChanged(state: RunnersState): void;
+  /** Leaving Settings: stop polling and close the Add runner dialog. */
+  close(): void;
 }
 
 export function initProvidersView(ctx: ProvidersContext): ProvidersView {
   const { bridge, els } = ctx;
   const grid = latestToken();
+  const runners = initRunnersView({ bridge: bridge as PuckBridge, say: (t) => say(t), copy: ctx.copy });
   let poll: ReturnType<typeof setInterval> | null = null;
   let rendered = false;
 
@@ -170,7 +176,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
       if (info.kind === 'harness') {
         els.harnessCards.appendChild(harnessCard(info));
       } else if (info.kind === 'environment') {
-        els.envCards.appendChild(envProviderCard(shared, info));
+        els.envCards.appendChild(runners.card(info));
       } else {
         els.integrationCards.appendChild(githubCard(shared, info));
       }
@@ -187,6 +193,13 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     stopPolling,
     async refresh() {
       if (rendered && !poll) await draw(undefined, true);
+    },
+    runnersChanged(state) {
+      if (rendered) runners.update(state);
+    },
+    close() {
+      stopPolling();
+      runners.close();
     },
   };
   return view;

@@ -9,7 +9,12 @@ import {
   requireId,
   requireSecretKey,
   requireString,
-  sshHostFrom,
+  daemonCallFrom,
+  enrollTokenIdFrom,
+  instanceIdFrom,
+  runnerIdFrom,
+  runnerPatchFrom,
+  startSpecFrom,
 } from '../../src/main/ipcguard';
 
 describe('requireId', () => {
@@ -100,34 +105,62 @@ describe('askAnswersFrom', () => {
   });
 });
 
-describe('sshHostFrom', () => {
-  it('accepts ssh URLs (user and port optional) and ssh-config aliases', () => {
-    expect(sshHostFrom({ label: ' Build box ', host: ' ssh://me@build.example.com:2222 ' })).toEqual({
-      label: 'Build box',
-      host: 'ssh://me@build.example.com:2222',
-    });
-    expect(sshHostFrom({ label: '', host: 'ssh://10.0.0.9' }).host).toBe('ssh://10.0.0.9');
-    expect(sshHostFrom({ host: 'build_box.lan' })).toEqual({ label: '', host: 'build_box.lan' });
+describe('runner and environment ids', () => {
+  const ulid = '01J8Z3X0000000000000000000';
+  it('accepts the ids the Puck server mints', () => {
+    expect(runnerIdFrom(`rnr_${ulid}`)).toBe(`rnr_${ulid}`);
+    expect(instanceIdFrom(`env_${ulid}`)).toBe(`env_${ulid}`);
+    expect(enrollTokenIdFrom(`reg_${ulid}`)).toBe(`reg_${ulid}`);
   });
-  it('rejects argv injection, bad ports, junk and long labels', () => {
-    for (const host of [
-      '-oProxyCommand=touch /tmp/x',
-      'ssh://-oProxyCommand=x@box',
-      'ssh://me@-box',
-      'ssh://me@box:0',
-      'ssh://me@box:70000',
-      'ssh://me@box/path',
-      'tcp://box:2375',
-      'box; rm -rf /',
-      'me@box',
-      '',
-    ]) {
-      expect(() => sshHostFrom({ label: 'x', host }), host).toThrow();
+  it('rejects other prefixes, lowercase, traversal and junk', () => {
+    for (const bad of [`env_${ulid}`, `rnr_${ulid.toLowerCase()}`, '../etc', `rnr_${ulid}x`, 42, null]) {
+      expect(() => runnerIdFrom(bad), String(bad)).toThrow(/Invalid runner id/);
     }
-    expect(() => sshHostFrom({ label: 'x'.repeat(65), host: 'box' })).toThrow(/too long/);
-    expect(sshHostFrom({ label: 'x'.repeat(64), host: 'box' }).label).toHaveLength(64);
-    expect(() => sshHostFrom('box')).toThrow(/Invalid IPC payload/);
-    expect(() => sshHostFrom({ label: 'x', host: 42 })).toThrow();
+    expect(() => instanceIdFrom(`rnr_${ulid}`)).toThrow(/Invalid environment id/);
+    expect(() => enrollTokenIdFrom('PRT_secret')).toThrow(/Invalid token id/);
+  });
+});
+
+describe('runnerPatchFrom', () => {
+  it('trims names and normalizes labels', () => {
+    expect(runnerPatchFrom({ name: ' build-box (2) ' })).toEqual({ name: 'build-box (2)' });
+    expect(runnerPatchFrom({ labels: ['GPU', ' gpu', 'x:y'] })).toEqual({ labels: ['gpu', 'x:y'] });
+    expect(runnerPatchFrom({ labels: [] })).toEqual({ labels: [] });
+  });
+  it('rejects bad names and labels, and an empty patch', () => {
+    expect(() => runnerPatchFrom({ name: '-flag' })).toThrow(/runner name/);
+    expect(() => runnerPatchFrom({ name: 'x'.repeat(65) })).toThrow(/runner name/);
+    expect(() => runnerPatchFrom({ labels: ['has space'] })).toThrow(/Label/);
+    expect(() => runnerPatchFrom({ labels: Array.from({ length: 17 }, (_, i) => `l${i}`) })).toThrow(/at most 16/);
+    expect(() => runnerPatchFrom({})).toThrow(/Nothing to change/);
+  });
+});
+
+describe('startSpecFrom', () => {
+  const ok = { pin: { kind: 'tag', name: 'v1.0.0' }, definition: 'example', runnerId: 'rnr_01J8Z3X0000000000000000000', secrets: { API_KEY: 'v' } };
+  it('accepts a pin, a definition, a runner and secret values', () => {
+    expect(startSpecFrom(ok)).toEqual(ok);
+    expect(startSpecFrom({ ...ok, secrets: undefined }).secrets).toEqual({});
+  });
+  it('rejects bad definitions, runners and secret names', () => {
+    expect(() => startSpecFrom({ ...ok, definition: '../x' })).toThrow(/definition name/);
+    expect(() => startSpecFrom({ ...ok, runnerId: 'local' })).toThrow(/Invalid runner id/);
+    expect(() => startSpecFrom({ ...ok, secrets: { PUCK_TOKEN: 'x' } })).toThrow(/Secret names/);
+    expect(() => startSpecFrom({ ...ok, pin: { kind: 'tag', name: '..' } })).toThrow();
+  });
+});
+
+describe('daemonCallFrom', () => {
+  const envId = 'env_01J8Z3X0000000000000000000';
+  it('passes allowlisted renderer ops', () => {
+    expect(daemonCallFrom({ envId, op: 'chat.send', args: { text: 'hi' } })).toEqual({ envId, op: 'chat.send', args: { text: 'hi' } });
+    expect(daemonCallFrom({ envId, op: 'item.create', args: { title: 't' } }).op).toBe('item.create');
+  });
+  it('refuses credential, secret, GitHub, definition and upgrade ops from the renderer', () => {
+    for (const op of ['credentials.put', 'credentials.get', 'github.put', 'secrets.put', 'definition.apply', 'daemon.upgrade', 'nope']) {
+      expect(() => daemonCallFrom({ envId, op, args: {} }), op).toThrow(/not allowed/);
+    }
+    expect(() => daemonCallFrom({ envId: 'env_x', op: 'chat.send' })).toThrow(/Invalid environment id/);
   });
 });
 

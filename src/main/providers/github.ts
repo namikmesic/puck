@@ -1,15 +1,13 @@
 /**
- * The GitHub integration provider: the app's own GitHub sign-in, used to
- * read the config repo and list what the user can reach.
+ * The GitHub integration provider: signing in to Puck with GitHub, and the
+ * app's own GitHub API access (config repo, installations, repositories).
  *
- *  - Sign-in is the device flow with the GitHub App's client id only
- *    (github-app.ts). The pair lands encrypted in github-oauth.bin through
- *    createOAuthAccount, whose single-flight refresh matters here: every
- *    refresh rotates the pair and kills the old one, so two concurrent
- *    refreshes would sign the user out. `bad_refresh_token` (or an expired
- *    refresh token) is a local sign-out.
- *  - There is no personal-access-token sign-in. A sign-in saved by the
- *    old token mode is discarded at boot (retireLegacyTokenSignIn).
+ *  - Sign-in is the Puck server's GitHub web flow (server/session.ts): the
+ *    server holds the GitHub App's client secret and the user's token pair.
+ *    The app keeps only its Puck session and never a GitHub refresh token.
+ *  - GitHub API calls use the user's current access token, which the server
+ *    hands out (`GET /v1/github/token`); it is cached here until a few
+ *    minutes before it expires, in memory only.
  *  - Tokens never leave the main process: Settings sees the login, config
  *    repo and installations only.
  */
@@ -23,61 +21,61 @@ import type {
 import {
   createGitHubClient,
   GitHubApiError,
-  RefreshRejectedError,
-  refreshUserToken,
   type GhRepo,
   type GitHubClient,
   type GitHubDeps,
-  type UserTokens,
 } from '../../harness/github';
 import { log } from '../log';
-import { githubClientId, githubInstallUrl } from './github-app';
-import { createDeviceSignIn } from './github-device';
-import { createOAuthAccount, signInStatus, type LogoutFence } from './oauth';
-import { githubSettings, takeLegacyTokenMode, updateGithubSettings } from './providers-store';
+import * as serverApi from '../server/api';
+import { ServerApiError, serverUrl } from '../server/http';
+import { account, cancelSignIn, current, onSessionChange, signInPending, signOut, startSignIn } from '../server/session';
+import { githubInstallUrl } from './github-app';
+import { signInStatus } from './oauth';
+import { githubSettings, updateGithubSettings } from './providers-store';
 import type { IntegrationProvider } from './types';
 
-export interface GitHubTokens extends UserTokens {
-  login: string;
-  userId: number;
-}
-
-/** Refresh this long before the access token expires. */
-const REFRESH_MARGIN_MS = 5 * 60_000;
+/** Ask the server again this long before the cached access token expires. */
+const TOKEN_MARGIN_MS = 5 * 60_000;
 
 let deps: GitHubDeps | undefined;
 
-/** Test seam: drive fetch and time for the whole provider. */
+/** Test seam: drive fetch and time for the GitHub API client. */
 export function useGitHubDeps(next: GitHubDeps | undefined): void {
   deps = next;
+  cached = null;
 }
 
 const now = (): number => (deps ?? { now: Date.now }).now();
 
-export const account = createOAuthAccount<GitHubTokens>({
-  storeName: 'github-oauth.bin',
-  freshnessOf: (t) => t.expiresAt ?? 0,
-  needsRefresh: (t) => t.refreshToken !== null && t.expiresAt !== null && t.expiresAt - REFRESH_MARGIN_MS <= now(),
-  refresh: async (t) => {
-    const clientId = githubClientId();
-    if (!t.refreshToken || !clientId) return null;
-    if (t.refreshExpiresAt !== null && t.refreshExpiresAt <= now()) throw new RefreshRejectedError();
-    const next = await refreshUserToken(clientId, t.refreshToken, deps);
-    log.info('github.refresh', { login: t.login });
-    return { ...next, login: t.login, userId: t.userId };
-  },
-  // Nothing mirrors this pair into containers.
-  parseContainerFile: () => null,
-  refreshRejected: (err) => err instanceof RefreshRejectedError,
+let cached: { token: string; expiresAt: number } | null = null;
+let fetching: Promise<string> | null = null;
+
+onSessionChange(() => {
+  cached = null;
 });
 
 async function accessToken(): Promise<string> {
-  const tokens = await account.getFreshTokens();
-  if (!tokens) throw new Error('Sign in to GitHub first.');
-  return tokens.accessToken;
+  if (!current()) throw new Error('Sign in to Puck with GitHub first.');
+  if (cached && (cached.expiresAt === 0 || cached.expiresAt - TOKEN_MARGIN_MS > now())) return cached.token;
+  fetching ??= serverApi
+    .githubToken()
+    .then((t) => {
+      cached = t;
+      return t.token;
+    })
+    .catch((err: unknown) => {
+      if (err instanceof ServerApiError && err.code === 'github-auth-lost') {
+        throw new Error('GitHub no longer accepts your Puck sign-in. Sign out of Puck and sign in again.');
+      }
+      throw err;
+    })
+    .finally(() => {
+      fetching = null;
+    });
+  return fetching;
 }
 
-/** One client for the app sign-in, so the rate-limit budget is tracked once. */
+/** One client for the app's GitHub access, so the rate-limit budget is tracked once. */
 let shared: { client: GitHubClient; deps: GitHubDeps | undefined } | null = null;
 
 export function githubClient(): GitHubClient {
@@ -87,42 +85,13 @@ export function githubClient(): GitHubClient {
   return shared.client;
 }
 
-/** Fetch the account behind a fresh token and save the pair under the fence. */
-async function completeSignIn(tokens: UserTokens, fence: LogoutFence): Promise<GitHubTokens> {
-  const probe = createGitHubClient({ token: async () => tokens.accessToken, deps });
-  const user = await probe.user();
-  const full: GitHubTokens = { ...tokens, login: user.login, userId: user.id };
-  if (!account.save(full, fence)) throw new Error('Signed out while signing in.');
-  log.info('github.signin', { login: user.login });
-  account.notifyLogin();
-  return full;
-}
-
-let signInFence: LogoutFence | null = null;
-
-const device = createDeviceSignIn({
-  onTokens: async (tokens) => {
-    await completeSignIn(tokens, signInFence ?? account.fence());
-  },
-  onError: (err) => account.recordError(err),
-  deps: () => deps,
-});
-
 function authStatus(): ProviderAuthInfo {
-  const tokens = account.load();
-  const pending = device.pending() !== null;
-  if (tokens) {
-    return { connected: true, pending, detail: `Signed in as ${tokens.login}` };
-  }
+  const session = current();
+  const pending = signInPending();
+  if (session) return { connected: true, pending, detail: `Signed in to Puck as ${session.user.login}` };
   const err = account.lastError();
   if (err) return { connected: false, pending, detail: `Sign-in failed: ${err}` };
-  return {
-    connected: false,
-    pending,
-    detail: githubClientId()
-      ? 'Not connected — sign in with GitHub'
-      : 'GitHub sign-in is not available in this build',
-  };
+  return { connected: false, pending, detail: 'Not signed in — sign in to Puck with GitHub' };
 }
 
 export const githubProvider: IntegrationProvider = {
@@ -133,50 +102,30 @@ export const githubProvider: IntegrationProvider = {
   auth: {
     status: authStatus,
     async start() {
-      const clientId = githubClientId();
-      if (!clientId) {
-        throw new Error('The GitHub App is not registered in this build yet. Set PUCK_GITHUB_CLIENT_ID.');
-      }
-      signInFence = account.fence();
-      const prompt = await device.start(clientId);
-      log.info('github.device-code', { expiresAt: prompt.expiresAt });
-      return prompt;
+      const url = await startSignIn();
+      log.info('github.signin-started');
+      return url;
     },
-    cancel: () => device.cancel(),
-    async logout() {
-      device.cancel();
-      await account.logout();
-    },
+    cancel: () => cancelSignIn(),
+    logout: () => signOut(),
   },
   state(): GitHubStatus {
     const settings = githubSettings();
     return {
-      login: account.load()?.login ?? null,
+      login: current()?.user.login ?? null,
       configRepo: settings.configRepo,
       installUrl: githubInstallUrl(),
-      appConfigured: githubClientId() !== null,
-      pendingCode: device.pending(),
+      server: serverUrl(),
     };
   },
 };
-
-/**
- * Boot: a sign-in saved by the removed personal-token mode is discarded, so
- * GitHub reads as signed out until the device flow runs. Runs once per file
- * (the store drops the old mode as it answers); the config repo is kept.
- */
-export async function retireLegacyTokenSignIn(): Promise<void> {
-  if (!takeLegacyTokenMode()) return;
-  await account.logout();
-  log.info('github.legacy-token-retired');
-}
 
 function toRepo(r: GhRepo): GithubRepo {
   return { fullName: r.full_name, private: r.private, defaultBranch: r.default_branch, htmlUrl: r.html_url };
 }
 
 export async function installations(): Promise<GithubInstallation[]> {
-  if (!account.load()) return [];
+  if (!current()) return [];
   const list = await githubClient().installations();
   return list.map((i) => ({
     id: i.id,
@@ -189,7 +138,7 @@ export async function installations(): Promise<GithubInstallation[]> {
 
 /** Repositories the sign-in reaches: the repos of every app installation. */
 export async function repositories(): Promise<GithubRepo[]> {
-  if (!account.load()) throw new Error('Sign in to GitHub first.');
+  if (!current()) throw new Error('Sign in to Puck with GitHub first.');
   const client = githubClient();
   const repos: GhRepo[] = [];
   for (const inst of await client.installations()) repos.push(...(await client.installationRepos(inst.id)));

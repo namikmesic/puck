@@ -9,6 +9,11 @@
 import type { HarnessEvent } from './types';
 import type { ProviderOption } from './options';
 import type { DefinitionListing, DefinitionRefs, PinSpec } from './definitions/types';
+import type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
+
+export type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
+import type { DaemonEvent, InstanceState, OpArgs, OpResult, RendererOp, Snapshot } from './daemon-protocol';
+import type { InstanceStage } from './runner-protocol';
 
 export type {
   DefinitionListing,
@@ -176,69 +181,108 @@ export interface HarnessProviderInfo {
   auth: ProviderAuthInfo;
 }
 
-/** One Docker engine an environment provider can run containers on. */
-export interface EnvTarget {
+/** A runner as Settings and the start flow show it (`GET /v1/runners` plus what this install knows). */
+export interface RunnerRow {
   id: string;
-  label: string;
-  /** `ssh://user@host[:port]` or an ssh-config alias; null for the local engine. */
-  host: string | null;
+  name: string;
+  labels: string[];
+  os: string;
+  arch: string;
+  version: string;
+  /** `SHA256:…` of the runner's key; `config.sh` prints the same. */
+  fingerprint: string;
+  status: RunnerStatusWord;
+  /** Running environments, as the runner last reported. */
+  running: number;
+  maxEnvironments: number | null;
+  docker: RunnerDockerInfo | null;
+  createdAt: number;
+  lastSeenAt: number | null;
+  /** The This Mac runner this app installed (reached over its local socket). */
+  local: boolean;
+  /** The environments the Puck server places on this runner. */
+  environments: { envId: string; definition: string; status: ServerInstanceStatus }[];
+  /** The server lists a different key than this install first saw: channels are refused. */
+  keyChanged: boolean;
 }
 
-/** An environment provider (Local Docker, Docker over SSH): where containers run. */
+/** The This Mac runner: installed by the app as a LaunchAgent, reached over a local socket. */
+export interface LocalRunnerState {
+  /** False on machines the runner does not ship for (it needs macOS on Apple silicon). */
+  supported: boolean;
+  installed: boolean;
+  runnerId: string | null;
+  /** An install or uninstall in progress. */
+  busy: 'installing' | 'uninstalling' | null;
+  /** The current step, or the last result, in words. */
+  detail: string;
+  error: string | null;
+}
+
+/** Everything the Runners settings render, in one read. */
+export interface RunnersState {
+  /** Signed in to the Puck server (runners belong to the signed-in user). */
+  signedIn: boolean;
+  login: string | null;
+  /** The Puck server's URL. */
+  server: string;
+  /** The app's live connection to the server (push events, relay). */
+  connection: 'idle' | 'connecting' | 'connected' | 'offline';
+  runners: RunnerRow[];
+  local: LocalRunnerState;
+}
+
+/** The runner environment provider: every environment runs on one of the user's runners. */
 export interface EnvironmentProviderInfo {
   kind: 'environment';
   id: string;
   label: string;
   status: ProviderStatus;
-  targets: EnvTarget[];
+  runners: RunnersState;
 }
 
-/** Why a target failed its health check (null class = healthy). */
-export type TargetProblem =
-  | 'docker-cli-missing'
-  | 'daemon-down'
-  | 'ssh-auth'
-  | 'host-key'
-  | 'ssh-unreachable'
-  | 'docker-missing-remote'
-  | 'socket-permission'
-  | 'timeout'
-  | 'unknown';
-
-export interface TargetHealth {
-  ok: boolean;
-  /** User-facing sentence: the version, or what is wrong and how to fix it. */
-  detail: string;
-  /** Docker server version; present only when healthy. */
-  serverVersion?: string;
-  /** Why the check failed; null when healthy. */
-  problem: TargetProblem | null;
-}
-
-/** A device-flow sign-in in progress: the code the user enters on GitHub. */
-export interface DeviceCodePrompt {
-  userCode: string;
-  /** Always exactly https://github.com/login/device (checked in main). */
-  verificationUri: string;
-  /** Epoch ms after which the code is no longer accepted. */
+/** A registration token and what the Add runner dialog needs to show the commands. */
+export interface RunnerRegistration {
+  /** Revokes the token (Cancel in the dialog). */
+  id: string;
+  token: string;
   expiresAt: number;
+  /** What `config.sh --url` takes. */
+  serverUrl: string;
+  /** The latest runner release, per platform; empty when the server publishes none. */
+  version: string | null;
+  assets: RunnerAsset[];
 }
 
-/** What `providerAuthStart` returns: a loopback OAuth URL, or a device code. */
-export type AuthStart = { url: string } | DeviceCodePrompt;
+/** A removal token and the command that uses it. */
+export interface RunnerRemoval {
+  id: string;
+  token: string;
+  expiresAt: number;
+  command: string;
+}
+
+/** Pushed main → renderer when the runner list, This Mac or the server connection changed. */
+export type RunnerEvent =
+  | { kind: 'upsert'; runner: RunnerRow }
+  | { kind: 'removed'; runnerId: string }
+  | { kind: 'state'; state: RunnersState };
+
+/** What `providerAuthStart` returns: the sign-in page opened in the system browser. */
+export interface AuthStart {
+  url: string;
+}
 
 /** GitHub's integration state as Settings shows it. Never carries a token. */
 export interface GitHubStatus {
-  /** Signed-in login, null when signed out. */
+  /** The GitHub login signed in to Puck, null when signed out. */
   login: string | null;
   /** `owner/name` of the config repo, or null until one is chosen. */
   configRepo: string | null;
   /** Where to install the GitHub App on an account; null unless the client id and slug are both set. */
   installUrl: string | null;
-  /** False when no GitHub App client id is selected. */
-  appConfigured: boolean;
-  /** The device code of a sign-in in progress, if any. */
-  pendingCode: DeviceCodePrompt | null;
+  /** The Puck server GitHub sign-in goes through. */
+  server: string;
 }
 
 /** An integration provider (GitHub): an external service Puck signs in to. */
@@ -252,6 +296,60 @@ export interface IntegrationProviderInfo {
 }
 
 export type ProviderInfo = HarnessProviderInfo | EnvironmentProviderInfo | IntegrationProviderInfo;
+
+/** The app's connection to an environment's daemon. */
+export type AttachState = 'connecting' | 'attached' | 'reconnecting' | 'unreachable' | 'incompatible' | 'detached';
+
+/** What the app is doing to an environment right now, or last failed to do. */
+export interface InstanceOp {
+  kind: 'starting' | 'stopping' | 'resuming' | 'rebuilding' | 'deleting';
+  /** The runner's stage (`pulling-image`, …) while it works; then the daemon's provisioning stages arrive as events. */
+  stage: InstanceStage | null;
+  detail: string;
+  startedAt: number;
+  /** Set when the operation failed; the op stays until the next one starts. */
+  error: string | null;
+}
+
+/** One environment as the app shows it: the Puck server's index, the runner, and this app's attachment. */
+export interface InstanceInfo {
+  id: string;
+  /** The environment definition's name. */
+  name: string;
+  runnerId: string;
+  runnerName: string;
+  /** Hosted by the This Mac runner. */
+  local: boolean;
+  /** In the index: on its runner (active), kept by a removed runner (orphaned), or on a force-removed runner (lost). */
+  status: ServerInstanceStatus;
+  repos: string[];
+  /** The attached environment (only one at a time). */
+  current: boolean;
+  attach: AttachState | null;
+  attachDetail: string;
+  /** The daemon's own lifecycle, from its last `instance.status` event this app applied. */
+  daemon: InstanceState | null;
+  op: InstanceOp | null;
+  /** The last daemon event this app applied (replay resumes after it). */
+  lastSeq: number | null;
+}
+
+/** What the start flow sends: main resolves the pin, reads the definition, and checks everything first. */
+export interface StartSpec {
+  pin: PinSpec;
+  /** The environment definition's name at that pin. */
+  definition: string;
+  runnerId: string;
+  /** Values for the definition's `secrets`. */
+  secrets: Record<string, string>;
+}
+
+export type InstanceEvent = { kind: 'upsert'; instance: InstanceInfo } | { kind: 'removed'; envId: string };
+
+/** Pushed main → renderer for the attached environment: each daemon event in seq order, or a resync snapshot. */
+export type DaemonEventPayload =
+  | { envId: string; seq: number; at: number; ev: DaemonEvent }
+  | { envId: string; snapshot: Snapshot };
 
 /** One GitHub App installation the signed-in user can reach. */
 export interface GithubInstallation {
@@ -322,19 +420,57 @@ export interface PuckBridge {
   providers(): Promise<ProviderInfo[]>;
   /** Open an http(s) link in the system browser (chat links never navigate the app). */
   openExternal(url: string): Promise<void>;
-  /** Begins a provider login. Harness providers open the authorize page in
-   *  the system browser and return its URL; GitHub returns the device code
-   *  the user enters on github.com. The login lands asynchronously - poll
-   *  `providers()` for `auth.connected`. */
+  /** Begins a provider login in the system browser and returns the page it
+   *  opened: a harness's own sign-in, or GitHub (signing in to the Puck
+   *  server). The login lands asynchronously - poll `providers()` for
+   *  `auth.connected`. */
   providerAuthStart(id: string): Promise<AuthStart>;
   /** Aborts a pending login; no-op when none is pending. */
   providerAuthCancel(id: string): Promise<void>;
   providerAuthLogout(id: string): Promise<void>;
-  /** Adds a Docker-over-SSH host; returns the updated provider list. */
-  sshHostAdd(host: { label: string; host: string }): Promise<ProviderInfo[]>;
-  sshHostRemove(id: string): Promise<ProviderInfo[]>;
-  /** Health of one environment-provider target (runs `docker version` there). */
-  targetHealth(providerId: string, targetId: string): Promise<TargetHealth>;
+
+  /** The user's runners, This Mac, and the server connection. */
+  runners(): Promise<RunnersState>;
+  /** A one-hour registration token for `config.sh`, with the release to download. */
+  runnerRegistrationToken(): Promise<RunnerRegistration>;
+  /** Revokes a registration token (the Add runner dialog's Cancel). */
+  runnerRegistrationCancel(tokenId: string): Promise<void>;
+  /** A one-hour removal token and the `config.sh remove` command for a runner. */
+  runnerRemovalToken(runnerId: string): Promise<RunnerRemoval>;
+  /** Removes a runner whose machine is gone; its environments read as lost. */
+  runnerForceRemove(runnerId: string): Promise<RunnersState>;
+  runnerUpdate(runnerId: string, patch: { name?: string; labels?: string[] }): Promise<RunnersState>;
+  /** Installs and registers the This Mac runner (a LaunchAgent). Resolves once it runs. */
+  runnerInstallLocal(): Promise<RunnersState>;
+  /** Removes the This Mac runner; its environments are kept (delete them with docker). */
+  runnerUninstallLocal(): Promise<RunnersState>;
+  onRunnerEvent(cb: (e: RunnerEvent) => void): void;
+
+  /** Every environment in the Puck server's index. */
+  instanceList(): Promise<InstanceInfo[]>;
+  /**
+   * Starts a new environment: checks the definition, harness sign-ins,
+   * secrets and the runner, records it with the Puck server, creates it on
+   * the runner and attaches. Resolves with its id once the runner started
+   * the container; provisioning continues in `onInstanceEvent` and
+   * `onDaemonEvent`.
+   */
+  instanceStart(spec: StartSpec): Promise<{ envId: string }>;
+  /** Attaches to an environment and makes it the current one (the previous one keeps working). */
+  instanceOpen(envId: string): Promise<void>;
+  instanceStop(envId: string): Promise<void>;
+  instanceResume(envId: string): Promise<void>;
+  /** Recreates the container from the definition at its pin; volumes, and so all work, are kept. */
+  instanceRebuild(envId: string): Promise<void>;
+  /** Deletes the container, its volumes and image on the runner, and the index entry. */
+  instanceDelete(envId: string): Promise<void>;
+  /** Forgets an environment whose runner is gone (lost or orphaned): only the index entry goes. */
+  instanceForget(envId: string): Promise<void>;
+  onInstanceEvent(cb: (e: InstanceEvent) => void): void;
+  /** A command to an environment's daemon (renderer allowlist only). */
+  daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>>;
+  onDaemonEvent(cb: (e: DaemonEventPayload) => void): void;
+
   /** GitHub App installations the signed-in user can reach. */
   githubInstallations(): Promise<GithubInstallation[]>;
   /** Repositories the GitHub sign-in can reach, for the config-repo picker. */

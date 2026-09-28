@@ -10,9 +10,8 @@ import type { ProviderInfo } from '../../harness/bridge';
 import type { HarnessProvider, Provider, ProviderKind, ProviderOfKind } from './types';
 import { claudeProvider } from './claude';
 import { codexProvider } from './codex';
-import { dockerLocalProvider } from './docker-local';
-import { dockerSshProvider } from './docker-ssh';
 import { githubProvider } from './github';
+import { runnerProvider } from '../runners';
 
 export type {
   EnvironmentProvider,
@@ -28,8 +27,7 @@ export type {
 export const providers: readonly Provider[] = [
   claudeProvider,
   codexProvider,
-  dockerLocalProvider,
-  dockerSshProvider,
+  runnerProvider,
   githubProvider,
 ];
 
@@ -84,7 +82,7 @@ export function toInfo(provider: Provider): ProviderInfo {
         id: provider.id,
         label: provider.label,
         status: provider.status(),
-        targets: provider.targets(),
+        runners: provider.state(),
       };
     case 'integration':
       return {

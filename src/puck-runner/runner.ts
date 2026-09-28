@@ -1,8 +1,9 @@
 /**
  * `./run.sh`: the runner itself. It holds the directory lock (one runner
- * process per directory), keeps the server connection (relay.ts), pumps
- * GitHub tokens (pump.ts), answers the control channel (control.ts), and
- * checks for updates (update.ts).
+ * process per directory), keeps the server connection (relay.ts), listens
+ * on the local socket when configured (local.ts), pumps GitHub tokens
+ * (pump.ts), answers the control channel (control.ts), and checks for
+ * updates (update.ts).
  *
  * Exit codes, which run.sh and the service units act on:
  *   0   stopped (SIGTERM or SIGINT)
@@ -25,6 +26,7 @@ import { dockerHealth } from './docker/health';
 import { DockerOps } from './docker/ops';
 import { readConfig, readCredentials, type RunnerPaths } from './files';
 import { loadRunnerKey } from './identity';
+import { LocalListener } from './local';
 import { acquireLock } from './lock';
 import type { Logger } from './log';
 import { TokenPump } from './pump';
@@ -175,6 +177,18 @@ export async function run(deps: RunDeps): Promise<number> {
     },
   });
 
+  const local = config.localSocket
+    ? new LocalListener({
+        path: config.localSocket,
+        runnerId: config.runnerId,
+        version: deps.version,
+        control,
+        spawner: deps.spawner,
+        instanceState: (envId) => ops.state(envId),
+        log,
+      })
+    : null;
+
   function onRemoved(err: RunnerRemovedError): void {
     if (stopping) return;
     deps.print(err.message);
@@ -200,7 +214,7 @@ export async function run(deps: RunDeps): Promise<number> {
     stopping = true;
     log.info('runner.stop', { code });
     pump.stop();
-    await relay.stop();
+    await Promise.all([relay.stop(), local?.stop()]);
     release();
     finish(code);
   }
@@ -212,6 +226,15 @@ export async function run(deps: RunDeps): Promise<number> {
   updateTimer.unref();
 
   deps.print(`Puck runner ${config.name} (${config.runnerId}) connecting to ${config.serverUrl}…`);
+  if (local) {
+    try {
+      await local.start();
+    } catch (err) {
+      // The server path still works; only the app on this machine loses its shortcut.
+      log.error('local.failed', err);
+      deps.print(`The local socket did not start: ${(err as Error).message}`);
+    }
+  }
   relay.start();
   const code = await exited;
   clearInterval(updateTimer);

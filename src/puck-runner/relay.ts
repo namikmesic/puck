@@ -24,7 +24,6 @@
  * again), 4409 another process connected as this runner (back off).
  */
 
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { KeyObject } from 'node:crypto';
 import WebSocket from 'ws';
 import { acceptRunnerHandshake, ChannelCryptoError } from '../channel/e2e';
@@ -40,11 +39,11 @@ import {
   type RunnerStatus,
   type RunnerToServer,
 } from '../channel/wire';
-import { ENV_ID_RE, RUNNER_LIMITS, type ControlEvent, type ControlRunnerFrame } from '../harness/runner-protocol';
+import { ENV_ID_RE } from '../harness/runner-protocol';
 import { RunnerOutdatedError, RunnerRemovedError, type RunnerSession } from './api';
-import { welcomeFrame, type Control } from './control';
-import { attachArgs } from './daemon-link';
+import type { Control } from './control';
 import type { DockerSpawner } from './docker/client';
+import { attachEndpoint, controlEndpoint, type Endpoint, type Sink } from './endpoints';
 import type { Logger } from './log';
 
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
@@ -323,65 +322,19 @@ export class RelayConnection {
     };
   }
 
-  private controlChannel(ch: number, cipher: ReturnType<typeof acceptRunnerHandshake>['cipher']): Channel {
-    let buf = '';
+  /** Wraps an endpoint (endpoints.ts) in an encrypted channel stream. */
+  private channel(
+    ch: number,
+    kind: ChannelKind,
+    envId: string | null,
+    cipher: ReturnType<typeof acceptRunnerHandshake>['cipher'],
+    make: (sink: Sink) => Endpoint,
+  ): Channel {
     let closed = false;
-    const write = (frame: ControlRunnerFrame): void => {
-      if (!closed) stream.write(Buffer.from(JSON.stringify(frame) + '\n', 'utf8'));
-    };
-    const emit = (ev: ControlEvent): void => write({ t: 'event', ev });
+    let endpoint: Endpoint | null = null;
     const channel: Channel = {
       ch,
-      kind: 'control',
-      envId: null,
-      stream: null as unknown as ChannelStream,
-      close: (reason, tell) => {
-        if (closed) return;
-        closed = true;
-        stream.close();
-        this.channels.delete(ch);
-        if (tell) this.refuse(ch, reason);
-        this.deps.log.info('channel.closed', { kind: 'control', reason });
-      },
-    };
-    const stream = new ChannelStream({
-      ch,
-      cipher,
-      transport: this.transport(ch),
-      onError: (reason) => channel.close(reason, true),
-      onData: (plaintext, done) => {
-        buf += plaintext.toString('utf8');
-        done();
-        if (buf.length > RUNNER_LIMITS.maxFrameBytes * 2) return channel.close('frame-too-large', true);
-        let nl: number;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (!line.trim()) continue;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            write({ t: 'error', code: 'bad-frame', message: 'Each line must be one JSON frame.' });
-            continue;
-          }
-          void this.deps.control.handle(parsed, emit).then(write);
-        }
-      },
-    });
-    channel.stream = stream;
-    write(welcomeFrame(this.deps.runnerId, this.deps.version));
-    return channel;
-  }
-
-  private attachChannel(ch: number, envId: string, cipher: ReturnType<typeof acceptRunnerHandshake>['cipher']): Channel {
-    const child: ChildProcessWithoutNullStreams = this.deps.spawner(attachArgs(envId));
-    let closed = false;
-    let bytesIn = 0;
-    let bytesOut = 0;
-    const channel: Channel = {
-      ch,
-      kind: 'attach',
+      kind,
       envId,
       stream: null as unknown as ChannelStream,
       close: (reason, tell) => {
@@ -389,10 +342,8 @@ export class RelayConnection {
         closed = true;
         stream.close();
         this.channels.delete(ch);
-        child.stdin.end();
-        child.kill();
+        endpoint?.end(reason);
         if (tell) this.refuse(ch, reason);
-        this.deps.log.info('channel.closed', { kind: 'attach', envId, reason, bytesIn, bytesOut });
       },
     };
     const stream = new ChannelStream({
@@ -400,27 +351,28 @@ export class RelayConnection {
       cipher,
       transport: this.transport(ch),
       onError: (reason) => channel.close(reason, true),
-      onDrain: () => child.stdout.resume(),
-      onData: (plaintext, done) => {
-        bytesIn += plaintext.length;
-        if (child.stdin.write(plaintext)) done();
-        else child.stdin.once('drain', done);
-      },
+      onDrain: () => endpoint?.resume(),
+      onData: (plaintext, done) => (endpoint ? endpoint.data(plaintext, done) : done()),
     });
     channel.stream = stream;
-    child.stdout.on('data', (chunk: Buffer) => {
-      bytesOut += chunk.length;
-      if (!stream.write(chunk)) child.stdout.pause();
-    });
-    child.stderr.on('data', () => undefined);
-    child.stdin.on('error', () => undefined);
-    child.on('error', () => channel.close('daemon-unavailable', true));
-    child.on('close', () => {
-      // Let queued output reach the app before the close does.
-      const finish = (): void => channel.close('daemon-closed', true);
-      if (stream.pending === 0) finish();
-      else setTimeout(finish, 1_000);
+    endpoint = make({
+      write: (data) => stream.write(data),
+      close: (reason) => {
+        // Let queued output reach the app before the close does.
+        if (stream.pending === 0) channel.close(reason, true);
+        else setTimeout(() => channel.close(reason, true), 1_000);
+      },
     });
     return channel;
+  }
+
+  private controlChannel(ch: number, cipher: ReturnType<typeof acceptRunnerHandshake>['cipher']): Channel {
+    return this.channel(ch, 'control', null, cipher, (sink) =>
+      controlEndpoint({ control: this.deps.control, runnerId: this.deps.runnerId, version: this.deps.version, sink, log: this.deps.log }),
+    );
+  }
+
+  private attachChannel(ch: number, envId: string, cipher: ReturnType<typeof acceptRunnerHandshake>['cipher']): Channel {
+    return this.channel(ch, 'attach', envId, cipher, (sink) => attachEndpoint({ envId, spawner: this.deps.spawner, sink, log: this.deps.log }));
   }
 }
