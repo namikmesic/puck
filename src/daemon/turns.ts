@@ -19,10 +19,11 @@
  *     content, the id is dropped and the turn silently retries once fresh.
  *     An id we only attempted is never persisted, even when echoed back;
  *   - always ends with a turn-end (synthesized if the adapter did not send
- *     one), then starts the next queued input. The transcript is fsynced
- *     before the session record says the turn is over and before `turn.end`
- *     is published. A failed transcript fsync keeps the handoff and is
- *     retried; a `turn.end` the event log refuses is retried until appended.
+ *     one). The transcript is fsynced before the session record says the
+ *     turn is over and before `turn.end` is published, and the next queued
+ *     input starts only after that publish. A failed transcript fsync keeps
+ *     the handoff and is retried; a `turn.end` the event log refuses is
+ *     retried until appended.
  *
  * Interrupting a turn cancels its open questions and aborts the adapter.
  * An interrupt from shutdown or upgrade leaves the session `interrupted`,
@@ -475,8 +476,8 @@ export class Turns {
   }
 
   /**
-   * Queue an input. Starts a turn right away when the session is idle;
-   * otherwise the input waits for the running turn to end.
+   * Queue an input. Starts a turn right away when the session is idle and
+   * no `turn.end` for it is still unsent; otherwise the input waits.
    */
   send(sessionId: string, text: string, author: EntryAuthor = 'user'): { queued: boolean; turnId?: string } {
     const session = this.get(sessionId);
