@@ -3,13 +3,15 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonEvent, DaemonFrame, Snapshot } from '../../src/harness/daemon-protocol';
+import { WIRE_LIMITS, type DaemonEvent, type DaemonFrame, type Snapshot } from '../../src/harness/daemon-protocol';
 import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
 import { attach } from '../../src/daemon/attach';
 import { Daemon } from '../../src/daemon/daemon';
+import { EventLog } from '../../src/daemon/eventlog';
 import type { HarnessAdapter } from '../../src/daemon/harness/types';
-import { createLogger } from '../../src/daemon/log';
+import { createLogger, nullLogger } from '../../src/daemon/log';
+import { DaemonServer } from '../../src/daemon/server';
 import { defined, exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
 
 // The daemon end to end, in process: real socket, real stores and event
@@ -42,12 +44,16 @@ function deliver(files: Record<string, unknown>): void {
   }
 }
 
-async function boot(): Promise<void> {
-  const { run } = fakeRunner((argv) => {
+async function boot(over: { adapters?: Record<string, HarnessAdapter>; shutdownGraceMs?: number; onCommand?: () => void } = {}): Promise<void> {
+  const { run: recorded } = fakeRunner((argv) => {
     if (argv[0] === 'id' || argv[0] === 'getent') return { code: 1 };
     if (argv[0] === 'sh' && argv[1] === '-lc' && argv[2].includes('echo "')) return { stdout: installed };
     return undefined;
   });
+  const run: typeof recorded = (argv, opts) => {
+    over.onCommand?.();
+    return recorded(argv, opts);
+  };
   exit = vi.fn();
   daemon = new Daemon({
     paths: root.paths,
@@ -57,7 +63,8 @@ async function boot(): Promise<void> {
     privileged: false,
     exit,
     run,
-    adapters: { 'claude-code': echo, codex: { ...echo, id: 'codex' } },
+    shutdownGraceMs: over.shutdownGraceMs,
+    adapters: over.adapters ?? { 'claude-code': echo, codex: { ...echo, id: 'codex' } },
   });
   await daemon.start();
 }
@@ -297,5 +304,112 @@ describe('puckd without a usable state', () => {
     await c.until(isWelcome);
     const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
     expect(snap.result.instance).toMatchObject({ status: 'failed', error: expect.stringMatching(/newer daemon/) });
+  });
+});
+
+describe('inbox instance durability', () => {
+  it('has the instance record on disk before provisioning starts', async () => {
+    const stateFile = path.join(root.paths.state, 'instance.json');
+    const inboxFile = path.join(root.paths.inbox, 'instance.json');
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    let atFirstCommand: { inbox: boolean; envId: string | null } | null = null;
+    await boot({
+      onCommand: () => {
+        if (atFirstCommand) return;
+        let envId: string | null = null;
+        try {
+          envId = (JSON.parse(fs.readFileSync(stateFile, 'utf8')) as { envId?: string }).envId ?? null;
+        } catch {
+          envId = null;
+        }
+        atFirstCommand = { inbox: fs.existsSync(inboxFile), envId };
+      },
+    });
+    expect(atFirstCommand).toEqual({ inbox: false, envId: ENV_ID });
+  });
+});
+
+describe('upgrade now is bounded when a turn ignores interrupt', () => {
+  it('exits 75 after the shutdown grace', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const hang: HarnessAdapter = { id: 'claude-code', run: () => new Promise<void>(() => undefined) };
+    await boot({
+      shutdownGraceMs: 40,
+      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+    });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    for (let i = 0; i < 40 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 25));
+    expect(exit).toHaveBeenCalledWith(75);
+    expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+  });
+});
+
+describe('daemon wire frame limit', () => {
+  async function serve(): Promise<DaemonServer> {
+    fs.mkdirSync(root.paths.run, { recursive: true });
+    const server = new DaemonServer({
+      socketPath: root.paths.socket,
+      log: nullLogger,
+      events: new EventLog(root.paths.events),
+      identity: () => ({ envId: ENV_ID, version: '0', build: 'b' }),
+      dispatch: async () => {
+        throw new Error('an oversized frame must not be dispatched');
+      },
+    });
+    await server.listen();
+    return server;
+  }
+
+  it('rejects a complete line larger than maxFrameBytes before parsing it', async () => {
+    const server = await serve();
+    try {
+      const c = client();
+      const line = JSON.stringify({
+        t: 'hello',
+        protocol: 1,
+        client: { app: 't', build: 'x' },
+        since: null,
+        pad: 'y'.repeat(WIRE_LIMITS.maxFrameBytes),
+      });
+      expect(Buffer.byteLength(line)).toBeGreaterThan(WIRE_LIMITS.maxFrameBytes);
+      c.socket.write(line + '\n');
+      const err = await c.until((f): f is Extract<DaemonFrame, { t: 'error' }> => f.t === 'error');
+      expect(err).toMatchObject({ code: 'bad-frame', message: 'A frame is larger than 1 MiB.' });
+      expect(c.frames.some((f) => f.t === 'welcome')).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('rejects an unterminated tail larger than maxFrameBytes', async () => {
+    const server = await serve();
+    try {
+      const c = client();
+      c.socket.write('x'.repeat(WIRE_LIMITS.maxFrameBytes + 1));
+      const err = await c.until((f): f is Extract<DaemonFrame, { t: 'error' }> => f.t === 'error');
+      expect(err).toMatchObject({ code: 'bad-frame', message: 'A frame is larger than 1 MiB.' });
+    } finally {
+      await server.close();
+    }
   });
 });

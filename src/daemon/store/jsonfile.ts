@@ -57,13 +57,16 @@ function fsyncDir(dir: string): void {
   }
 }
 
-/** Queue an atomic write; resolves once the file is durable. */
+/** Queue an atomic write; resolves once this write, or a newer one for the same file, is durable. */
 export function writeJsonAtomic(file: string, value: unknown, mode = 0o600): Promise<void> {
   const text = JSON.stringify(value);
   const prev = chains.get(file) ?? Promise.resolve();
-  const next = prev
-    .catch(() => undefined)
-    .then(() => writeFileAtomicSync(file, text, mode));
+  const slot: { next?: Promise<void> } = {};
+  const next = prev.catch(() => undefined).then(() => {
+    if (chains.get(file) !== slot.next) return;
+    writeFileAtomicSync(file, text, mode);
+  });
+  slot.next = next;
   chains.set(file, next);
   // Most callers fire and forget; a rejection nobody handles would kill the
   // daemon. Awaiting callers still see it.

@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { acquireLock, releaseLock } from '../../src/daemon/lock';
+import { acquireLock, isServingArgv, releaseLock } from '../../src/daemon/lock';
 import { createLogger, tailLog } from '../../src/daemon/log';
 import { flushJsonWrites, readJsonFile, writeJsonAtomic } from '../../src/daemon/store/jsonfile';
 import { FORMAT_VERSION, migrateState, type Migration } from '../../src/daemon/store/meta';
@@ -77,6 +77,15 @@ describe('state format migrations', () => {
 });
 
 describe('daemon lock', () => {
+  it('treats a bare puckd.js as serve and does not treat attach or version as the holder', () => {
+    expect(isServingArgv(['node', '/opt/puck/puckd.js'])).toBe(true);
+    expect(isServingArgv(['node', '/opt/puck/puckd.js', ''])).toBe(true);
+    expect(isServingArgv(['node', '/opt/puck/puckd.js', 'serve'])).toBe(true);
+    expect(isServingArgv(['node', '/opt/puck/puckd.js', 'attach'])).toBe(false);
+    expect(isServingArgv(['node', '/opt/puck/puckd.js', 'version'])).toBe(false);
+    expect(isServingArgv(['node', '/usr/bin/node', 'serve'])).toBe(false);
+  });
+
   it('holds against a running daemon and takes over a stale or foreign pid', () => {
     const file = path.join(dir, 'puckd.lock');
     expect(acquireLock(file, { pid: 100, isDaemon: () => true })).toBe(true);

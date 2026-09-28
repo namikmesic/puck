@@ -1,8 +1,9 @@
 /**
  * Sessions and their turns.
  *
- * Each session has a FIFO input queue and runs one turn at a time. Inputs
- * that arrive while a turn runs wait; the next turn takes all of them (and,
+ * Each session has a FIFO input queue, stored on its session record before
+ * the input is acknowledged, and runs one turn at a time. Inputs that
+ * arrive while a turn runs wait; the next turn takes all of them (and,
  * for the orchestrator, any pending notices) as one prompt. A turn:
  *
  *   - records the inputs as `user`/`notice` entries, then a `turn` entry;
@@ -35,7 +36,7 @@ import type { DaemonAgent } from './definition';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';
-import type { SessionMap, SessionRecord } from './store/sessions';
+import type { QueuedInput, SessionMap, SessionRecord } from './store/sessions';
 import type { TranscriptBook } from './transcripts';
 
 export interface TurnsDeps {
@@ -51,11 +52,6 @@ export interface TurnsDeps {
   /** Notices to deliver with the orchestrator's next turn (removed from the pending list). */
   takeNotices(): Notice[];
   now?: () => number;
-}
-
-interface QueuedInput {
-  text: string;
-  author: EntryAuthor;
 }
 
 interface PendingAsk {
@@ -91,6 +87,7 @@ export class Turns {
 
   constructor(private readonly deps: TurnsDeps) {
     this.now = deps.now ?? Date.now;
+    this.restoreQueues();
   }
 
   /* ---------- Sessions ---------- */
@@ -119,6 +116,7 @@ export class Turns {
       ...(init.itemId ? { itemId: init.itemId } : {}),
       cwd: init.cwd,
       status: 'idle',
+      queue: [],
       turns: 0,
       lastTurnTokens: 0,
       costUsd: 0,
@@ -185,7 +183,32 @@ export class Turns {
       }
     }
     if (touched.length) this.deps.sessions.save();
+    this.restoreQueues();
+    this.startQueued();
     return touched;
+  }
+
+  private restoreQueues(): void {
+    for (const session of this.list()) {
+      if (session.status === 'closed' || this.queues.has(session.id) || session.queue.length === 0) continue;
+      this.queues.set(
+        session.id,
+        session.queue.map((item) => ({ text: item.text, author: item.author })),
+      );
+    }
+  }
+
+  private startQueued(): void {
+    if (!this.accepting) return;
+    for (const session of this.list()) {
+      if (session.status === 'closed' || this.active.has(session.id)) continue;
+      if (this.queues.get(session.id)?.length) this.startTurn(session);
+    }
+  }
+
+  private persistQueue(session: SessionRecord): void {
+    session.queue = (this.queues.get(session.id) ?? []).map((item) => ({ text: item.text, author: item.author }));
+    this.deps.sessions.commit();
   }
 
   /* ---------- Inputs and turns ---------- */
@@ -216,6 +239,7 @@ export class Turns {
     const queue = this.queues.get(sessionId) ?? [];
     queue.push({ text, author });
     this.queues.set(sessionId, queue);
+    this.persistQueue(session);
     if (this.active.has(sessionId)) {
       this.upsert(session);
       return { queued: true };
@@ -319,6 +343,7 @@ export class Turns {
   private async runTurn(session: SessionRecord, turn: ActiveTurn): Promise<void> {
     const { transcripts, emit, log } = this.deps;
     const inputs = this.queues.get(session.id)?.splice(0) ?? [];
+    this.persistQueue(session);
     const notices = session.kind === 'orchestrator' ? this.deps.takeNotices() : [];
     const at = this.now();
 

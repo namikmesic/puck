@@ -308,6 +308,31 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(turns.get(s.id)?.status).toBe('idle');
   });
 
+  it('delivers a follow-up queued during an in-flight turn after a restart', async () => {
+    const s = orchestrator();
+    attempts = [
+      () => new Promise<void>(() => undefined),
+      (_req, ctx) => ctx.emit(END),
+    ];
+    expect(turns.send(s.id, 'first').queued).toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
+    const readQueue = (): unknown =>
+      (JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { queue: unknown }>)[s.id].queue;
+    expect(readQueue()).toEqual([{ text: 'second', author: 'user' }]);
+    await transcripts.flush();
+    await flushJsonWrites();
+    expect(readQueue()).toEqual([{ text: 'second', author: 'user' }]);
+
+    calls = [];
+    events = [];
+    turns = build();
+    turns.reconcile();
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['second']);
+    expect(turns.get(s.id)?.queue).toEqual([]);
+  });
+
   it('refuses input once it stops accepting, and for closed sessions', () => {
     const s = orchestrator();
     turns.close(s.id);

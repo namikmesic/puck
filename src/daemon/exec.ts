@@ -1,9 +1,10 @@
 /**
  * Running commands inside the container: argv only (never a shell string
  * built from definition data), an explicit environment, an optional uid/gid
- * to drop to the puck user, a timeout, and captured output. Provisioning
- * and git go through the `CommandRunner` seam so tests record the exact
- * argv and user of every command instead of running them.
+ * to drop to the puck user, a timeout that kills the child process group,
+ * and captured output. Provisioning and git go through the `CommandRunner`
+ * seam so tests record the exact argv and user of every command instead of
+ * running them.
  */
 
 import { spawn } from 'node:child_process';
@@ -45,6 +46,7 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
         uid: opts.uid,
         gid: opts.gid,
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
       });
     } catch (err) {
       resolve({ code: null, stdout: '', stderr: (err as Error).message, timedOut: false });
@@ -53,7 +55,14 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill('SIGKILL');
+          const pid = child.pid;
+          if (pid && pid > 0) {
+            try {
+              process.kill(-pid, 'SIGKILL');
+            } catch {
+              child.kill('SIGKILL');
+            }
+          }
         }, opts.timeoutMs)
       : null;
     child.stdout.on('data', (d: Buffer) => {

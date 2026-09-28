@@ -6,7 +6,14 @@
 
 import * as path from 'node:path';
 import type { SessionKind, SessionStatus } from '../../harness/daemon-protocol';
+import type { EntryAuthor } from '../../harness/transcript';
 import { JsonStore } from './store';
+
+/** An input accepted while its turn has not started. Durable on the session record. */
+export interface QueuedInput {
+  text: string;
+  author: EntryAuthor;
+}
 
 export interface SessionRecord {
   id: string;
@@ -17,6 +24,8 @@ export interface SessionRecord {
   cwd: string;
   status: SessionStatus;
   resumeId?: string;
+  /** Inputs acknowledged but not yet started. Empty once their turn starts. */
+  queue: QueuedInput[];
   turns: number;
   lastTurnTokens: number;
   costUsd: number;
@@ -25,6 +34,19 @@ export interface SessionRecord {
 }
 
 export type SessionMap = Record<string, SessionRecord>;
+
+function normalizeQueue(raw: unknown): QueuedInput[] {
+  if (!Array.isArray(raw)) return [];
+  const queue: QueuedInput[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const text = (item as { text?: unknown }).text;
+    if (typeof text !== 'string') continue;
+    const author = (item as { author?: unknown }).author;
+    queue.push({ text, author: author === 'orchestrator' || author === 'system' ? author : 'user' });
+  }
+  return queue;
+}
 
 function normalize(raw: unknown): SessionMap {
   const out: SessionMap = Object.create(null) as SessionMap;
@@ -40,6 +62,7 @@ function normalize(raw: unknown): SessionMap {
       cwd: value.cwd ?? '/workspace',
       status: value.status ?? 'idle',
       ...(value.resumeId ? { resumeId: value.resumeId } : {}),
+      queue: normalizeQueue(value.queue),
       turns: value.turns ?? 0,
       lastTurnTokens: value.lastTurnTokens ?? 0,
       costUsd: value.costUsd ?? 0,

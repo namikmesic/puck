@@ -3,16 +3,24 @@
  * daemon that owns this state. The file lives on the data volume and so
  * outlives the container's processes; after a restart the recorded pid may
  * belong to an unrelated process (even an `attach`). The lock counts as
- * held only while that pid is a running `puckd … serve`; otherwise it is
- * taken over.
+ * held only while that pid is a running puckd serve — including the default
+ * when no subcommand is given. `attach` and `version` do not hold it.
  */
 
 import * as fs from 'node:fs';
 
+/** True when this argv is puckd serving (explicit `serve`, or no subcommand). */
+export function isServingArgv(argv: readonly string[]): boolean {
+  const args = argv.filter((arg) => arg.length > 0);
+  const at = args.findIndex((arg) => arg.endsWith('puckd.js'));
+  if (at < 0) return false;
+  const sub = args[at + 1];
+  return sub === undefined || sub === 'serve';
+}
+
 export function isServingDaemon(pid: number): boolean {
   try {
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-    return cmdline.some((a) => a.endsWith('puckd.js')) && cmdline.includes('serve');
+    return isServingArgv(fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0'));
   } catch {
     return false;
   }

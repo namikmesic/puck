@@ -5,7 +5,7 @@
  */
 
 import * as path from 'node:path';
-import { readJsonFile, writeJsonAtomic } from './jsonfile';
+import { readJsonFile, writeFileAtomicSync, writeJsonAtomic } from './jsonfile';
 
 export class JsonStore<T> {
   private value: T;
@@ -31,6 +31,12 @@ export class JsonStore<T> {
 
   save(): void {
     this.pending = writeJsonAtomic(this.file, this.value);
+  }
+
+  /** Writes the current value before returning, ahead of any earlier queued save. */
+  commit(): void {
+    this.pending = writeJsonAtomic(this.file, this.value);
+    writeFileAtomicSync(this.file, JSON.stringify(this.value));
   }
 
   /** Resolves once the last save is on disk (rejects if it failed). */

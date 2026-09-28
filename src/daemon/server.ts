@@ -29,6 +29,10 @@ import { OpError } from './ops';
 /** A client this far behind on reading is dropped (it reconnects and replays). */
 const MAX_BACKLOG_BYTES = 64 * 1024 * 1024;
 
+function exceedsFrame(text: string): boolean {
+  return Buffer.byteLength(text, 'utf8') > WIRE_LIMITS.maxFrameBytes;
+}
+
 export interface ServerDeps {
   socketPath: string;
   log: Logger;
@@ -154,6 +158,7 @@ export class DaemonServer {
       while ((nl = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
+        if (exceedsFrame(line)) return fatal('bad-frame', 'A frame is larger than 1 MiB.');
         if (!line.trim()) continue;
         let frame: ClientFrame;
         try {
@@ -164,7 +169,7 @@ export class DaemonServer {
         if (!frame || typeof frame !== 'object') return fatal('bad-frame', 'A frame is not an object.');
         onFrame(frame);
       }
-      if (Buffer.byteLength(buffer, 'utf8') > WIRE_LIMITS.maxFrameBytes) fatal('bad-frame', 'A frame is larger than 1 MiB.');
+      if (exceedsFrame(buffer)) return fatal('bad-frame', 'A frame is larger than 1 MiB.');
     });
     const cleanup = (): void => {
       clearTimeout(helloTimer);

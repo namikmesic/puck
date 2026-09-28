@@ -62,6 +62,8 @@ export interface DaemonOptions {
   run?: CommandRunner;
   adapters?: Record<string, HarnessAdapter>;
   now?: () => number;
+  /** How long upgrade-now and shutdown wait for a turn that ignores interrupt. */
+  shutdownGraceMs?: number;
 }
 
 /** Ops a failed daemon still answers. */
@@ -84,10 +86,12 @@ export class Daemon {
   private stopping = false;
   private readonly run: CommandRunner;
   private readonly now: () => number;
+  private readonly shutdownGraceMs: number;
 
   constructor(private readonly opts: DaemonOptions) {
     this.run = opts.run ?? runCommand;
     this.now = opts.now ?? Date.now;
+    this.shutdownGraceMs = opts.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
   }
 
   /* ---------- Boot ---------- */
@@ -199,6 +203,7 @@ export class Daemon {
     const history = current?.history ?? [];
     if (!current || current.sha !== update.sha) history.push({ sha: update.sha, pin: update.pin, appliedAt: this.now() });
     this.instance.set({ ...update, history, provisioned: current?.provisioned ?? null });
+    this.instance.commit();
   }
 
   private ensureOrchestrator(def: DaemonDefinition): void {
@@ -379,9 +384,10 @@ export class Daemon {
 
   /**
    * Swap in the bundle the app staged at puckd.next.js: stop taking input,
-   * let running turns finish (drain) or interrupt them (now), persist,
-   * rename the new bundle into place and exit 75, so the container's
-   * restart policy starts it. The response goes out before the exit.
+   * let running turns finish (drain) or interrupt them and wait out the
+   * shutdown grace (now), persist, rename the new bundle into place and
+   * exit 75, so the container's restart policy starts it. The response
+   * goes out before the exit.
    */
   private upgrade(mode: 'drain' | 'now'): Record<string, never> {
     const { paths, log } = this.opts;
@@ -400,7 +406,7 @@ export class Daemon {
     this.turns?.stopAccepting();
     setImmediate(() => {
       void (async () => {
-        if (mode === 'now') await this.turns?.interruptAll();
+        if (mode === 'now') await this.interruptWithinGrace();
         else await this.turns?.idle();
         this.setState({ status: 'stopping', detail: 'upgrading' });
         await this.persist();
@@ -425,12 +431,15 @@ export class Daemon {
     this.turns?.stopAccepting();
     this.setState({ status: 'stopping' });
     this.opts.log.info('daemon.shutdown');
-    if (this.turns) {
-      await Promise.race([this.turns.interruptAll(), new Promise((r) => setTimeout(r, SHUTDOWN_GRACE_MS).unref())]);
-    }
+    await this.interruptWithinGrace();
     await this.persist();
     await this.server?.close();
     this.opts.exit(0);
+  }
+
+  private interruptWithinGrace(): Promise<unknown> {
+    const pending = this.turns?.interruptAll() ?? Promise.resolve();
+    return Promise.race([pending, new Promise((resolve) => setTimeout(resolve, this.shutdownGraceMs).unref())]);
   }
 
   private async persist(): Promise<void> {
