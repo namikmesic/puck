@@ -480,7 +480,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
       list.appendChild(el('div', 'pv-health-msg', `Can't reach the Puck server at ${state.server}. Runners keep working; Puck keeps trying.`));
     }
     if (!state.runners.length) {
-      list.appendChild(el('p', 'pv-note', 'No runners yet. Set up This Mac, or add a Linux machine with Add runner.'));
+      list.appendChild(el('p', 'pv-note', 'Set up This Mac, or add a Linux machine with Add runner.'));
     }
     for (const r of state.runners) list.appendChild(rowEl(r));
     const local = state.local;

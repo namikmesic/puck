@@ -95,16 +95,16 @@ try {
     throw new Error('settings modal did not open');
   });
   await page.waitForTimeout(400); // let the section renders surface any page errors
-  // Providers renders every kind: harnesses, environments, integrations.
+  // Providers renders every kind: harnesses, runners, integrations.
   await page.click('.nav-item[data-section="providers"]');
   await page.waitForSelector('#pv-integration-cards [data-provider="github"]', { timeout: 5000 }).catch(() => {
     throw new Error('providers section did not render the GitHub card');
   });
   const groups = await page.evaluate(() => ({
     harness: document.querySelectorAll('#pv-harness-cards [data-provider]').length,
-    env: document.querySelectorAll('#pv-env-cards .pv-card').length,
+    runners: document.querySelectorAll('#pv-env-cards [data-provider="runner"]').length,
   }));
-  if (groups.harness !== 2 || groups.env !== 2) throw new Error(`providers grouped wrong: ${JSON.stringify(groups)}`);
+  if (groups.harness !== 2 || groups.runners !== 1) throw new Error(`providers grouped wrong: ${JSON.stringify(groups)}`);
   await page.keyboard.press('Escape');
   await browser.close();
 

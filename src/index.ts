@@ -176,8 +176,7 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   },
   [CHANNELS.providerAuthStart]: async (_event, id) => {
     const provider = signInProvider(requireId(id, 'provider'));
-    if (provider.kind === 'harness') return { url: await provider.auth.start() };
-    return provider.auth.start();
+    return { url: await provider.auth.start() };
   },
   [CHANNELS.providerAuthCancel]: (_event, id) => {
     signInProvider(requireId(id, 'provider')).auth.cancel();

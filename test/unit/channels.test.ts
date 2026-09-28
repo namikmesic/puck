@@ -9,6 +9,7 @@ import {
   INSTANCE_EVENT_CHANNEL,
   RUNNER_EVENT_CHANNEL,
 } from '../../src/harness/channels';
+import { useServerDeps } from '../../src/main/server/http';
 import { ipcMain } from '../mocks/electron';
 // Importing the main entry registers every IPC handler on the mocked ipcMain.
 import '../../src/index';
@@ -46,6 +47,24 @@ describe('IPC channel table', () => {
       (ipcMain.handlers.get(channel) as (event: unknown, args: unknown) => Promise<unknown>)({}, args);
     await expect(invoke(CHANNELS.githubSetConfigRepo, 'not a repo')).rejects.toThrow(/Invalid repository name/);
     await expect(invoke(CHANNELS.providerAuthStart, 'runner')).rejects.toThrow(/has no sign-in/);
+  });
+
+  it('every sign-in answers with the page it opened, GitHub (the Puck server) included', async () => {
+    const invoke = (channel: string, args: unknown): unknown =>
+      (ipcMain.handlers.get(channel) as (event: unknown, args: unknown) => Promise<unknown>)({}, args);
+    const opened: string[] = [];
+    const authorizeUrl = 'https://github.test/login/oauth/authorize?client_id=x';
+    useServerDeps(
+      { fetch: async () => new Response(JSON.stringify({ authorizeUrl }), { status: 200 }), openExternal: async (u) => void opened.push(u) },
+      'http://puck.test',
+    );
+    try {
+      await expect(invoke(CHANNELS.providerAuthStart, 'github')).resolves.toEqual({ url: authorizeUrl });
+      expect(opened).toEqual([authorizeUrl]);
+      await invoke(CHANNELS.providerAuthCancel, 'github');
+    } finally {
+      useServerDeps(null);
+    }
   });
 
   it('the runner and environment channels validate ids and payloads first', async () => {

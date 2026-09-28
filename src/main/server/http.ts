@@ -7,6 +7,11 @@
  * hosted server's address replaces that default once it exists.
  *
  * Bodies and answers never reach the log: most of them carry a secret.
+ *
+ * An isolated launch (PUCK_ISOLATED=1) started with PUCK_ISOLATED_BROWSER=off
+ * does not open the sign-in page in the system browser: the page's URL is
+ * only returned to the caller, so an automated check completes the sign-in
+ * itself and the person at the desk sees no browser tab.
  */
 
 import { shell } from 'electron';
@@ -22,10 +27,14 @@ export interface ServerDeps {
   openExternal(url: string): Promise<void>;
 }
 
+const noBrowser = (env: NodeJS.ProcessEnv = process.env): boolean => env.PUCK_ISOLATED === '1' && env.PUCK_ISOLATED_BROWSER === 'off';
+
 const realDeps: ServerDeps = {
   fetch: (url, init) => fetch(url, init),
   now: Date.now,
-  openExternal: (url) => shell.openExternal(url),
+  openExternal: async (url) => {
+    if (!noBrowser()) await shell.openExternal(url);
+  },
 };
 
 let deps: ServerDeps = realDeps;
