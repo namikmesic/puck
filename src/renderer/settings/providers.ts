@@ -39,7 +39,7 @@ export interface ProvidersView {
   /**
    * The window regained focus: re-check (installations may have changed on
    * GitHub), keeping what the user was typing - they often switch away to
-   * try ssh in Terminal or to create a token, and come back to finish.
+   * try ssh in Terminal, and come back to finish.
    */
   refresh(): Promise<void>;
 }
@@ -121,19 +121,13 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
   const containers = [els.harnessCards, els.envCards, els.integrationCards];
 
   /** In-progress form state, keyed by the `data-keep` tags the cards set. */
-  interface FormState {
-    values: Map<string, string>;
-    open: Set<string>;
-  }
+  type FormState = Map<string, string>;
 
   function snapshotForms(): FormState {
-    const state: FormState = { values: new Map(), open: new Set() };
+    const state: FormState = new Map();
     for (const c of containers) {
       c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
-        if (i.value) state.values.set(i.dataset.keep as string, i.value);
-      });
-      c.querySelectorAll<HTMLDetailsElement>('details[data-keep]').forEach((d) => {
-        if (d.open) state.open.add(d.dataset.keep as string);
+        if (i.value) state.set(i.dataset.keep as string, i.value);
       });
     }
     return state;
@@ -142,11 +136,8 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
   function restoreForms(state: FormState): void {
     for (const c of containers) {
       c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
-        const value = state.values.get(i.dataset.keep as string);
+        const value = state.get(i.dataset.keep as string);
         if (value !== undefined) i.value = value;
-      });
-      c.querySelectorAll<HTMLDetailsElement>('details[data-keep]').forEach((d) => {
-        if (state.open.has(d.dataset.keep as string)) d.open = true;
       });
     }
   }

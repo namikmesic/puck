@@ -57,7 +57,6 @@ export interface GitHubClient {
   user(): Promise<GhUser>;
   installations(): Promise<GhInstallation[]>;
   installationRepos(installationId: number): Promise<GhRepo[]>;
-  userRepos(): Promise<GhRepo[]>;
   repo(owner: string, repo: string): Promise<GhRepo>;
   tags(owner: string, repo: string): Promise<GhRef[]>;
   branches(owner: string, repo: string): Promise<GhRef[]>;
@@ -107,7 +106,6 @@ export function createGitHubClient(opts: HttpClientOptions): GitHubClient {
       http.paginate<GhRepo>(`/user/installations/${installationId}/repositories`, (page) =>
         (page as { repositories?: GhRepo[] } | null)?.repositories ?? [],
       ),
-    userRepos: () => http.paginate<GhRepo>('/user/repos?sort=full_name'),
     repo: (owner, repo) => get<GhRepo>(repoPath(owner, repo)),
     tags: (owner, repo) => http.paginate<GhRef>(`${repoPath(owner, repo)}/tags`),
     branches: (owner, repo) => http.paginate<GhRef>(`${repoPath(owner, repo)}/branches`),

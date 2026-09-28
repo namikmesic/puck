@@ -109,7 +109,7 @@ describe('provider registry', () => {
     expect(keys('github')).toEqual(['auth', 'github', 'id', 'kind', 'label', 'status']);
     const gh = toInfo(requireProvider('github')) as Extract<ProviderInfo, { kind: 'integration' }>;
     expect(Object.keys(gh.github).sort()).toEqual(
-      ['appConfigured', 'configRepo', 'installUrl', 'login', 'mode', 'patUrl', 'pendingCode'].sort(),
+      ['appConfigured', 'configRepo', 'installUrl', 'login', 'pendingCode'].sort(),
     );
   });
 

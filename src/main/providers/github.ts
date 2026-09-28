@@ -8,11 +8,10 @@
  *    refresh rotates the pair and kills the old one, so two concurrent
  *    refreshes would sign the user out. `bad_refresh_token` (or an expired
  *    refresh token) is a local sign-out.
- *  - The fallback is a fine-grained personal access token, stored in the
- *    same file without a refresh token; `mode` in puck-providers.json says
- *    which one is in use (installation endpoints need the app).
- *  - Tokens never leave the main process: Settings sees the login, mode,
- *    config repo and installations only.
+ *  - There is no personal-access-token sign-in. A sign-in saved by the
+ *    old token mode is discarded at boot (retireLegacyTokenSignIn).
+ *  - Tokens never leave the main process: Settings sees the login, config
+ *    repo and installations only.
  */
 
 import type {
@@ -32,10 +31,10 @@ import {
   type UserTokens,
 } from '../../harness/github';
 import { log } from '../log';
-import { githubClientId, githubInstallUrl, GITHUB_PAT_URL } from './github-app';
+import { githubClientId, githubInstallUrl } from './github-app';
 import { createDeviceSignIn } from './github-device';
 import { createOAuthAccount, signInStatus, type LogoutFence } from './oauth';
-import { githubSettings, updateGithubSettings } from './providers-store';
+import { githubSettings, takeLegacyTokenMode, updateGithubSettings } from './providers-store';
 import type { IntegrationProvider } from './types';
 
 export interface GitHubTokens extends UserTokens {
@@ -89,13 +88,12 @@ export function githubClient(): GitHubClient {
 }
 
 /** Fetch the account behind a fresh token and save the pair under the fence. */
-async function completeSignIn(tokens: UserTokens, mode: 'app' | 'pat', fence: LogoutFence): Promise<GitHubTokens> {
+async function completeSignIn(tokens: UserTokens, fence: LogoutFence): Promise<GitHubTokens> {
   const probe = createGitHubClient({ token: async () => tokens.accessToken, deps });
   const user = await probe.user();
   const full: GitHubTokens = { ...tokens, login: user.login, userId: user.id };
   if (!account.save(full, fence)) throw new Error('Signed out while signing in.');
-  updateGithubSettings({ mode });
-  log.info('github.signin', { login: user.login, mode });
+  log.info('github.signin', { login: user.login });
   account.notifyLogin();
   return full;
 }
@@ -104,7 +102,7 @@ let signInFence: LogoutFence | null = null;
 
 const device = createDeviceSignIn({
   onTokens: async (tokens) => {
-    await completeSignIn(tokens, 'app', signInFence ?? account.fence());
+    await completeSignIn(tokens, signInFence ?? account.fence());
   },
   onError: (err) => account.recordError(err),
   deps: () => deps,
@@ -114,8 +112,7 @@ function authStatus(): ProviderAuthInfo {
   const tokens = account.load();
   const pending = device.pending() !== null;
   if (tokens) {
-    const how = githubSettings().mode === 'pat' ? 'personal access token' : 'GitHub App';
-    return { connected: true, pending, detail: `Signed in as ${tokens.login} (${how})` };
+    return { connected: true, pending, detail: `Signed in as ${tokens.login}` };
   }
   const err = account.lastError();
   if (err) return { connected: false, pending, detail: `Sign-in failed: ${err}` };
@@ -124,7 +121,7 @@ function authStatus(): ProviderAuthInfo {
     pending,
     detail: githubClientId()
       ? 'Not connected — sign in with GitHub'
-      : 'GitHub App sign-in is not available in this build yet — use a personal access token',
+      : 'GitHub sign-in is not available in this build',
   };
 }
 
@@ -138,9 +135,7 @@ export const githubProvider: IntegrationProvider = {
     async start() {
       const clientId = githubClientId();
       if (!clientId) {
-        throw new Error(
-          'The GitHub App is not registered in this build yet. Set PUCK_GITHUB_CLIENT_ID, or use a personal access token.',
-        );
+        throw new Error('The GitHub App is not registered in this build yet. Set PUCK_GITHUB_CLIENT_ID.');
       }
       signInFence = account.fence();
       const prompt = await device.start(clientId);
@@ -157,34 +152,23 @@ export const githubProvider: IntegrationProvider = {
     const settings = githubSettings();
     return {
       login: account.load()?.login ?? null,
-      mode: settings.mode,
       configRepo: settings.configRepo,
       installUrl: githubInstallUrl(),
       appConfigured: githubClientId() !== null,
       pendingCode: device.pending(),
-      patUrl: GITHUB_PAT_URL,
     };
   },
 };
 
-/** Sign in with a fine-grained personal access token (validated against GET /user). */
-export async function setPersonalToken(token: string): Promise<void> {
-  const value = token.trim();
-  if (!value) throw new Error('Paste a personal access token.');
-  device.cancel();
-  const fence = account.fence();
-  try {
-    await completeSignIn(
-      { accessToken: value, expiresAt: null, refreshToken: null, refreshExpiresAt: null },
-      'pat',
-      fence,
-    );
-  } catch (err) {
-    if (err instanceof GitHubApiError && err.status === 401) {
-      throw new Error('GitHub rejected this token. Check that it is active and copied in full.');
-    }
-    throw err;
-  }
+/**
+ * Boot: a sign-in saved by the removed personal-token mode is discarded, so
+ * GitHub reads as signed out until the device flow runs. Runs once per file
+ * (the store drops the old mode as it answers); the config repo is kept.
+ */
+export async function retireLegacyTokenSignIn(): Promise<void> {
+  if (!takeLegacyTokenMode()) return;
+  await account.logout();
+  log.info('github.legacy-token-retired');
 }
 
 function toRepo(r: GhRepo): GithubRepo {
@@ -192,7 +176,7 @@ function toRepo(r: GhRepo): GithubRepo {
 }
 
 export async function installations(): Promise<GithubInstallation[]> {
-  if (!account.load() || githubSettings().mode === 'pat') return [];
+  if (!account.load()) return [];
   const list = await githubClient().installations();
   return list.map((i) => ({
     id: i.id,
@@ -203,17 +187,12 @@ export async function installations(): Promise<GithubInstallation[]> {
   }));
 }
 
-/** Repositories the sign-in reaches: installation repos (app) or /user/repos (token). */
+/** Repositories the sign-in reaches: the repos of every app installation. */
 export async function repositories(): Promise<GithubRepo[]> {
   if (!account.load()) throw new Error('Sign in to GitHub first.');
   const client = githubClient();
-  let repos: GhRepo[];
-  if (githubSettings().mode === 'pat') {
-    repos = await client.userRepos();
-  } else {
-    repos = [];
-    for (const inst of await client.installations()) repos.push(...(await client.installationRepos(inst.id)));
-  }
+  const repos: GhRepo[] = [];
+  for (const inst of await client.installations()) repos.push(...(await client.installationRepos(inst.id)));
   const byName = new Map(repos.map((r) => [r.full_name.toLowerCase(), r]));
   return [...byName.values()].map(toRepo).sort((a, b) => a.fullName.localeCompare(b.fullName));
 }

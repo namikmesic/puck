@@ -50,12 +50,10 @@ const gh = (over: Partial<IntegrationProviderInfo['github']> = {}, auth: Partial
   auth: { connected: false, pending: false, detail: 'Not connected — sign in with GitHub', ...auth },
   github: {
     login: null,
-    mode: 'app',
     configRepo: null,
     installUrl: 'https://github.com/apps/puck/installations/new',
     appConfigured: true,
     pendingCode: null,
-    patUrl: 'https://github.com/settings/personal-access-tokens/new?name=Puck',
     ...over,
   },
 });
@@ -72,7 +70,6 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
     githubInstallations: vi.fn(async () => []),
     githubRepos: vi.fn(async () => []),
     githubSetConfigRepo: vi.fn(async () => infos),
-    githubSetPat: vi.fn(async () => infos),
     openExternal: vi.fn(async () => undefined),
     ...bridgeOver,
   } as unknown as PuckBridge;
@@ -204,47 +201,20 @@ describe('GitHub card', () => {
     expect(copy).toHaveBeenCalledWith('ABCD-1234');
     expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/login/device');
     // Approved on GitHub: the poll sees pending clear and re-renders signed in.
-    state = gh({ login: 'octocat', configRepo: null }, { connected: true, detail: 'Signed in as octocat (GitHub App)' });
+    state = gh({ login: 'octocat', configRepo: null }, { connected: true, detail: 'Signed in as octocat' });
     await new Promise((r) => setTimeout(r, 20));
     expect(card(els.integrationCards, 'github').querySelector('.pv-user-code')).toBeNull();
     expect(btn(card(els.integrationCards, 'github'), 'Sign out')).toBeTruthy();
     view.stopPolling();
   });
 
-  it('without a registered app the button is disabled and the token form is open', async () => {
+  it('without a registered app the button is disabled and no token sign-in is offered', async () => {
     const { els, view } = mount([gh({ appConfigured: false })]);
     await view.render();
     const ghCard = card(els.integrationCards, 'github');
     expect(btn(ghCard, 'Sign in with GitHub').disabled).toBe(true);
-    expect((ghCard.querySelector('details.pv-pat') as HTMLDetailsElement).open).toBe(true);
-  });
-
-  it('submits a personal access token and clears the field', async () => {
-    const githubSetPat = vi.fn(async () => [gh({ login: 'octocat', mode: 'pat' }, { connected: true })]);
-    const { els, view } = mount([gh()], { githubSetPat });
-    await view.render();
-    const form = card(els.integrationCards, 'github').querySelector('form.pv-pat-form') as HTMLFormElement;
-    const input = form.querySelector('input') as HTMLInputElement;
-    expect(input.type).toBe('password');
-    input.value = 'github_pat_x';
-    form.dispatchEvent(new Event('submit', { cancelable: true }));
-    await settle();
-    expect(githubSetPat).toHaveBeenCalledWith('github_pat_x');
-    expect(input.value).toBe('');
-  });
-
-  it('a rejected token scrolls the section message into view', async () => {
-    const githubSetPat = vi.fn(async () => {
-      throw new Error('GitHub rejected this token.');
-    });
-    const { els, view, scrollIntoView } = mount([gh()], { githubSetPat });
-    await view.render();
-    const form = card(els.integrationCards, 'github').querySelector('form.pv-pat-form') as HTMLFormElement;
-    (form.querySelector('input') as HTMLInputElement).value = 'github_pat_bad';
-    form.dispatchEvent(new Event('submit', { cancelable: true }));
-    await settle();
-    expect(els.msg.textContent).toContain('GitHub rejected this token.');
-    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(ghCard.querySelector('details, form, input')).toBeNull();
+    expect(ghCard.textContent).not.toMatch(/token/i);
   });
 
   it('signed in: installations with Manage, install link, config repo picker and Open repo', async () => {
@@ -292,12 +262,12 @@ describe('GitHub card', () => {
     expect([...ghCard.querySelectorAll('button')].some((b) => b.textContent === 'Install Puck on an account')).toBe(false);
   });
 
-  it('token mode hides installations; Sign out calls logout', async () => {
-    const { els, view, bridge } = mount([gh({ login: 'me', mode: 'pat' }, { connected: true })]);
+  it('signed in shows no mode line or token form; Sign out calls logout', async () => {
+    const { els, view, bridge } = mount([gh({ login: 'me' }, { connected: true })]);
     await view.render();
     const ghCard = card(els.integrationCards, 'github');
-    expect(ghCard.querySelector('.pv-installs')).toBeNull();
-    expect(bridge.githubInstallations).not.toHaveBeenCalled();
+    expect([...ghCard.querySelectorAll('dt')].map((d) => d.textContent)).toEqual(['Account']);
+    expect(ghCard.querySelector('details, form')).toBeNull();
     btn(ghCard, 'Sign out').click();
     await settle();
     expect(bridge.providerAuthLogout).toHaveBeenCalledWith('github');
@@ -305,16 +275,13 @@ describe('GitHub card', () => {
 });
 
 describe('focus refresh', () => {
-  it('keeps what the user was typing in the Add host and token forms', async () => {
+  it('keeps what the user was typing in the Add host form', async () => {
     const githubInstallations = vi.fn(async () => []);
     const { els, view } = mount([ssh(), gh({ login: 'me' }, { connected: true })], { githubInstallations });
     await view.render();
     const [label, host] = [...els.envCards.querySelectorAll<HTMLInputElement>('form.pv-add-host input')];
     label.value = 'Build box';
     host.value = 'ssh://me@box';
-    const pat = card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement;
-    pat.open = true;
-    (pat.querySelector('input') as HTMLInputElement).value = 'github_pat_half';
 
     // The user switched to Terminal or the browser and came back.
     await view.refresh();
@@ -323,9 +290,6 @@ describe('focus refresh', () => {
     expect(label2).not.toBe(label); // the cards were rebuilt (a fresh re-check)...
     expect(label2.value).toBe('Build box'); // ...but the typing survived
     expect(host2.value).toBe('ssh://me@box');
-    const pat2 = card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement;
-    expect(pat2.open).toBe(true);
-    expect((pat2.querySelector('input') as HTMLInputElement).value).toBe('github_pat_half');
     expect(githubInstallations).toHaveBeenCalledTimes(2); // installations were re-checked
 
     // An explicit re-render (after a save) starts the forms empty again.
@@ -333,7 +297,6 @@ describe('focus refresh', () => {
     const [label3, host3] = [...els.envCards.querySelectorAll<HTMLInputElement>('form.pv-add-host input')];
     expect(label3.value).toBe('');
     expect(host3.value).toBe('');
-    expect((card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement).open).toBe(false);
   });
 
   it('does nothing before the section has rendered once', async () => {

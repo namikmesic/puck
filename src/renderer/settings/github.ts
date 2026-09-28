@@ -1,9 +1,8 @@
 /**
  * Settings → Providers → Integrations → GitHub. Signed out: device-flow
- * sign-in (the code, "Copy code and open github.com/login/device") and the
- * personal-token fallback. Signed in: the login, the app installations
- * with Manage links and "Install Puck on an account", the config-repo
- * picker with "Open repo", the mode, and Sign out. Tokens never reach this
+ * sign-in (the code, "Copy code and open github.com/login/device"). Signed
+ * in: the login, the app installations with Manage links and "Install Puck
+ * on an account", the config-repo picker with "Open repo", and Sign out. Tokens never reach this
  * module; main returns the login and settings only. Context in, elements
  * built here, no DOM lookups.
  */
@@ -57,52 +56,6 @@ function codeBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo, code: 
   foot.append(open, cancel);
   box.appendChild(foot);
   return box;
-}
-
-function patForm(ctx: GitHubCardContext, info: IntegrationProviderInfo, open: boolean): HTMLElement {
-  const details = el('details', 'pv-pat');
-  details.dataset.keep = 'pat';
-  details.open = open;
-  details.appendChild(el('summary', '', 'Use a personal access token instead'));
-  details.appendChild(
-    el(
-      'p',
-      'pv-note',
-      'A fine-grained token with Contents and Pull requests read/write on the repositories Puck should reach.',
-    ),
-  );
-  const create = button('btn-ghost', 'Create a token on GitHub');
-  create.addEventListener('click', () => void ctx.bridge.openExternal(info.github.patUrl));
-  const form = el('form', 'pv-pat-form config-form');
-  const input = el('input', '');
-  input.dataset.keep = 'pat';
-  input.type = 'password';
-  input.placeholder = 'github_pat_…';
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  input.maxLength = 255;
-  input.setAttribute('aria-label', 'Personal access token');
-  const save = el('button', 'btn-ghost', 'Use token');
-  save.type = 'submit';
-  form.append(input, save);
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!input.value.trim()) return input.focus();
-    save.disabled = true;
-    ctx.say('');
-    try {
-      const infos = await ctx.bridge.githubSetPat(input.value);
-      input.value = '';
-      ctx.onChange(infos);
-    } catch (err) {
-      ctx.say(errText(err));
-      save.disabled = false;
-    }
-  });
-  const foot = el('div', 'card-foot');
-  foot.appendChild(create);
-  details.append(foot, form);
-  return details;
 }
 
 function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo): HTMLElement {
@@ -237,15 +190,13 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
     });
     foot.appendChild(signIn);
     card.appendChild(foot);
-    card.appendChild(patForm(ctx, info, !github.appConfigured));
     return card;
   }
 
   const facts = el('dl', 'facts');
   facts.append(el('dt', '', 'Account'), el('dd', '', github.login ?? '—'));
-  facts.append(el('dt', '', 'Mode'), el('dd', '', github.mode === 'pat' ? 'Personal access token' : 'GitHub App'));
   card.appendChild(facts);
-  if (github.mode === 'app') card.appendChild(installationsBlock(ctx, info));
+  card.appendChild(installationsBlock(ctx, info));
   card.appendChild(configRepoBlock(ctx, info));
 
   const foot = el('div', 'card-foot');
@@ -262,6 +213,5 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
   });
   foot.appendChild(signOut);
   card.appendChild(foot);
-  if (github.mode === 'app') card.appendChild(patForm(ctx, info, false));
   return card;
 }

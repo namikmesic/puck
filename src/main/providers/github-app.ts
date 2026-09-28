@@ -11,8 +11,7 @@
 /**
  * PLACEHOLDER - the GitHub App is not registered yet. Replace this with the
  * registered app's client id (it is public, not a secret). Until then
- * GitHub sign-in is disabled unless PUCK_GITHUB_CLIENT_ID is set; the
- * personal-token fallback works regardless.
+ * GitHub sign-in is disabled unless PUCK_GITHUB_CLIENT_ID is set.
  */
 export const GITHUB_APP_CLIENT_ID = 'PLACEHOLDER-unregistered-github-app';
 
@@ -54,7 +53,3 @@ export function githubInstallUrl(env: NodeJS.ProcessEnv = process.env): string |
   if (slug === null || githubClientId(env) === null) return null;
   return `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
 }
-
-/** Pre-filled fine-grained personal access token page (the fallback). */
-export const GITHUB_PAT_URL =
-  'https://github.com/settings/personal-access-tokens/new?name=Puck&contents=write&pull_requests=write&expires_in=90';
