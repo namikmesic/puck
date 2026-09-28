@@ -120,6 +120,20 @@ describe('diffEnvironments: identity', () => {
     expect(diff((env) => (env.source.pin = { kind: 'tag', name: 'v2.0.0', sha: 'b'.repeat(40) }))).toEqual([]);
   });
 
+  it('a newly referenced agent named like an Object prototype member is only an assignment', () => {
+    const changes = diff((env) => {
+      env.agents.push({ agent: 'constructor', maxParallel: 1, instructions: '' });
+      env.agentDefinitions.constructor = { ...structuredClone(env.agentDefinitions.reviewer), name: 'constructor' };
+    });
+    expect(changes).toEqual([expect.objectContaining({ field: 'agents[constructor]', class: 'hot' })]);
+    expect(updateClass(changes)).toBe('hot');
+  });
+
+  it('an env var named like an Object prototype member reads as absent before it is added', () => {
+    const [change] = diff((env) => (env.env.constructor = '1'));
+    expect(change).toEqual(expect.objectContaining({ field: 'env.constructor', class: 'hot', summary: 'env.constructor: (default) → "1"' }));
+  });
+
   it('a repo is matched by its GitHub name, ignoring case', () => {
     expect(diff((env) => (env.repos[0].github = 'Your-Org/Your-App'))).toEqual([]);
   });

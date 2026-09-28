@@ -83,6 +83,10 @@ function show(value: unknown): string {
   return text.length > 60 ? `${text.slice(0, 57)}…` : text;
 }
 
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 function get(obj: unknown, dotted: string): unknown {
   return dotted.split('.').reduce<unknown>((node, key) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[key] : undefined), obj);
 }
@@ -132,15 +136,16 @@ export function diffEnvironments(prev: ResolvedEnvironment, next: ResolvedEnviro
 
   // Agents referenced before and after; one that comes or goes is covered above.
   for (const [name, agent] of Object.entries(next.agentDefinitions)) {
+    if (!hasOwn(prev.agentDefinitions, name)) continue;
     const old = prev.agentDefinitions[name];
-    if (!old) continue;
     for (const [field, cls] of Object.entries(AGENT_FIELD_CLASSES)) {
       changed(`agentDefinitions.${name}.${field}`, cls, old[field as keyof ResolvedAgent], agent[field as keyof ResolvedAgent]);
     }
   }
 
   const keys = new Set([...Object.keys(prev.env), ...Object.keys(next.env)]);
-  for (const key of [...keys].sort()) changed(`env.${key}`, ENV_VAR_CLASS, prev.env[key], next.env[key]);
+  const envAt = (env: Record<string, string>, key: string) => (hasOwn(env, key) ? env[key] : undefined);
+  for (const key of [...keys].sort()) changed(`env.${key}`, ENV_VAR_CLASS, envAt(prev.env, key), envAt(next.env, key));
 
   const prevSecrets = new Set(prev.secrets);
   const nextSecrets = new Set(next.secrets);
