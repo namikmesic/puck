@@ -6,7 +6,8 @@ Versions follow `MAJOR.MINOR.PATCH`, and every release is tagged `v<version>` on
 
 ## Unreleased
 
-- Providers come in three kinds with one registry: harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH with a health check that names the SSH problem), and GitHub, signed in through the device flow or a personal access token, with its config repo chosen in **Settings → Providers**; host CLI login files and host environment variables no longer reach containers.
+- Providers come in three kinds with one registry: harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH with a health check that names the SSH problem), and GitHub, signed in through the device flow, with its config repo chosen in **Settings → Providers**; host CLI login files and host environment variables no longer reach containers.
+- GitHub sign-in is the device flow through the Puck GitHub App only: the personal access token option is gone from Settings, repositories come from the app's installations, and a token saved by an earlier build is discarded, so GitHub reads as signed out until you sign in again.
 - Every provider now reports one status (connected, disconnected, pending or error, with a detail line), and an environment target's health check returns its detail and Docker server version under the same names Settings shows.
 
 ## 0.0.1 - unreleased

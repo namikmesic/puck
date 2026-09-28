@@ -124,7 +124,7 @@ describe('puck-providers.json', () => {
   });
 
   it('loads leniently: defaults for missing fields, malformed and dash hosts dropped', () => {
-    expect(normalizeProviders(null)).toEqual({ v: 1, sshHosts: [], github: { configRepo: null, mode: 'app' } });
+    expect(normalizeProviders(null)).toEqual({ v: 1, sshHosts: [], github: { configRepo: null } });
     expect(
       normalizeProviders({
         sshHosts: [
@@ -142,8 +142,8 @@ describe('puck-providers.json', () => {
         { id: 'a', label: 'A', host: 'ssh://me@a' },
         { id: 'b', label: 'b-alias', host: 'b-alias' },
       ],
-      github: { configRepo: 'me/cfg', mode: 'pat' },
+      github: { configRepo: 'me/cfg' },
     });
-    expect(normalizeProviders({ github: { mode: 'weird' } }).github.mode).toBe('app');
+    expect(normalizeProviders({ github: { mode: 'weird' } }).github).toEqual({ configRepo: null });
   });
 });

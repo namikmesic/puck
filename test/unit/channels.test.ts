@@ -34,7 +34,6 @@ describe('IPC channel table', () => {
       /has no targets/,
     );
     await expect(invoke(CHANNELS.githubSetConfigRepo, 'not a repo')).rejects.toThrow(/Invalid repository name/);
-    await expect(invoke(CHANNELS.githubSetPat, 'a b')).rejects.toThrow(/Invalid personal access token/);
     await expect(invoke(CHANNELS.providerAuthStart, 'docker-local')).rejects.toThrow(/has no sign-in/);
   });
 });

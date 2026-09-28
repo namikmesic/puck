@@ -6,7 +6,6 @@ import {
   installations,
   repositories,
   setConfigRepo,
-  setPersonalToken,
   useGitHubDeps,
   type GitHubTokens,
 } from '../../src/main/providers/github';
@@ -57,7 +56,7 @@ beforeEach(() => {
 afterEach(async () => {
   delete process.env[CLIENT_ID_ENV];
   await githubProvider.auth.logout();
-  updateGithubSettings({ configRepo: null, mode: 'app' });
+  updateGithubSettings({ configRepo: null });
   useGitHubDeps(undefined);
 });
 
@@ -68,7 +67,7 @@ describe('GitHub App identity', () => {
     delete process.env[CLIENT_ID_ENV];
     expect(githubProvider.state().appConfigured).toBe(false);
     await expect(githubProvider.auth.start()).rejects.toThrow(/not registered/);
-    expect(githubProvider.auth.status().detail).toMatch(/personal access token/);
+    expect(githubProvider.auth.status().detail).toBe('GitHub sign-in is not available in this build');
   });
 
   it('offers an install link only when both the client id and the slug are set', () => {
@@ -93,7 +92,7 @@ describe('device-flow sign-in', () => {
     const saved = account.load() as GitHubTokens;
     expect(saved).toMatchObject({ accessToken: 'ghu_one', refreshToken: 'ghr_one', login: 'octocat', userId: 583231 });
     expect(githubProvider.auth.status()).toMatchObject({ connected: true, pending: false });
-    expect(githubProvider.state()).toMatchObject({ login: 'octocat', mode: 'app', pendingCode: null });
+    expect(githubProvider.state()).toMatchObject({ login: 'octocat', pendingCode: null });
     // Nothing on the wire carries a client secret.
     expect(gh.requests.some((r) => /client_secret/.test(r.body ?? ''))).toBe(false);
     expect(loadSecret('github-oauth.bin')).toContain('ghr_one');
@@ -171,31 +170,10 @@ describe('refresh rotation', () => {
   });
 });
 
-describe('personal access token fallback', () => {
-  it('validates the token against GET /user and switches to token mode', async () => {
-    const gh = github();
-    useGitHubDeps(gh.deps);
-    await setPersonalToken('  github_pat_abc  ');
-    expect(gh.requests[0].headers.Authorization).toBe('Bearer github_pat_abc');
-    expect(account.load()).toMatchObject({ accessToken: 'github_pat_abc', refreshToken: null, login: 'octocat' });
-    expect(githubSettings().mode).toBe('pat');
-    expect(githubProvider.auth.status().detail).toBe('Signed in as octocat (personal access token)');
-    // Installation endpoints are app-only; a token lists /user/repos instead.
-    expect(await installations()).toEqual([]);
-  });
-
-  it('rejects a token GitHub refuses, storing nothing', async () => {
-    const gh = github((req) => (req.url.endsWith('/user') ? { status: 401, body: { message: 'Bad credentials' } } : undefined));
-    useGitHubDeps(gh.deps);
-    await expect(setPersonalToken('github_pat_bad')).rejects.toThrow(/rejected this token/);
-    expect(account.load()).toBeNull();
-  });
-});
-
 describe('repositories and the config repo', () => {
   const repo = (full: string) => ({ full_name: full, private: true, default_branch: 'main', html_url: `https://github.com/${full}` });
 
-  it('app mode lists the repos of every installation, deduplicated and sorted', async () => {
+  it('lists the repos of every installation, deduplicated and sorted', async () => {
     const gh = github((req) => {
       if (req.url.startsWith('https://api.github.com/user/installations?')) {
         return {

@@ -24,7 +24,6 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
-  patFrom,
   repoNameFrom,
   requireId,
   requireSecretKey,
@@ -163,10 +162,6 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     await github.setConfigRepo(repoNameFrom(fullName));
     return providerRegistry.providerInfos();
   },
-  [CHANNELS.githubSetPat]: async (_event, token) => {
-    await github.setPersonalToken(patFrom(token));
-    return providerRegistry.providerInfos();
-  },
 
   [CHANNELS.agentList]: () => agents.list(),
   [CHANNELS.agentCreate]: (_event, cfg) => agents.create(agentConfigFrom(cfg)),
@@ -275,6 +270,9 @@ app.on('ready', () => {
       });
     });
   }
+  // A GitHub sign-in saved by the removed personal-token mode reads as
+  // signed out; the stored token is cleared synchronously, before any window.
+  void github.retireLegacyTokenSignIn().catch((err) => log.error('Retiring the GitHub token sign-in failed', err));
   createWindow();
   // Locate the docker CLI up front (Finder launches do not inherit the shell
   // PATH); a miss is reported by the first environment operation that needs it.

@@ -131,10 +131,3 @@ export function repoNameFrom(value: unknown): string {
   if (typeof value !== 'string' || !REPO_NAME_RE.test(value)) throw new Error('Invalid repository name.');
   return value;
 }
-
-/** A pasted personal access token: a non-empty string of at most 255 characters. */
-export function patFrom(value: unknown): string {
-  const token = requireString(value, 'token').trim();
-  if (!token || token.length > 255 || /\s/.test(token)) throw new Error('Invalid personal access token.');
-  return token;
-}

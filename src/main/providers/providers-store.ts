@@ -8,7 +8,6 @@
  */
 
 import * as crypto from 'node:crypto';
-import type { GitHubMode } from '../../harness/bridge';
 import { defineStore } from '../store';
 
 export interface SshHost {
@@ -21,7 +20,6 @@ export interface SshHost {
 export interface GitHubSettings {
   /** `owner/name`, or null until one is chosen. */
   configRepo: string | null;
-  mode: GitHubMode;
 }
 
 export interface ProvidersFile {
@@ -30,7 +28,7 @@ export interface ProvidersFile {
   github: GitHubSettings;
 }
 
-const defaults = (): ProvidersFile => ({ v: 1, sshHosts: [], github: { configRepo: null, mode: 'app' } });
+const defaults = (): ProvidersFile => ({ v: 1, sshHosts: [], github: { configRepo: null } });
 
 const isStr = (value: unknown): value is string => typeof value === 'string';
 
@@ -52,15 +50,24 @@ export function normalizeProviders(raw: unknown): ProvidersFile {
     }),
     github: {
       configRepo: isStr(github.configRepo) ? github.configRepo : null,
-      mode: github.mode === 'pat' ? 'pat' : 'app',
     },
   };
 }
 
+/**
+ * True when the file loaded from disk still carried `github.mode: 'pat'`,
+ * the personal-access-token sign-in that no longer exists.
+ */
+let legacyTokenMode = false;
+
 const store = defineStore<ProvidersFile>({
   file: 'puck-providers.json',
   defaults,
-  migrate: normalizeProviders,
+  migrate: (raw) => {
+    const github = (raw as { github?: { mode?: unknown } } | null)?.github;
+    legacyTokenMode = typeof github === 'object' && github !== null && github.mode === 'pat';
+    return normalizeProviders(raw);
+  },
 });
 
 export function sshHosts(): SshHost[] {
@@ -86,6 +93,19 @@ export function removeSshHost(id: string): void {
   const state = store.read();
   state.sshHosts = state.sshHosts.filter((h) => h.id !== id);
   store.persist();
+}
+
+/**
+ * True exactly once when the file on disk was saved in the removed
+ * personal-token mode. The file is then rewritten without `mode`, so a
+ * device-flow sign-in made afterwards is never mistaken for the old token.
+ */
+export function takeLegacyTokenMode(): boolean {
+  store.read();
+  if (!legacyTokenMode) return false;
+  legacyTokenMode = false;
+  store.persist();
+  return true;
 }
 
 export function githubSettings(): GitHubSettings {

@@ -14,7 +14,7 @@ Every turn executes inside a Docker container you configure.
   Puck installs the provider CLIs and SDKs into the container, deploys a small runner agent, and speaks NDJSON to it over `docker exec` stdio.
   The container is the safety boundary: agents run with full tool access inside it, and the workspace folder is the only host folder they reach.
 - **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH), and integrations (GitHub).
-  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in with the device flow or a personal access token.
+  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in with the device flow through the Puck GitHub App only.
   Tokens are encrypted via the OS keychain.
   Adding a harness is one pure descriptor under `src/harness/providers/`, its host half, one registry entry, and one entry in the container runner's `PROVIDERS` table.
 
@@ -103,7 +103,7 @@ Everything Puck stores on your Mac is in one folder: `~/Library/Application Supp
 | `puck-environments.json` | Environments: name, image, Dockerfile, workspace path, environment variables |
 | `puck-resume.json` | Provider session ids, so a conversation continues after a restart |
 | `puck-convos/<agent id>.json` | One conversation transcript per agent |
-| `puck-providers.json` | Provider settings: Docker-over-SSH hosts, the GitHub config repo and sign-in mode |
+| `puck-providers.json` | Provider settings: Docker-over-SSH hosts and the GitHub config repo |
 | `claude-oauth.bin`, `codex-oauth.bin`, `github-oauth.bin` | Provider tokens, encrypted through the macOS Keychain |
 | `env-secrets-<environment id>.bin` | Environment secrets, encrypted the same way |
 | `logs/puck.log`, `logs/puck.log.1`, `logs/puck.log.2` | The diagnostic log: three files of at most 1 MiB each |

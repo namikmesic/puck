@@ -106,14 +106,14 @@ describe('GitHub transport', () => {
 
   it('follows Link rel="next" across pages', async () => {
     const { gh, http } = client([
-      { body: [{ n: 1 }, { n: 2 }], headers: { link: '<https://api.github.com/user/repos?per_page=100&page=2>; rel="next", <https://api.github.com/user/repos?per_page=100&page=3>; rel="last"' } },
-      { body: [{ n: 3 }], headers: { link: '<https://api.github.com/user/repos?per_page=100&page=1>; rel="prev"' } },
+      { body: [{ n: 1 }, { n: 2 }], headers: { link: '<https://api.github.com/repos/me/app/branches?per_page=100&page=2>; rel="next", <https://api.github.com/repos/me/app/branches?per_page=100&page=3>; rel="last"' } },
+      { body: [{ n: 3 }], headers: { link: '<https://api.github.com/repos/me/app/branches?per_page=100&page=1>; rel="prev"' } },
     ]);
-    const all = await http.paginate<{ n: number }>('/user/repos');
+    const all = await http.paginate<{ n: number }>('/repos/me/app/branches');
     expect(all.map((x) => x.n)).toEqual([1, 2, 3]);
     expect(gh.requests.map((r) => r.url)).toEqual([
-      'https://api.github.com/user/repos?per_page=100',
-      'https://api.github.com/user/repos?per_page=100&page=2',
+      'https://api.github.com/repos/me/app/branches?per_page=100',
+      'https://api.github.com/repos/me/app/branches?per_page=100&page=2',
     ]);
   });
 

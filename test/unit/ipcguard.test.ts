@@ -4,7 +4,6 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
-  patFrom,
   repoNameFrom,
   requireId,
   requireSecretKey,
@@ -139,18 +138,6 @@ describe('repoNameFrom', () => {
   it('rejects anything else', () => {
     for (const bad of ['cfg', 'a/b/c', '../etc', 'me/', '/cfg', 'me/cfg repo', 'me_x/cfg', 42, null]) {
       expect(() => repoNameFrom(bad), String(bad)).toThrow(/Invalid repository name/);
-    }
-  });
-});
-
-describe('patFrom', () => {
-  it('accepts a trimmed token up to 255 characters', () => {
-    expect(patFrom('  github_pat_abc123  ')).toBe('github_pat_abc123');
-    expect(patFrom('x'.repeat(255))).toHaveLength(255);
-  });
-  it('rejects empty, oversized, whitespace-containing and non-string tokens', () => {
-    for (const bad of ['', '   ', 'x'.repeat(256), 'ghp_a b', 42, undefined]) {
-      expect(() => patFrom(bad)).toThrow();
     }
   });
 });

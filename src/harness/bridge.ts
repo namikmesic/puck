@@ -216,13 +216,10 @@ export interface DeviceCodePrompt {
 /** What `providerAuthStart` returns: a loopback OAuth URL, or a device code. */
 export type AuthStart = { url: string } | DeviceCodePrompt;
 
-export type GitHubMode = 'app' | 'pat';
-
 /** GitHub's integration state as Settings shows it. Never carries a token. */
 export interface GitHubStatus {
   /** Signed-in login, null when signed out. */
   login: string | null;
-  mode: GitHubMode;
   /** `owner/name` of the config repo, or null until one is chosen. */
   configRepo: string | null;
   /** Where to install the GitHub App on an account; null until the app's client id and slug are both set. */
@@ -231,8 +228,6 @@ export interface GitHubStatus {
   appConfigured: boolean;
   /** The device code of a sign-in in progress, if any. */
   pendingCode: DeviceCodePrompt | null;
-  /** Pre-filled link for creating a fine-grained personal access token. */
-  patUrl: string;
 }
 
 /** An integration provider (GitHub): an external service Puck signs in to. */
@@ -327,14 +322,12 @@ export interface PuckBridge {
   sshHostRemove(id: string): Promise<ProviderInfo[]>;
   /** Health of one environment-provider target (runs `docker version` there). */
   targetHealth(providerId: string, targetId: string): Promise<TargetHealth>;
-  /** GitHub App installations the signed-in user can reach (empty for a personal token). */
+  /** GitHub App installations the signed-in user can reach. */
   githubInstallations(): Promise<GithubInstallation[]>;
   /** Repositories the GitHub sign-in can reach, for the config-repo picker. */
   githubRepos(): Promise<GithubRepo[]>;
   /** Choose the config repo (`owner/name`); returns the updated provider list. */
   githubSetConfigRepo(fullName: string): Promise<ProviderInfo[]>;
-  /** Sign in with a fine-grained personal access token instead of the app. */
-  githubSetPat(token: string): Promise<ProviderInfo[]>;
 
   agentList(): Promise<AgentInfo[]>;
   agentCreate(cfg: Omit<AgentConfig, 'id'>): Promise<AgentInfo[]>;
