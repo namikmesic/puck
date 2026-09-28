@@ -198,7 +198,7 @@ export class Backlog {
     return item;
   }
 
-  /** Mutate an item (not its status) and persist. */
+  /** Mutate an item (not its status) and persist. No-op when the id is already gone. */
   patch(item: ItemRecord, change: Partial<Omit<ItemRecord, 'id' | 'number' | 'status'>>): ItemRecord {
     if (!this.get(item.id)) return item;
     Object.assign(item, change, { updatedAt: this.now() });

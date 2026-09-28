@@ -380,7 +380,7 @@ export class Work {
           const sha = await git.addWorktree(repo.dir, worktree, branch, baseBranch);
           return { branch: baseBranch, sha };
         });
-        if (item.status !== 'running') return; // cancelled while the worktree was prepared
+        if (item.status !== 'running') return; // cancelled while preparing; finally drops the unrecorded worktree
         const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id });
         this.deps.backlog.patch(item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
         this.deps.turns.send(
@@ -467,6 +467,7 @@ export class Work {
     if (outcome.interrupted === 'user') {
       this.deps.backlog.transition(item, 'interrupt', { result: { ...result, interrupted: true }, pendingAsk: null });
       if (this.deps.turns.queueLength(session.id) > 0) {
+        // A follow-up already queued runs next, the same as one sent in review.
         this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
       } else {
         this.deps.notify(

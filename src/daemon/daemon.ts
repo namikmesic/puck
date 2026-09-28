@@ -113,7 +113,7 @@ export class Daemon {
   private orchestrator!: Orchestrator;
   private tools: OrchestratorTool[] = [];
   private git!: Git;
-  /** A reprovisioning update waits for running turns, then provisions in place. */
+  /** True while a reprovision is waiting or provisioning. */
   private reprovisioning = false;
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
@@ -321,11 +321,11 @@ export class Daemon {
   /* ---------- Definition updates ---------- */
 
   /**
-   * Apply a new resolution of this environment's definition. Hot changes
-   * take effect with the next turn and dispatch; nothing is interrupted.
-   * Reprovision changes also re-run provisioning in place once running
-   * turns finish (the scheduler waits meanwhile). A change that needs a
-   * rebuild is refused: the app recreates the container itself.
+   * Apply a new resolution of this environment's definition (`UpdateClass`
+   * in src/harness/definitions/types.ts). Hot changes take effect with the
+   * next turn and dispatch. While a reprovision runs, the scheduler does
+   * not start work. A change that needs a rebuild is refused: the app
+   * recreates the container itself.
    */
   private applyDefinition(raw: unknown, pin: Pin): { classes: string[] } {
     if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');

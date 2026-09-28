@@ -207,8 +207,9 @@ export interface ResolvedEnvironment {
 /**
  * How a definition change reaches a running instance. Hot: the next turn,
  * nothing interrupted. Reprovision: provisioning re-runs in place once
- * running turns finish. Rebuild: the container is recreated with the same
- * volumes; running turns are interrupted and requeued.
+ * running turns and in-flight worktree prepares finish. Rebuild: the
+ * container is recreated with the same volumes; running turns are
+ * interrupted and requeued.
  */
 export type UpdateClass = 'hot' | 'reprovision' | 'rebuild';
 
