@@ -61,23 +61,24 @@ afterEach(async () => {
 });
 
 describe('GitHub App identity', () => {
-  it('ships a placeholder that disables app sign-in until PUCK_GITHUB_CLIENT_ID is set', async () => {
-    expect(githubClientId({})).toBeNull();
+  it('ships the registered Puck Agents client id, with PUCK_GITHUB_CLIENT_ID as a development override', async () => {
+    expect(githubClientId({})).toBe('Iv23liEFTqLz112apImK');
     expect(githubClientId({ [CLIENT_ID_ENV]: ' Iv1.dev ' })).toBe('Iv1.dev');
     delete process.env[CLIENT_ID_ENV];
-    expect(githubProvider.state().appConfigured).toBe(false);
-    await expect(githubProvider.auth.start()).rejects.toThrow(/not registered/);
-    expect(githubProvider.auth.status().detail).toBe('GitHub sign-in is not available in this build');
+    expect(githubProvider.state().appConfigured).toBe(true);
+    expect(githubProvider.auth.status().detail).toBe('Not connected — sign in with GitHub');
+    const gh = github();
+    useGitHubDeps(gh.deps);
+    await githubProvider.auth.start();
+    expect(form(gh.requests[0])).toMatchObject({ client_id: 'Iv23liEFTqLz112apImK' });
   });
 
-  it('offers an install link only when both the client id and the slug are set', () => {
-    expect(githubInstallUrl({})).toBeNull();
-    expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev' })).toBeNull();
-    expect(githubInstallUrl({ [APP_SLUG_ENV]: 'puck-dev' })).toBeNull();
+  it('links the install page of the registered app, with PUCK_GITHUB_APP_SLUG as a development override', () => {
+    expect(githubInstallUrl({})).toBe('https://github.com/apps/puck-agents/installations/new');
     expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe(
       'https://github.com/apps/puck-dev/installations/new',
     );
-    expect(githubProvider.state().installUrl).toBeNull();
+    expect(githubProvider.state().installUrl).toBe('https://github.com/apps/puck-agents/installations/new');
   });
 });
 

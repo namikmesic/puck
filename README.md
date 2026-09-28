@@ -14,7 +14,7 @@ Every turn executes inside a Docker container you configure.
   Puck installs the provider CLIs and SDKs into the container, deploys a small runner agent, and speaks NDJSON to it over `docker exec` stdio.
   The container is the safety boundary: agents run with full tool access inside it, and the workspace folder is the only host folder they reach.
 - **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH), and integrations (GitHub).
-  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in with the device flow through the Puck GitHub App only.
+  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in through the "Puck Agents" GitHub App (<https://github.com/apps/puck-agents>) with the device flow.
   Tokens are encrypted via the OS keychain.
   Adding a harness is one pure descriptor under `src/harness/providers/`, its host half, one registry entry, and one entry in the container runner's `PROVIDERS` table.
 

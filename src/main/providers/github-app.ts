@@ -4,23 +4,17 @@
  * anywhere in Puck. User tokens reach only the repositories where the app
  * is installed.
  *
- * The app requests: Contents read/write, Pull requests read/write, Metadata
- * read, Workflows read/write; device flow on; user-token expiration on.
+ * The app is "Puck Agents" (github.com/apps/puck-agents). It requests
+ * repository permissions Contents, Pull requests, Issues, Workflows and
+ * Actions read/write, and Checks, Commit statuses and Metadata read; device
+ * flow on; user tokens expire after 8 hours with a refresh token; no webhook.
  */
 
-/**
- * PLACEHOLDER - the GitHub App is not registered yet. Replace this with the
- * registered app's client id (it is public, not a secret). Until then
- * GitHub sign-in is disabled unless PUCK_GITHUB_CLIENT_ID is set.
- */
-export const GITHUB_APP_CLIENT_ID = 'PLACEHOLDER-unregistered-github-app';
+/** The registered app's client id (public, not a secret). */
+export const GITHUB_APP_CLIENT_ID = 'Iv23liEFTqLz112apImK';
 
-/**
- * PLACEHOLDER - the app's URL slug (github.com/apps/<slug>), set together
- * with the client id at registration. Until then no install link is
- * offered unless PUCK_GITHUB_APP_SLUG is set alongside PUCK_GITHUB_CLIENT_ID.
- */
-export const GITHUB_APP_SLUG = 'PLACEHOLDER-unregistered-github-app';
+/** The app's URL slug (github.com/apps/<slug>). */
+export const GITHUB_APP_SLUG = 'puck-agents';
 
 /** Development override for the client id (and slug) of a test app. */
 export const CLIENT_ID_ENV = 'PUCK_GITHUB_CLIENT_ID';
