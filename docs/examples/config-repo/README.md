@@ -38,7 +38,7 @@ The example defines three agents and one environment:
 ## Keep puck.schema.json current
 
 `puck.schema.json` describes every field and the options of each harness, so editors with YAML schema support (the `yaml-language-server` comment at the top of each file) autocomplete and check definitions as you type.
-Save a fresh copy from **Settings → Providers → GitHub → Save puck.schema.json** after updating Puck, and commit it.
+Puck generates it with `npm run schema` into `schema/puck.schema.json` in the Puck repository; copy a fresh one from there after updating Puck, and commit it.
 The schema's `$id` changes whenever the schema does.
 
 ## Validation in CI

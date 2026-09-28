@@ -5,7 +5,7 @@
  */
 
 import type { AgentConfig, EnvironmentConfig, PinSpec } from '../harness/bridge';
-import { isValidRefName } from '../harness/definitions/validate';
+import { COMMIT_RE, isValidRefName } from '../harness/definitions/validate';
 import { isPlainObject } from '../harness/options';
 
 /** Store ids we mint (crypto.randomUUID() plus seeded slugs like `claude-default`). */
@@ -135,9 +135,6 @@ export function repoNameFrom(value: unknown): string {
 
 /* ---------- Definitions ---------- */
 
-/** A commit pin: an abbreviated or full SHA. */
-const COMMIT_PIN_RE = /^[0-9a-f]{7,40}$/i;
-
 /** A pin to resolve: a tag or branch with a valid ref name, or a commit SHA. */
 export function pinFrom(raw: unknown): PinSpec {
   const a = objArgs(raw);
@@ -148,7 +145,7 @@ export function pinFrom(raw: unknown): PinSpec {
       if (!isValidRefName(name)) throw new Error(`Invalid ${a.kind} name.`);
       return { kind: a.kind, name };
     case 'commit':
-      if (!COMMIT_PIN_RE.test(name)) throw new Error('Invalid commit SHA.');
+      if (!COMMIT_RE.test(name)) throw new Error('Invalid commit SHA.');
       return { kind: 'commit', name };
     default:
       throw new Error('Invalid pin: kind must be tag, branch or commit.');

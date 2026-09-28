@@ -20,7 +20,6 @@ const bridge: PuckBridge = {
   githubInstallations: () => ipcRenderer.invoke(CHANNELS.githubInstallations),
   githubRepos: () => ipcRenderer.invoke(CHANNELS.githubRepos),
   githubSetConfigRepo: (fullName) => ipcRenderer.invoke(CHANNELS.githubSetConfigRepo, fullName),
-  githubSchemaSave: () => ipcRenderer.invoke(CHANNELS.githubSchemaSave),
   definitionRefs: () => ipcRenderer.invoke(CHANNELS.definitionRefs),
   definitionsAt: (pin) => ipcRenderer.invoke(CHANNELS.definitionsAt, pin),
 

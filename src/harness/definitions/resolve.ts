@@ -6,7 +6,7 @@
  * valid); anything else is a DefinitionsInvalidError listing the errors.
  */
 
-import { isStartable, referencedAgents, type ValidatedRepo } from './validate';
+import { blobAt, fileAt, isStartable, referencedAgents, type ValidatedRepo } from './validate';
 import {
   RESOLVER_VERSION,
   type AgentDefinition,
@@ -41,7 +41,7 @@ export function resolveAgent(def: AgentDefinition, snap: RepoSnapshot): Resolved
     harness: def.harness,
     model: def.model ?? 'auto',
     effort: def.effort ?? 'auto',
-    instructions: file !== null ? snap.files[file] ?? '' : def.instructions ?? '',
+    instructions: file !== null ? fileAt(snap, file) ?? '' : def.instructions ?? '',
     instructionsFile: file,
     options: { ...(def.options ?? {}) },
     advanced: { ...(def.advanced ?? {}) },
@@ -80,7 +80,7 @@ export function resolveEnvironment(
     name: env.name,
     description: env.description ?? '',
     image: env.image ?? null,
-    dockerfile: env.dockerfile ? { path: env.dockerfile, blob: snap.tree[env.dockerfile]?.sha ?? '' } : null,
+    dockerfile: env.dockerfile ? { path: env.dockerfile, blob: blobAt(snap, env.dockerfile)?.sha ?? '' } : null,
     resources: { cpus: env.resources?.cpus ?? null, memory: env.resources?.memory ?? null },
     repos: env.repos.map((r) => ({
       github: r.github,

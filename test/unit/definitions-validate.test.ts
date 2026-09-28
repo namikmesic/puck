@@ -554,6 +554,15 @@ describe('startability and summaries', () => {
   });
 });
 
+describe('tree lookups', () => {
+  it('never treat Object.prototype names as files at the commit', () => {
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      const errors = run(envPatch({ image: undefined, dockerfile: name })).errors;
+      expect(errors.map((e) => e.rule), name).toEqual(['dockerfile.exists']);
+    }
+  });
+});
+
 describe('pure checks', () => {
   it('ref names follow git check-ref-format', () => {
     for (const ok of ['main', 'release/1.x', 'v1.2.3', 'feat_x-y']) expect(isValidRefName(ok), ok).toBe(true);

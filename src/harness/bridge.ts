@@ -339,8 +339,6 @@ export interface PuckBridge {
   githubRepos(): Promise<GithubRepo[]>;
   /** Choose the config repo (`owner/name`); returns the updated provider list. */
   githubSetConfigRepo(fullName: string): Promise<ProviderInfo[]>;
-  /** Save the app's puck.schema.json to commit into the config repo; `path` is null when canceled. */
-  githubSchemaSave(): Promise<{ path: string | null }>;
 
   /** The config repo's tags and branches, and the default tag to pin. */
   definitionRefs(): Promise<DefinitionRefs>;

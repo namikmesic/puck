@@ -26,6 +26,7 @@ import {
   type EnvironmentDefinition,
   type EnvironmentSummary,
   type RepoSnapshot,
+  type TreeBlob,
 } from './types';
 
 export const RULES = [
@@ -120,6 +121,19 @@ export function isRepoRelativePath(p: string): boolean {
   return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }
 
+/** A commit pin as typed: an abbreviated or full SHA. */
+export const COMMIT_RE = /^[0-9a-f]{7,40}$/i;
+
+/** The tree entry at `p`; names inherited from Object.prototype are not paths. */
+export function blobAt(snap: Pick<RepoSnapshot, 'tree'>, p: string): TreeBlob | undefined {
+  return Object.prototype.hasOwnProperty.call(snap.tree, p) ? snap.tree[p] : undefined;
+}
+
+/** The fetched text at `p`, undefined when Puck did not read it. */
+export function fileAt(snap: Pick<RepoSnapshot, 'files'>, p: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(snap.files, p) ? snap.files[p] : undefined;
+}
+
 /** A git ref name, per `git check-ref-format` (tags and branches alike). */
 export function isValidRefName(name: string): boolean {
   if (!name || name.length > 255 || name === '@' || name === 'HEAD') return false;
@@ -181,7 +195,7 @@ export function instructionsFileToFetch(snap: Pick<RepoSnapshot, 'tree'>, text: 
   const value = parseDefinitionFile('', text).value;
   if (!isPlainObject(value) || typeof value.instructionsFile !== 'string') return null;
   const p = value.instructionsFile;
-  const blob = snap.tree[p];
+  const blob = blobAt(snap, p);
   if (!isRepoRelativePath(p) || !INSTRUCTIONS_EXT_RE.test(p) || !blob) return null;
   return blob.size <= LIMITS.instructionsBytes ? p : null;
 }
@@ -337,11 +351,11 @@ function checkAgent(
       c.fail('instructionsFile.path', ['instructionsFile'], 'instructionsFile must be a path relative to the repo root');
     } else if (!INSTRUCTIONS_EXT_RE.test(p)) {
       c.fail('instructionsFile.type', ['instructionsFile'], 'instructionsFile must be a .md or .txt file');
-    } else if (!snap.tree[p]) {
+    } else if (!blobAt(snap, p)) {
       c.fail('instructionsFile.exists', ['instructionsFile'], `${p} does not exist at this commit`);
     } else if (
-      snap.tree[p].size > LIMITS.instructionsBytes ||
-      (snap.files[p] !== undefined && byteLength(snap.files[p]) > LIMITS.instructionsBytes)
+      (blobAt(snap, p)?.size ?? 0) > LIMITS.instructionsBytes ||
+      byteLength(fileAt(snap, p) ?? '') > LIMITS.instructionsBytes
     ) {
       c.fail('instructionsFile.size', ['instructionsFile'], `${p} must be at most 64 KB`);
     }
@@ -387,7 +401,7 @@ function checkEnvironment(c: Check, v: Record<string, unknown>, snap: RepoSnapsh
   if (v.dockerfile !== undefined) {
     if (typeof v.dockerfile !== 'string' || !isRepoRelativePath(v.dockerfile)) {
       c.fail('dockerfile.path', ['dockerfile'], 'dockerfile must be a path relative to the repo root');
-    } else if (!snap.tree[v.dockerfile]) {
+    } else if (!blobAt(snap, v.dockerfile)) {
       c.fail('dockerfile.exists', ['dockerfile'], `${v.dockerfile} does not exist at this commit`);
     }
   }
@@ -552,8 +566,8 @@ function load(def: DefinitionPath, index: number, snap: RepoSnapshot): Loaded {
     check.fail('file.count', [], `The repo has more than ${LIMITS.files} definition files; this one was not read`);
     return { def, check, raw: null };
   }
-  const text = snap.files[def.path];
-  const size = Math.max(snap.tree[def.path]?.size ?? 0, text === undefined ? 0 : byteLength(text));
+  const text = fileAt(snap, def.path);
+  const size = Math.max(blobAt(snap, def.path)?.size ?? 0, text === undefined ? 0 : byteLength(text));
   if (size > LIMITS.fileBytes) {
     const check = new Check(null, def.path);
     check.fail('file.size', [], 'Definition files must be at most 256 KB');

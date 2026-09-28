@@ -11,7 +11,7 @@ import {
   parseSemverTag,
   sortTags,
 } from '../../src/main/config-repo';
-import { blobSha, exampleFiles, type Files } from './definitions-fixtures';
+import { blobSha, ENV, exampleFiles, patchYaml, type Files } from './definitions-fixtures';
 import { fakeGitHub, type Recorded, type Scripted } from './github-fakes';
 
 const API = 'https://api.github.com/repos/acme/config';
@@ -210,6 +210,27 @@ describe('definitionsAt', () => {
     const line = files['agents/lead.yaml'].split('\n').indexOf('effort: ludicrous') + 1;
     expect(listing.errors[0].url).toBe(`https://github.com/acme/config/blob/${V2}/agents/lead.yaml#L${line}`);
     expect(listing.environments[0]).toMatchObject({ valid: true, startable: false });
+  });
+});
+
+describe('a file named __proto__', () => {
+  it('stays a file and never becomes the tree prototype', async () => {
+    const files: Files = Object.assign(Object.create(null), exampleFiles());
+    files['__proto__'] = 'FROM node:22\n';
+    const withDockerfile = (dockerfile: string): Files => {
+      const copy: Files = Object.assign(Object.create(null), files);
+      patchYaml(copy, ENV, { image: undefined, dockerfile });
+      return copy;
+    };
+    const atV2 = (dockerfile: string) =>
+      setup({ commits: { [V2]: { files: withDockerfile(dockerfile) } }, tags: { 'v2.0.0': V2 } }).repo;
+    const bogus = await atV2('size').listing({ kind: 'tag', name: 'v2.0.0' });
+    expect(bogus.errors.map((e) => [e.file, e.rule])).toEqual([[ENV, 'dockerfile.exists']]);
+    const repo = atV2('__proto__');
+    const real = await repo.listing({ kind: 'tag', name: 'v2.0.0' });
+    expect(real.errors).toEqual([]);
+    const env = await repo.resolve({ kind: 'tag', name: 'v2.0.0' }, 'example');
+    expect(env.dockerfile).toEqual({ path: '__proto__', blob: blobSha(`__proto__${files['__proto__']}`) });
   });
 });
 

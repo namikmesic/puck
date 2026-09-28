@@ -18,12 +18,9 @@
  * tokens never leave that module.
  */
 
-import { app, dialog, type BrowserWindow } from 'electron';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
+import { app } from 'electron';
 import * as path from 'node:path';
 import { resolveEnvironment } from '../harness/definitions/resolve';
-import { schemaText } from '../harness/definitions/schema';
 import {
   LIMITS,
   type DefinitionListing,
@@ -37,6 +34,7 @@ import {
   type UpdateInfo,
 } from '../harness/definitions/types';
 import {
+  COMMIT_RE,
   definitionPaths,
   instructionsFileToFetch,
   isValidRefName,
@@ -50,8 +48,6 @@ import { githubClient } from './providers/github';
 import { githubSettings } from './providers/providers-store';
 
 export const SHA_RE = /^[0-9a-f]{40}$/;
-/** A commit pin as typed: an abbreviated or full SHA. */
-export const COMMIT_RE = /^[0-9a-f]{7,40}$/i;
 
 /* ---------- Semver tags ---------- */
 
@@ -229,11 +225,11 @@ export function createConfigRepo(deps: ConfigRepoDeps) {
     const { owner, name } = target();
     const client = deps.client();
     const started = Date.now();
-    const tree: Record<string, TreeBlob> = {};
+    const tree: Record<string, TreeBlob> = Object.create(null);
     for (const entry of await client.tree(owner, name, sha)) {
       if (entry.type === 'blob') tree[entry.path] = { size: entry.size ?? 0, sha: entry.sha };
     }
-    const files: Record<string, string> = {};
+    const files: Record<string, string> = Object.create(null);
     const fetchFiles = (paths: string[]): Promise<void> =>
       inBatches(paths, FETCH_CONCURRENCY, async (p) => {
         files[p] = await client.blob(owner, name, tree[p].sha);
@@ -324,25 +320,3 @@ export const definitionsAt = (pin: PinSpec): Promise<DefinitionListing> => confi
 export const resolveDefinition = (pin: PinSpec, envName: string): Promise<ResolvedEnvironment> =>
   configRepo.resolve(pin, envName);
 export const checkDefinitionUpdate = (pin: Pin): Promise<UpdateInfo | null> => configRepo.checkUpdate(pin);
-
-function downloadsDir(): string {
-  try {
-    return app.getPath('downloads');
-  } catch {
-    return os.homedir();
-  }
-}
-
-/** Save the app's puck.schema.json where the user picks; null path when canceled. */
-export async function saveSchemaFile(owner: BrowserWindow | null): Promise<{ path: string | null }> {
-  const options = {
-    title: 'Save puck.schema.json',
-    defaultPath: path.join(downloadsDir(), 'puck.schema.json'),
-    filters: [{ name: 'JSON Schema', extensions: ['json'] }],
-  };
-  const picked = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
-  if (picked.canceled || !picked.filePath) return { path: null };
-  await fs.promises.writeFile(picked.filePath, schemaText(), 'utf8');
-  log.info('defs.schema-saved');
-  return { path: picked.filePath };
-}

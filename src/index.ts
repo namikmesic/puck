@@ -164,7 +164,6 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     await github.setConfigRepo(repoNameFrom(fullName));
     return providerRegistry.providerInfos();
   },
-  [CHANNELS.githubSchemaSave]: (event) => configRepo.saveSchemaFile(BrowserWindow.fromWebContents(event.sender)),
 
   [CHANNELS.definitionRefs]: () => configRepo.definitionRefs(),
   [CHANNELS.definitionsAt]: (_event, pin) => configRepo.definitionsAt(pinFrom(pin)),
