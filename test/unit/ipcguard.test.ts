@@ -4,6 +4,7 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
+  pinFrom,
   repoNameFrom,
   requireId,
   requireSecretKey,
@@ -138,6 +139,32 @@ describe('repoNameFrom', () => {
   it('rejects anything else', () => {
     for (const bad of ['cfg', 'a/b/c', '../etc', 'me/', '/cfg', 'me/cfg repo', 'me_x/cfg', 42, null]) {
       expect(() => repoNameFrom(bad), String(bad)).toThrow(/Invalid repository name/);
+    }
+  });
+});
+
+describe('pinFrom', () => {
+  it('accepts tags, branches and commit SHAs', () => {
+    expect(pinFrom({ kind: 'tag', name: 'v1.2.3' })).toEqual({ kind: 'tag', name: 'v1.2.3' });
+    expect(pinFrom({ kind: 'branch', name: 'release/1.x', extra: 1 })).toEqual({ kind: 'branch', name: 'release/1.x' });
+    expect(pinFrom({ kind: 'commit', name: 'abc1234' })).toEqual({ kind: 'commit', name: 'abc1234' });
+    expect(pinFrom({ kind: 'commit', name: 'f'.repeat(40) })).toEqual({ kind: 'commit', name: 'f'.repeat(40) });
+  });
+
+  it('rejects bad kinds, ref names that could smuggle paths or flags, and non-SHAs', () => {
+    for (const bad of [
+      null,
+      'v1.0.0',
+      { kind: 'ref', name: 'main' },
+      { kind: 'tag', name: '' },
+      { kind: 'tag', name: '../x' },
+      { kind: 'branch', name: '-x' },
+      { kind: 'branch', name: 'a b' },
+      { kind: 'commit', name: 'abc' },
+      { kind: 'commit', name: 'g'.repeat(40) },
+      { kind: 'commit', name: 'a'.repeat(41) },
+    ]) {
+      expect(() => pinFrom(bad), JSON.stringify(bad)).toThrow();
     }
   });
 });

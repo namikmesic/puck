@@ -8,6 +8,17 @@
 
 import type { HarnessEvent } from './types';
 import type { ProviderOption } from './options';
+import type { DefinitionListing, DefinitionRefs, PinSpec } from './definitions/types';
+
+export type {
+  DefinitionListing,
+  DefinitionRefs,
+  ListedError,
+  Pin,
+  PinKind,
+  PinSpec,
+  RefInfo,
+} from './definitions/types';
 
 export interface HarnessStatus {
   /** True when an agent is selected and the active environment is `ready`. */
@@ -328,6 +339,11 @@ export interface PuckBridge {
   githubRepos(): Promise<GithubRepo[]>;
   /** Choose the config repo (`owner/name`); returns the updated provider list. */
   githubSetConfigRepo(fullName: string): Promise<ProviderInfo[]>;
+
+  /** The config repo's tags and branches, and the default tag to pin. */
+  definitionRefs(): Promise<DefinitionRefs>;
+  /** Every definition at a pin, validated; errors carry file:line and an Open in GitHub link. */
+  definitionsAt(pin: PinSpec): Promise<DefinitionListing>;
 
   agentList(): Promise<AgentInfo[]>;
   agentCreate(cfg: Omit<AgentConfig, 'id'>): Promise<AgentInfo[]>;

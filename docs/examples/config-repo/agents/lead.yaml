@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=../puck.schema.json
+apiVersion: puck/v1
+kind: Agent
+name: lead
+description: Runs the backlog. Splits requests into work items, assigns them, and reviews the results.
+harness: claude-code
+model: auto
+effort: high
+instructionsFile: prompts/lead.md

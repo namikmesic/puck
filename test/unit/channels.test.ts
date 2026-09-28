@@ -36,4 +36,14 @@ describe('IPC channel table', () => {
     await expect(invoke(CHANNELS.githubSetConfigRepo, 'not a repo')).rejects.toThrow(/Invalid repository name/);
     await expect(invoke(CHANNELS.providerAuthStart, 'docker-local')).rejects.toThrow(/has no sign-in/);
   });
+
+  it('the definition channels validate the pin before any GitHub call', async () => {
+    const invoke = (channel: string, args: unknown): unknown =>
+      (ipcMain.handlers.get(channel) as (event: unknown, args: unknown) => Promise<unknown>)({}, args);
+    await expect(invoke(CHANNELS.definitionsAt, { kind: 'branch', name: '../../etc' })).rejects.toThrow(/Invalid branch name/);
+    await expect(invoke(CHANNELS.definitionsAt, { kind: 'commit', name: 'HEAD' })).rejects.toThrow(/Invalid commit SHA/);
+    // A valid pin with no config repo chosen fails with guidance, not a request.
+    await expect(invoke(CHANNELS.definitionsAt, { kind: 'tag', name: 'v1.0.0' })).rejects.toThrow(/Choose a config repo/);
+    await expect(invoke(CHANNELS.definitionRefs, undefined)).rejects.toThrow(/Choose a config repo/);
+  });
 });

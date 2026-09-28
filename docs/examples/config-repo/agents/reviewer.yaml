@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=../puck.schema.json
+apiVersion: puck/v1
+kind: Agent
+name: reviewer
+description: Reviews a finished work item's branch and reports problems without changing code.
+harness: claude-code
+effort: medium
+instructionsFile: prompts/reviewer.md
+options:
+  tool.Edit: false
+  tool.Write: false
+  tool.NotebookEdit: false

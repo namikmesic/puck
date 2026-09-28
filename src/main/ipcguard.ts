@@ -4,7 +4,8 @@
  * conversation payload codec lives with its format in conversations.ts.)
  */
 
-import type { AgentConfig, EnvironmentConfig } from '../harness/bridge';
+import type { AgentConfig, EnvironmentConfig, PinSpec } from '../harness/bridge';
+import { COMMIT_RE, isValidRefName } from '../harness/definitions/validate';
 import { isPlainObject } from '../harness/options';
 
 /** Store ids we mint (crypto.randomUUID() plus seeded slugs like `claude-default`). */
@@ -130,4 +131,23 @@ const REPO_NAME_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 export function repoNameFrom(value: unknown): string {
   if (typeof value !== 'string' || !REPO_NAME_RE.test(value)) throw new Error('Invalid repository name.');
   return value;
+}
+
+/* ---------- Definitions ---------- */
+
+/** A pin to resolve: a tag or branch with a valid ref name, or a commit SHA. */
+export function pinFrom(raw: unknown): PinSpec {
+  const a = objArgs(raw);
+  const name = str(a.name);
+  switch (a.kind) {
+    case 'tag':
+    case 'branch':
+      if (!isValidRefName(name)) throw new Error(`Invalid ${a.kind} name.`);
+      return { kind: a.kind, name };
+    case 'commit':
+      if (!COMMIT_RE.test(name)) throw new Error('Invalid commit SHA.');
+      return { kind: 'commit', name };
+    default:
+      throw new Error('Invalid pin: kind must be tag, branch or commit.');
+  }
 }

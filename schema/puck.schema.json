@@ -1,0 +1,710 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:puck:definitions:v1:6f92a15c",
+  "title": "Puck definition",
+  "description": "A Puck agent (agents/<name>.yaml) or environment (environments/<name>.yaml) definition.",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "puck/v1"
+    },
+    "kind": {
+      "enum": [
+        "Agent",
+        "Environment"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "Agent"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/definitions/agent"
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "Environment"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "$ref": "#/definitions/environment"
+      }
+    }
+  ],
+  "definitions": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiVersion": {
+          "const": "puck/v1",
+          "description": "Definition format version."
+        },
+        "kind": {
+          "const": "Agent"
+        },
+        "name": {
+          "$ref": "#/definitions/name",
+          "description": "Must equal the file name without .yaml."
+        },
+        "description": {
+          "type": "string",
+          "description": "Shown in Puck and to the orchestrator.",
+          "maxLength": 500
+        },
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex"
+          ],
+          "description": "The harness that runs this agent."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model id, or auto for the harness default.",
+          "minLength": 1,
+          "pattern": "\\S",
+          "default": "auto"
+        },
+        "effort": {
+          "type": "string",
+          "description": "One of the harness's effort levels.",
+          "default": "auto"
+        },
+        "instructions": {
+          "type": "string",
+          "description": "The agent's instructions (at most 64 KB). Use this or instructionsFile.",
+          "maxLength": 65536
+        },
+        "instructionsFile": {
+          "type": "string",
+          "description": "A .md or .txt file in this repo holding the instructions (at most 64 KB).",
+          "allOf": [
+            {
+              "pattern": "^(?=[\\s\\S]{1,1024}$)(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+            },
+            {
+              "pattern": "\\.(md|txt)$"
+            }
+          ]
+        },
+        "options": {
+          "type": "object",
+          "description": "Overrides of the harness options; only listed ids are allowed."
+        },
+        "advanced": {
+          "type": "object",
+          "description": "Merged into the SDK options last."
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "name",
+        "harness"
+      ],
+      "not": {
+        "required": [
+          "instructions",
+          "instructionsFile"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "harness": {
+                "const": "claude-code"
+              }
+            },
+            "required": [
+              "harness"
+            ]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "options": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "permissionMode": {
+                    "description": "How tool calls are approved. Puck auto-answers permission prompts, so 'default' and 'accept edits' behave like bypass; 'plan' is read-only; \"don't ask\" denies anything not allow-listed.",
+                    "type": "string",
+                    "enum": [
+                      "bypassPermissions",
+                      "acceptEdits",
+                      "default",
+                      "auto",
+                      "plan",
+                      "dontAsk"
+                    ],
+                    "default": "bypassPermissions"
+                  },
+                  "tool.Bash": {
+                    "description": "Run shell commands in the container",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Read": {
+                    "description": "Read files",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Edit": {
+                    "description": "Edit existing files",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Write": {
+                    "description": "Create and overwrite files",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Glob": {
+                    "description": "Find files by name pattern",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Grep": {
+                    "description": "Search file contents",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.WebFetch": {
+                    "description": "Fetch web pages",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.WebSearch": {
+                    "description": "Search the web",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.NotebookEdit": {
+                    "description": "Edit Jupyter notebooks",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.TodoWrite": {
+                    "description": "Maintain a task list during turns",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "tool.Agent": {
+                    "description": "Delegate work to parallel subagents",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "maxTurns": {
+                    "description": "Stop after this many agentic turns (default: unlimited).",
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  },
+                  "maxBudgetUsd": {
+                    "description": "Stop the turn once API spend reaches this amount (default: uncapped).",
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 100,
+                    "multipleOf": 0.5
+                  },
+                  "thinking": {
+                    "description": "'adaptive' lets the model decide; 'enabled' uses a fixed token budget; 'disabled' turns thinking off.",
+                    "type": "string",
+                    "enum": [
+                      "adaptive",
+                      "enabled",
+                      "disabled"
+                    ],
+                    "default": "adaptive"
+                  },
+                  "thinkingBudget": {
+                    "description": "Fixed thinking token budget (default: SDK default).",
+                    "type": "number",
+                    "minimum": 1024,
+                    "maximum": 131072,
+                    "multipleOf": 1024
+                  },
+                  "fallbackModel": {
+                    "description": "Model to fall back to when the primary model is overloaded or unavailable.",
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude-opus-5",
+                      "claude-sonnet-5",
+                      "claude-haiku-4-5"
+                    ],
+                    "default": ""
+                  },
+                  "betas": {
+                    "description": "Anthropic API beta headers to enable, comma-separated.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "agentProgressSummaries": {
+                    "description": "Emit one-line progress updates while subagents run.",
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "forwardSubagentText": {
+                    "description": "Include subagents' text output in the parent transcript.",
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "enableFileCheckpointing": {
+                    "description": "Back up files before edits so sessions can be rewound.",
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "harness": {
+                "const": "codex"
+              }
+            },
+            "required": [
+              "harness"
+            ]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "options": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "sandbox_mode": {
+                    "description": "What Codex may touch: 'read-only' blocks writes, 'workspace' allows writes under /workspace, 'full access' lifts sandboxing (the container is still the boundary).",
+                    "type": "string",
+                    "enum": [
+                      "read-only",
+                      "workspace-write",
+                      "danger-full-access"
+                    ],
+                    "default": "danger-full-access"
+                  },
+                  "sandbox_workspace_write.network_access": {
+                    "description": "Allow network access from inside the workspace sandbox.",
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "sandbox_workspace_write.writable_roots": {
+                    "description": "Additional absolute paths writable in workspace mode, comma-separated.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "approval_policy": {
+                    "description": "When Codex asks before running commands.",
+                    "type": "string",
+                    "enum": [
+                      "never",
+                      "on-request",
+                      "untrusted"
+                    ],
+                    "default": "never"
+                  },
+                  "web_search": {
+                    "description": "'cached' uses an index of common pages; 'live' searches the live web.",
+                    "type": "string",
+                    "enum": [
+                      "disabled",
+                      "cached",
+                      "indexed",
+                      "live"
+                    ],
+                    "default": "cached"
+                  },
+                  "model_reasoning_summary": {
+                    "description": "How the model summarizes its reasoning in the event stream.",
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "concise",
+                      "detailed",
+                      "none"
+                    ],
+                    "default": "auto"
+                  },
+                  "model_verbosity": {
+                    "description": "Length of the final answers (Responses API models).",
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "low",
+                      "medium",
+                      "high"
+                    ],
+                    "default": ""
+                  },
+                  "personality": {
+                    "description": "Tone of the assistant.",
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "friendly",
+                      "pragmatic"
+                    ],
+                    "default": ""
+                  },
+                  "tools.view_image": {
+                    "description": "Let Codex open image files in the workspace.",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "agents.enabled": {
+                    "description": "Allow Codex to spawn parallel subagent threads.",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "hide_agent_reasoning": {
+                    "description": "Suppress reasoning events from the stream (quieter transcripts).",
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "service_tier": {
+                    "description": "API processing tier.",
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "priority",
+                      "flex"
+                    ],
+                    "default": ""
+                  },
+                  "shell_environment_policy.inherit": {
+                    "description": "Environment variables passed to spawned commands.",
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "core",
+                      "none"
+                    ],
+                    "default": "all"
+                  },
+                  "model_context_window": {
+                    "description": "Override the assumed model context window (default: model default).",
+                    "type": "number",
+                    "minimum": 32000,
+                    "maximum": 1000000,
+                    "multipleOf": 1000
+                  },
+                  "tool_output_token_limit": {
+                    "description": "Token budget kept per tool output (default: model-derived).",
+                    "type": "number",
+                    "minimum": 1000,
+                    "maximum": 100000,
+                    "multipleOf": 1000
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiVersion": {
+          "const": "puck/v1",
+          "description": "Definition format version."
+        },
+        "kind": {
+          "const": "Environment"
+        },
+        "name": {
+          "$ref": "#/definitions/name",
+          "description": "Must equal the file name without .yaml."
+        },
+        "description": {
+          "type": "string",
+          "description": "Shown in Puck and to the orchestrator.",
+          "maxLength": 500
+        },
+        "image": {
+          "type": "string",
+          "description": "Docker image reference. Use this or dockerfile.",
+          "pattern": "^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[\\w][\\w.-]{0,127})?(?:@[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[0-9a-fA-F]{32,})?$"
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "A Dockerfile in this repo, built without a context. Use this or image.",
+          "pattern": "^(?=[\\s\\S]{1,1024}$)(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpus": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 64,
+              "description": "CPU limit."
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory limit, like 512m or 8g.",
+              "pattern": "^[1-9][0-9]*[bkmgBKMG]$"
+            }
+          }
+        },
+        "repos": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "github": {
+                "type": "string",
+                "description": "owner/name on GitHub.",
+                "pattern": "^[A-Za-z0-9-]+\\/[A-Za-z0-9._-]+$"
+              },
+              "dir": {
+                "$ref": "#/definitions/name",
+                "description": "Directory under /workspace (default: the repo name)."
+              },
+              "branch": {
+                "type": "string",
+                "description": "Base branch for worktrees and pull requests (default: the repo default branch).",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "github"
+            ]
+          }
+        },
+        "orchestrator": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "$ref": "#/definitions/name",
+              "description": "The orchestrator agent; its harness must be claude-code."
+            },
+            "autoWake": {
+              "type": "boolean",
+              "default": true,
+              "description": "Start an orchestrator turn when notices arrive."
+            },
+            "maxAutoTurnsPerHour": {
+              "type": "integer",
+              "description": "Cap on automatic orchestrator turns.",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 30
+            }
+          },
+          "required": [
+            "agent"
+          ]
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "$ref": "#/definitions/name",
+                "description": "An agent file in agents/."
+              },
+              "maxParallel": {
+                "type": "integer",
+                "description": "Concurrent work items for this agent.",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 1
+              },
+              "instructions": {
+                "type": "string",
+                "description": "Appended to the agent's instructions in this environment.",
+                "maxLength": 16384
+              }
+            },
+            "required": [
+              "agent"
+            ]
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxWorkers": {
+              "type": "integer",
+              "description": "Environment-wide cap on concurrent worker turns (default: the sum of maxParallel).",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "maxAttempts": {
+              "type": "integer",
+              "description": "Automatic requeues before an item fails.",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2
+            }
+          }
+        },
+        "policies": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "string",
+              "enum": [
+                "orchestrator-first",
+                "user"
+              ],
+              "default": "orchestrator-first"
+            },
+            "publish": {
+              "type": "string",
+              "enum": [
+                "manual",
+                "orchestrator"
+              ],
+              "default": "orchestrator"
+            },
+            "draftPullRequests": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "userName": {
+              "type": "string",
+              "description": "Commit author name (default: the GitHub login).",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "userEmail": {
+              "type": "string",
+              "description": "Commit author email (default: the GitHub noreply address).",
+              "minLength": 1,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables; the PUCK_ prefix is reserved.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "not": {
+              "pattern": "^PUCK_"
+            }
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "description": "Names of secrets whose values are entered in Puck, never written here.",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "not": {
+              "pattern": "^PUCK_"
+            }
+          }
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "name",
+        "repos",
+        "orchestrator",
+        "agents"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "image"
+          ]
+        },
+        {
+          "required": [
+            "dockerfile"
+          ]
+        }
+      ]
+    }
+  }
+}

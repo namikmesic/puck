@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../puck.schema.json
+apiVersion: puck/v1
+kind: Agent
+name: implementer
+description: Implements one work item end to end, with tests.
+harness: claude-code
+model: auto
+effort: high
+instructions: |
+  You implement exactly one work item on its own branch.
+  Read the item and the code it touches before changing anything.
+  Keep the change focused, add or update tests, and run them before you finish.
+  Commit with a message that says what changed and why.
+  End with a short summary of the change and anything left undone.
+options:
+  tool.WebSearch: false
+  maxTurns: 150

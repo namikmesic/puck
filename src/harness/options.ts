@@ -164,6 +164,64 @@ export function validateSettings(
   return out;
 }
 
+export interface SettingsError {
+  /** The option id, or '' when the map itself is wrong. */
+  id: string;
+  message: string;
+}
+
+/** Numbers within this distance of the step grid count as on it (float noise). */
+const STEP_EPSILON = 1e-9;
+
+function checkValue(opt: ProviderOption, value: unknown): string | null {
+  switch (opt.kind) {
+    case 'boolean':
+      return typeof value === 'boolean' ? null : 'must be true or false';
+    case 'enum':
+      if (typeof value !== 'string') return `must be one of ${opt.values.map((v) => JSON.stringify(v)).join(', ')}`;
+      return opt.values.includes(value) ? null : `must be one of ${opt.values.map((v) => JSON.stringify(v)).join(', ')}`;
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return 'must be a number';
+      if (value < opt.min || value > opt.max) return `must be between ${opt.min} and ${opt.max}`;
+      const steps = (value - opt.min) / opt.step;
+      if (Math.abs(steps - Math.round(steps)) > STEP_EPSILON) return `must be a multiple of ${opt.step} from ${opt.min}`;
+      return null;
+    }
+    case 'string':
+      return typeof value === 'string' ? null : 'must be a string';
+    case 'string-list':
+      return Array.isArray(value) && value.every((item) => typeof item === 'string') ? null : 'must be a list of strings';
+  }
+}
+
+/**
+ * The strict check for options written by hand (agent definitions): unknown
+ * ids, wrong types, values outside an enum or a number's range and step are
+ * errors, not silently dropped. `value` holds the entries that passed,
+ * exactly as written, so a valid sparse map comes back unchanged. Internal
+ * callers that must never fail keep using validateSettings.
+ */
+export function checkSettings(
+  schema: readonly ProviderOption[],
+  raw: unknown,
+): { value: SettingsMap; errors: SettingsError[] } {
+  const value: SettingsMap = {};
+  const errors: SettingsError[] = [];
+  if (raw === undefined) return { value, errors };
+  if (!isPlainObject(raw)) return { value, errors: [{ id: '', message: 'options must be a map of option ids to values' }] };
+  for (const [id, v] of Object.entries(raw)) {
+    const opt = schema.find((o) => o.id === id);
+    if (!opt) {
+      errors.push({ id, message: `unknown option "${id}"` });
+      continue;
+    }
+    const problem = checkValue(opt, v);
+    if (problem) errors.push({ id, message: `${id} ${problem}` });
+    else value[id] = v;
+  }
+  return { value, errors };
+}
+
 /** Effective value of one option: the stored override, else the default. */
 export function effectiveValue(
   schema: readonly ProviderOption[],

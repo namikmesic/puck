@@ -104,6 +104,7 @@ Everything Puck stores on your Mac is in one folder: `~/Library/Application Supp
 | `puck-resume.json` | Provider session ids, so a conversation continues after a restart |
 | `puck-convos/<agent id>.json` | One conversation transcript per agent |
 | `puck-providers.json` | Provider settings: Docker-over-SSH hosts and the GitHub config repo |
+| `puck-defs-cache/<commit>.json` | Cached config-repo files for one commit; safe to delete |
 | `claude-oauth.bin`, `codex-oauth.bin`, `github-oauth.bin` | Provider tokens, encrypted through the macOS Keychain |
 | `env-secrets-<environment id>.bin` | Environment secrets, encrypted the same way |
 | `logs/puck.log`, `logs/puck.log.1`, `logs/puck.log.2` | The diagnostic log: three files of at most 1 MiB each |
@@ -201,6 +202,7 @@ npm run typecheck   # strict tsc
 npm run lint
 npm test            # vitest unit suites
 npm run test:e2e    # boots the real app and smoke-checks the UI
+npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
 npm run make        # the release ZIP and its checksum, see RELEASE.md
 ```
 
