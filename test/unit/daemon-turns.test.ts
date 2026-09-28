@@ -59,6 +59,7 @@ function build(over: Partial<TurnsDeps> = {}): Turns {
     sessions: sessionsStore(dir),
     transcripts,
     emit: (ev) => events.push(ev),
+    retained: () => events.slice(),
     log: nullLogger,
     agentFor: () => agent,
     envFor: () => ({ HOME: '/puck/home' }),
@@ -660,6 +661,7 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
       emit: (ev) => {
         if (!elog.append(ev)) throw new Error('The event log could not record an event.');
       },
+      retained: () => (elog.since(0) ?? []).map((e) => e.ev),
       log: { ...nullLogger, error: (message) => errors.push(message) },
     });
     const s = orchestrator();
@@ -755,6 +757,7 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
       emit: (ev) => {
         if (!elog.append(ev)) throw new Error('The event log could not record an event.');
       },
+      retained: () => (elog.since(0) ?? []).map((e) => e.ev),
       log: { ...nullLogger, error: (message) => errors.push(message) },
     });
     const s = orchestrator();
@@ -792,5 +795,290 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     const t = orchestrator();
     turns.stopAccepting();
     expect(() => turns.send(t.id, 'x')).toThrow(/shutting down/);
+  });
+});
+
+describe('daemon turns: crash windows and storage failures', () => {
+  type DiskLog = Array<{ kind: string; text?: string; events?: Array<{ kind: string }> }>;
+  const diskLog = (sessionId: string): DiskLog => {
+    try {
+      return (JSON.parse(fs.readFileSync(path.join(dir, 'transcripts', `${sessionId}.json`), 'utf8')) as { log: DiskLog }).log;
+    } catch {
+      return [];
+    }
+  };
+  const lastTurnKinds = (log: DiskLog): string[] =>
+    ([...log].reverse().find((e) => e.kind === 'turn')?.events ?? []).map((e) => e.kind);
+
+  /** A sessions store that records the on-disk transcript whenever `when` holds at a commit. */
+  function watchedSessions(when: (s: { status: string; turns: number }) => boolean) {
+    const sessions = sessionsStore(dir);
+    const seen: DiskLog[] = [];
+    const commit = sessions.commit.bind(sessions);
+    (sessions as { commit(): void }).commit = () => {
+      for (const s of Object.values(sessions.get())) if (when(s)) seen.push(diskLog(s.id));
+      commit();
+    };
+    return { sessions, seen };
+  }
+
+  /** Leaves a session running with its turn handed off and open, as a killed daemon does. */
+  async function crashMidTurn(): Promise<string> {
+    const s = orchestrator();
+    attempts = [
+      async (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'working' });
+        await new Promise(() => undefined);
+      },
+    ];
+    turns.send(s.id, 'long job');
+    await new Promise((r) => setTimeout(r, 0));
+    await transcripts.flush();
+    await flushJsonWrites();
+    return s.id;
+  }
+
+  it('makes the reply durable before the session is committed idle', async () => {
+    const { sessions, seen } = watchedSessions((s) => s.status === 'idle' && s.turns > 0);
+    turns = build({ sessions });
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+    ];
+    await send(s.id, 'hello');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(lastTurnKinds(seen[0])).toEqual(['text-delta', 'turn-end']);
+  });
+
+  it('closes the interrupted turn on disk before the session is committed interrupted', async () => {
+    const id = await crashMidTurn();
+    const { sessions, seen } = watchedSessions((s) => s.status === 'interrupted');
+    events = [];
+    turns = build({ sessions });
+    turns.reconcile();
+    turns.resumeInterrupted();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(lastTurnKinds(seen[0])).toEqual(['text-delta', 'error', 'turn-end']);
+    expect(lastTurnKinds(diskLog(id))).toEqual(['text-delta', 'error', 'turn-end']);
+  });
+
+  it('closes the open turn of a session a restart already marked interrupted', async () => {
+    const id = await crashMidTurn();
+    // Killed after the interrupted status landed and before the closed turn did.
+    const file = path.join(dir, 'sessions.json');
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, { status: string }>;
+    saved[id].status = 'interrupted';
+    fs.writeFileSync(file, JSON.stringify(saved));
+    expect(lastTurnKinds(diskLog(id))).toEqual(['text-delta']);
+    turns = build();
+    turns.reconcile();
+    expect(lastTurnKinds(diskLog(id))).toEqual(['text-delta', 'error', 'turn-end']);
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([id]);
+    turns.startRestored();
+    await turns.idle();
+    expect(calls.at(-1)?.prompt).toBe('Continue.');
+    expect(turns.get(id)?.status).toBe('idle');
+  });
+
+  it('republishes a durable user line whose publish and rollback both failed, after a restart', async () => {
+    let failing = true;
+    const errors: string[] = [];
+    turns = build({
+      emit: (ev) => {
+        if (failing && ev.kind === 'turn.user') throw new Error('The event log could not record an event.');
+        events.push(ev);
+      },
+      log: { ...nullLogger, error: (message) => errors.push(message) },
+    });
+    const s = orchestrator();
+    let commits = 0;
+    const commit = transcripts.commit.bind(transcripts);
+    transcripts.commit = (sessionId: string) => {
+      commits += 1;
+      if (failing && commits > 1) throw new Error('ENOSPC: no space left on device');
+      commit(sessionId);
+    };
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    turns.send(s.id, 'deploy');
+    await turns.idle();
+    expect(calls).toEqual([]);
+    expect(errors).toContain('turn.start-failed');
+    // The line stayed durable although its rollback failed.
+    expect(diskLog(s.id).filter((e) => e.kind === 'user').map((e) => e.text)).toEqual(['deploy']);
+    expect(events.filter((e) => e.kind === 'turn.user')).toEqual([]);
+
+    failing = false;
+    await transcripts.flush();
+    await flushJsonWrites();
+    turns = build();
+    attempts = [(_req, ctx) => ctx.emit(END), (_req, ctx) => ctx.emit(END)];
+    turns.reconcile();
+    turns.resumeInterrupted();
+    turns.startRestored();
+    await turns.idle();
+    turns.send(s.id, 'next');
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['deploy', 'next']);
+    const published = events.flatMap((e) => (e.kind === 'turn.user' ? [e.entry.text] : []));
+    expect(published).toEqual(['deploy', 'next']);
+    const users = transcripts.get(s.id).log.flatMap((e) => (e.kind === 'user' ? [e.text] : []));
+    expect(users).toEqual(['deploy', 'next']);
+
+    // Already published: a later redelivery of the same durable line does not publish it again.
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    turns.send(s.id, 'third');
+    await turns.idle();
+    expect(events.flatMap((e) => (e.kind === 'turn.user' ? [e.entry.text] : []))).toEqual(['deploy', 'next', 'third']);
+  });
+
+  it('republishes a durable notice whose publish and rollback both failed, after a restart', async () => {
+    const notice = { id: 'ntc_1', kind: 'environment.restarted' as const, at: 1, text: 'The environment restarted.' };
+    pendingNotices = [notice];
+    let failing = true;
+    turns = build({
+      emit: (ev) => {
+        if (failing && ev.kind === 'turn.notice') throw new Error('The event log could not record an event.');
+        events.push(ev);
+      },
+    });
+    const s = orchestrator();
+    let commits = 0;
+    const commit = transcripts.commit.bind(transcripts);
+    transcripts.commit = (sessionId: string) => {
+      commits += 1;
+      if (failing && commits > 1) throw new Error('ENOSPC: no space left on device');
+      commit(sessionId);
+    };
+    turns.send(s.id, 'deploy');
+    await turns.idle();
+    expect(calls).toEqual([]);
+    expect(diskLog(s.id).filter((e) => e.kind === 'notice')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'turn.notice' || e.kind === 'turn.user')).toEqual([]);
+
+    failing = false;
+    await transcripts.flush();
+    await flushJsonWrites();
+    turns = build();
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    turns.reconcile();
+    turns.resumeInterrupted();
+    turns.startRestored();
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual([`${noticePrompt([notice])}\n\ndeploy`]);
+    expect(events.flatMap((e) => (e.kind === 'turn.notice' ? [e.entry.notices.map((n) => n.id)] : []))).toEqual([['ntc_1']]);
+    expect(events.flatMap((e) => (e.kind === 'turn.user' ? [e.entry.text] : []))).toEqual(['deploy']);
+    expect(transcripts.get(s.id).log.filter((e) => e.kind === 'notice')).toHaveLength(1);
+  });
+
+  it('retries a turn.end the event log refused until it is appended', async () => {
+    let refuse = 1;
+    turns = build({
+      emit: (ev) => {
+        if (ev.kind === 'turn.end' && refuse > 0) {
+          refuse -= 1;
+          throw new Error('The event log could not record an event.');
+        }
+        events.push(ev);
+      },
+      endRetryMs: 5,
+    });
+    const s = orchestrator();
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    await send(s.id, 'hello');
+    expect(events.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    await new Promise((r) => setTimeout(r, 30));
+    const start = defined(events.find((e) => e.kind === 'turn.start'));
+    expect(events.filter((e) => e.kind === 'turn.end')).toMatchObject([{ turnId: 'turnId' in start ? start.turnId : '' }]);
+  });
+
+  it('appends the previous turn.end before the next turn.start', async () => {
+    let refuse = 1;
+    turns = build({
+      emit: (ev) => {
+        if (ev.kind === 'turn.end' && refuse > 0) {
+          refuse -= 1;
+          throw new Error('The event log could not record an event.');
+        }
+        events.push(ev);
+      },
+      endRetryMs: 60_000,
+    });
+    const s = orchestrator();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        await gate;
+        ctx.emit(END);
+      },
+      (_req, ctx) => ctx.emit(END),
+    ];
+    turns.send(s.id, 'first');
+    await new Promise((r) => setTimeout(r, 0));
+    turns.send(s.id, 'second');
+    release();
+    await turns.idle();
+    const order = events.flatMap((e) => (e.kind === 'turn.start' || e.kind === 'turn.end' ? [`${e.kind}:${e.turnId}`] : []));
+    const [t1, t2] = calls.map((c) => c.turnId);
+    expect(order).toEqual([`turn.start:${t1}`, `turn.end:${t1}`, `turn.start:${t2}`, `turn.end:${t2}`]);
+  });
+
+  it('starts input that waited on a held turn.end once the end lands', async () => {
+    let refuse = 2;
+    turns = build({
+      emit: (ev) => {
+        if (ev.kind === 'turn.end' && refuse > 0) {
+          refuse -= 1;
+          throw new Error('The event log could not record an event.');
+        }
+        events.push(ev);
+      },
+      endRetryMs: 5,
+    });
+    const s = orchestrator();
+    attempts = [(_req, ctx) => ctx.emit(END), (_req, ctx) => ctx.emit(END)];
+    await send(s.id, 'first');
+    turns.send(s.id, 'second');
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['first']);
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'second', author: 'user' }]);
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['first', 'second']);
+    const order = events.flatMap((e) => (e.kind === 'turn.start' || e.kind === 'turn.end' ? [e.kind] : []));
+    expect(order).toEqual(['turn.start', 'turn.end', 'turn.start', 'turn.end']);
+  });
+
+  it('boot still reconciles when the closed turn cannot be written', async () => {
+    const id = await crashMidTurn();
+    const errors: string[] = [];
+    turns = build({ log: { ...nullLogger, error: (message) => errors.push(message) } });
+    transcripts.commit = () => {
+      throw new Error('ENOSPC: no space left on device');
+    };
+    expect(turns.reconcile().map((t) => t.id)).toEqual([id]);
+    expect(turns.get(id)?.status).toBe('interrupted');
+    expect(errors).toEqual(['turn.reconcile-failed']);
+  });
+
+  it('closes every retained turn.start that has no turn.end at boot', async () => {
+    const stats = { inputTokens: 0, outputTokens: 0, durationMs: 0 };
+    events = [
+      { kind: 'turn.start', sessionId: 'ses_a', turnId: 'trn_open' },
+      { kind: 'turn.start', sessionId: 'ses_a', turnId: 'trn_done' },
+      { kind: 'turn.end', sessionId: 'ses_a', turnId: 'trn_done', stats },
+    ];
+    turns = build();
+    turns.reconcile();
+    expect(events.filter((e) => e.kind === 'turn.end').map((e) => ('turnId' in e ? e.turnId : ''))).toEqual([
+      'trn_done',
+      'trn_open',
+    ]);
+    turns.reconcile();
+    expect(events.filter((e) => e.kind === 'turn.end')).toHaveLength(2);
   });
 });

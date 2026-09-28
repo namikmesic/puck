@@ -187,6 +187,7 @@ export class Daemon {
         sessions: sessionsStore(paths.state),
         transcripts: this.transcripts,
         emit: (ev) => this.emit(ev),
+        retained: () => (this.events.since(this.events.oldest() - 1) ?? []).map((e) => e.ev),
         log,
         agentFor: (s) => this.agentFor(s),
         envFor: () => this.harnessEnv(),

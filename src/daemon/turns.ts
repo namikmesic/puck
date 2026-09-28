@@ -19,7 +19,9 @@
  *     content, the id is dropped and the turn silently retries once fresh.
  *     An id we only attempted is never persisted, even when echoed back;
  *   - always ends with a turn-end (synthesized if the adapter did not send
- *     one), then starts the next queued input.
+ *     one), then starts the next queued input. The transcript is fsynced
+ *     before the session record says the turn is over, and a `turn.end` the
+ *     event log refuses is retried until it is appended.
  *
  * Interrupting a turn cancels its open questions and aborts the adapter.
  * An interrupt from shutdown or upgrade leaves the session `interrupted`,
@@ -47,6 +49,7 @@ import {
   type Notice,
   type TranscriptEntry,
   type TurnEntry,
+  type UserEntry,
 } from '../harness/transcript';
 import { isStaleResumeError } from '../harness/resume';
 import { harnessDescriptorById } from '../harness/providers';
@@ -64,6 +67,8 @@ export interface TurnsDeps {
   sessions: JsonStore<SessionMap>;
   transcripts: TranscriptBook;
   emit(ev: DaemonEvent): void;
+  /** Every event the event log still retains, oldest first. Read at boot and on rare recovery paths. */
+  retained(): DaemonEvent[];
   log: Logger;
   /** The effective agent for a session (instructions composed), or null if it is gone. */
   agentFor(session: SessionRecord): DaemonAgent | null;
@@ -90,6 +95,8 @@ export interface TurnsDeps {
   /** Extra summary fields (the orchestrator's auto-wake state). */
   summaryExtra?(session: SessionRecord): Partial<SessionSummary>;
   now?: () => number;
+  /** How often a refused `turn.end` is retried. */
+  endRetryMs?: number;
 }
 
 export type AskCloser = 'user' | 'orchestrator' | 'cancelled';
@@ -107,6 +114,8 @@ export interface TurnOutcome {
   /** Notices this turn delivered (orchestrator only). */
   notices: Notice[];
 }
+
+type TurnEndEvent = Extract<DaemonEvent, { kind: 'turn.end' }>;
 
 interface PendingAsk {
   sessionId: string;
@@ -131,6 +140,8 @@ interface ActiveTurn {
 
 const ZERO_STATS: TurnStats = { inputTokens: 0, outputTokens: 0, durationMs: 0 };
 
+const END_RETRY_MS = 1000;
+
 /** Sent when a restart resumes an interrupted turn. Kept in the input queue, not a new store. */
 export const RESUME_PROMPT = 'Continue.';
 
@@ -152,6 +163,11 @@ export class Turns {
   private readonly asks = new Map<string, PendingAsk>();
   private accepting = true;
   private readonly now: () => number;
+  /** `turn.end` events the event log refused, by turn id, until an append succeeds. */
+  private readonly unsentEnds = new Map<string, TurnEndEvent>();
+  private endTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Sessions whose start waited on a held `turn.end`; started once it lands. */
+  private readonly blockedStarts = new Set<string>();
 
   constructor(private readonly deps: TurnsDeps) {
     this.now = deps.now ?? Date.now;
@@ -245,27 +261,97 @@ export class Turns {
    * Boot reconciliation: a session whose turn was in flight when the daemon
    * stopped becomes `interrupted`, and its unfinished turn entry is closed
    * (unanswered questions marked dismissed, an error and a turn-end
-   * appended) so replay renders a finished turn. Returns the sessions touched.
+   * appended) so replay renders a finished turn. The closed entry is
+   * fsynced before the session record changes, and a session an earlier
+   * boot already marked interrupted gets the same close if its entry is
+   * still open. Every turn the event log started without ending gets a
+   * `turn.end`. Returns the sessions that became interrupted.
    */
   reconcile(): SessionRecord[] {
     const touched: SessionRecord[] = [];
     const at = this.now();
     for (const session of this.list()) {
-      if (session.status !== 'running') continue;
-      session.status = 'interrupted';
-      touched.push(session);
+      if (session.status !== 'running' && session.status !== 'interrupted') continue;
       const log = this.deps.transcripts.get(session.id).log;
       const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
       if (last && !last.events.some((e) => e.kind === 'turn-end')) {
         for (const e of last.events) if (e.kind === 'ask' && e.answers === undefined) e.answers = null;
         last.events.push({ kind: 'error', message: RESTART_ERROR, ts: at });
         last.events.push({ kind: 'turn-end', stats: ZERO_STATS, ts: at });
-        this.deps.transcripts.saveNow(session.id);
+        try {
+          this.deps.transcripts.commit(session.id);
+        } catch (err) {
+          // The session still becomes interrupted; the next boot closes the entry.
+          this.deps.log.error('turn.reconcile-failed', err, { sessionId: session.id });
+        }
+      }
+      if (session.status === 'running') {
+        session.status = 'interrupted';
+        touched.push(session);
       }
     }
     if (touched.length) this.deps.sessions.save();
     this.restoreQueues();
+    this.endOrphanTurns();
     return touched;
+  }
+
+  /** Publish a `turn.end` for every retained `turn.start` that has none. */
+  private endOrphanTurns(): void {
+    const open = new Map<string, { sessionId: string; turnId: string }>();
+    for (const ev of this.deps.retained()) {
+      if (ev.kind === 'turn.start') open.set(ev.turnId, { sessionId: ev.sessionId, turnId: ev.turnId });
+      else if (ev.kind === 'turn.end') open.delete(ev.turnId);
+    }
+    const running = new Set([...this.active.values()].map((t) => t.turnId));
+    for (const { sessionId, turnId } of open.values()) {
+      if (running.has(turnId) || this.unsentEnds.has(turnId)) continue;
+      this.publishEnd({ kind: 'turn.end', sessionId, turnId, stats: { ...ZERO_STATS } });
+    }
+  }
+
+  /** Append a `turn.end`. One the event log refuses is kept and retried until it lands. */
+  private publishEnd(ev: TurnEndEvent): void {
+    this.unsentEnds.set(ev.turnId, ev);
+    this.sendEnds(ev.sessionId);
+  }
+
+  /** Retry held `turn.end`s (one session's, or all). True when none of them is left. */
+  private sendEnds(sessionId?: string): boolean {
+    let left = false;
+    for (const [turnId, ev] of [...this.unsentEnds]) {
+      if (sessionId !== undefined && ev.sessionId !== sessionId) continue;
+      try {
+        this.deps.emit(ev);
+        this.unsentEnds.delete(turnId);
+      } catch (err) {
+        left = true;
+        this.deps.log.error('turn.end-unrecorded', err, { sessionId: ev.sessionId, turnId });
+      }
+    }
+    this.armEndRetry();
+    return !left;
+  }
+
+  private armEndRetry(): void {
+    if (this.unsentEnds.size === 0) {
+      if (this.endTimer) clearTimeout(this.endTimer);
+      this.endTimer = null;
+      return;
+    }
+    if (this.endTimer) return;
+    this.endTimer = setTimeout(() => {
+      this.endTimer = null;
+      this.sendEnds();
+      for (const sessionId of [...this.blockedStarts]) {
+        if ([...this.unsentEnds.values()].some((ev) => ev.sessionId === sessionId)) continue;
+        this.blockedStarts.delete(sessionId);
+        const session = this.get(sessionId);
+        if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId)) continue;
+        if (this.queues.get(sessionId)?.length) this.startTurn(session);
+      }
+    }, this.deps.endRetryMs ?? END_RETRY_MS);
+    this.endTimer.unref?.();
   }
 
   private restoreQueues(): void {
@@ -542,6 +628,13 @@ export class Turns {
 
   private async runTurn(session: SessionRecord, turn: ActiveTurn): Promise<void> {
     const { transcripts, emit, log } = this.deps;
+    // The event log must close the previous turn before it opens this one.
+    // The inputs stay queued for a later start.
+    if (!this.sendEnds(session.id)) {
+      this.blockedStarts.add(session.id);
+      log.error('turn.start-failed', undefined, { sessionId: session.id, reason: 'previous turn.end unrecorded' });
+      return;
+    }
     const inputs = (this.queues.get(session.id) ?? []).slice();
     const notices = session.kind === 'orchestrator' ? this.deps.peekNotices() : [];
     const at = this.now();
@@ -552,9 +645,7 @@ export class Turns {
     let startWritten = false;
     const failStart = (err: unknown): void => {
       this.dropTurnEntry(session.id, turn.turnId);
-      if (startWritten) {
-        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats: { ...ZERO_STATS } });
-      }
+      if (startWritten) this.publishEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats: { ...ZERO_STATS } });
       this.abortUnhanded(session, inputs);
       log.error('turn.start-failed', err, { sessionId: session.id });
     };
@@ -706,13 +797,16 @@ export class Turns {
         t.turns = session.turns;
         t.lastTurnTokens = session.lastTurnTokens;
         t.lastActiveAt = session.lastActiveAt;
-        transcripts.saveNow(session.id);
+        // The reply is durable before the record says the turn is over. If the
+        // transcript cannot be written, the record on disk stays running and
+        // handed off, so a restart resumes the turn instead of dropping it.
         try {
+          transcripts.commit(session.id);
           this.deps.sessions.commit();
         } catch (err) {
           log.error('turn.end-failed', err, { sessionId: session.id });
         }
-        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
+        this.publishEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
         log.info('turn.end', {
           sessionId: session.id,
           turnId: turn.turnId,
@@ -818,12 +912,23 @@ export class Turns {
     }
   }
 
+  /**
+   * Record this turn's notice and user lines in the transcript before
+   * publishing them. Lines a failed attempt left durable are reused, and
+   * republished first when the event log does not hold them yet.
+   */
   private recordDurable(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
     if (inputs.length === 0 && notices.length === 0) return;
     const { transcripts, emit } = this.deps;
     const log = transcripts.get(session.id).log;
-    const missing = missingInputs(userTail(log), inputs);
-    const noticeMissing = notices.length > 0 && !log.some((entry) => entry.kind === 'notice' && sameNotices(entry.notices, notices));
+    const tail = userTail(log);
+    const durable = durableInputs(tail.map(copyInput), inputs);
+    const missing = inputs.slice(durable);
+    const recordedNotice = notices.length > 0 ? log.find((entry) => entry.kind === 'notice' && sameNotices(entry.notices, notices)) : undefined;
+    const noticeMissing = notices.length > 0 && !recordedNotice;
+    const reused: TranscriptEntry[] = tail.slice(tail.length - durable);
+    if (recordedNotice) reused.push(recordedNotice);
+    if (reused.length) this.republish(session.id, log, reused);
     if (missing.length === 0 && !noticeMissing) return;
     const start = log.length;
     const added: TranscriptEntry[] = [];
@@ -842,14 +947,35 @@ export class Turns {
         if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
         else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
       } catch (err) {
-        log.splice(start + i);
+        const removed = log.splice(start + i);
         try {
           transcripts.commit(session.id);
         } catch (commitErr) {
+          // The lines stay durable, so keep them in memory too; the next
+          // delivery reuses them and publishes the ones the log lacks.
+          log.push(...removed);
           this.deps.log.error('turn.start-failed', commitErr, { sessionId: session.id });
         }
         throw err;
       }
+    }
+  }
+
+  /** Publish, in transcript order, each reused line the event log does not already hold. */
+  private republish(sessionId: string, log: TranscriptEntry[], reused: TranscriptEntry[]): void {
+    const retained = this.deps.retained();
+    const published = (entry: TranscriptEntry): boolean =>
+      retained.some((ev) => {
+        if (!('sessionId' in ev) || ev.sessionId !== sessionId) return false;
+        if (ev.kind === 'turn.user' && entry.kind === 'user') {
+          return ev.entry.ts === entry.ts && ev.entry.text === entry.text && ev.entry.author === entry.author;
+        }
+        return ev.kind === 'turn.notice' && entry.kind === 'notice' && sameNotices(ev.entry.notices, entry.notices);
+      });
+    for (const entry of log) {
+      if (!reused.includes(entry) || published(entry)) continue;
+      if (entry.kind === 'notice') this.deps.emit({ kind: 'turn.notice', sessionId, entry });
+      else if (entry.kind === 'user') this.deps.emit({ kind: 'turn.user', sessionId, entry });
     }
   }
 
@@ -902,8 +1028,8 @@ function sawProvider(events: TurnEntry['events']): boolean {
 }
 
 /** User lines of the in-flight turn. A finished turn ends the tail; a restart-closed one does not. */
-function userTail(log: TranscriptEntry[]): QueuedInput[] {
-  const inputs: QueuedInput[] = [];
+function userTail(log: TranscriptEntry[]): UserEntry[] {
+  const lines: UserEntry[] = [];
   for (let i = log.length - 1; i >= 0; i--) {
     const entry = log[i];
     if (entry.kind === 'notice') continue;
@@ -912,9 +1038,9 @@ function userTail(log: TranscriptEntry[]): QueuedInput[] {
       continue;
     }
     if (entry.kind !== 'user') break;
-    inputs.unshift({ text: entry.text, author: entry.author });
+    lines.unshift(entry);
   }
-  return inputs;
+  return lines;
 }
 
 function finishedTurn(events: TurnEntry['events']): boolean {
@@ -923,10 +1049,11 @@ function finishedTurn(events: TurnEntry['events']): boolean {
   return ended && !restarted;
 }
 
-function missingInputs(tail: QueuedInput[], inputs: QueuedInput[]): QueuedInput[] {
-  if (tail.length <= inputs.length && startsWithInputs(inputs, tail)) return inputs.slice(tail.length);
-  if (tail.length >= inputs.length && startsWithInputs(tail.slice(tail.length - inputs.length), inputs)) return [];
-  return inputs;
+/** How many of `inputs`, from the front, the tail already records (as its last lines). */
+function durableInputs(tail: QueuedInput[], inputs: QueuedInput[]): number {
+  if (tail.length <= inputs.length && startsWithInputs(inputs, tail)) return tail.length;
+  if (tail.length >= inputs.length && startsWithInputs(tail.slice(tail.length - inputs.length), inputs)) return inputs.length;
+  return 0;
 }
 
 function sameNotices(recorded: Notice[], notices: Notice[]): boolean {
