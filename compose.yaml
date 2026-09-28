@@ -1,0 +1,28 @@
+# Runs the Puck server locally: `docker compose up -d --wait`, then
+# http://localhost:8765/healthz. The store is the named volume
+# puck-server-data, so it survives restarts and rebuilds.
+#
+# Without further configuration the server starts with GitHub disabled
+# (sign-in answers 503). To enable it, copy src/server/puck-server.env.example
+# to ./puck-server.env (git-ignored) and fill it in; see src/server/README.md.
+name: puck-server
+
+services:
+  puck-server:
+    build:
+      context: .
+      dockerfile: src/server/Dockerfile
+    image: puck-server:local
+    ports:
+      - "127.0.0.1:${PUCK_SERVER_LOCAL_PORT:-8765}:8080"
+    environment:
+      PUCK_SERVER_URL: ${PUCK_SERVER_URL:-http://localhost:8765}
+    env_file:
+      - path: ./puck-server.env
+        required: false
+    volumes:
+      - puck-server-data:/data
+    restart: unless-stopped
+
+volumes:
+  puck-server-data:

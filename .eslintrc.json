@@ -26,5 +26,36 @@
       "raw-runner",
       "vitest/config"
     ]
-  }
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/server/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/channel/e2e",
+                  "**/channel/e2e.ts"
+                ],
+                "message": "The Puck server relays channels without holding keys; it must not import the channel encryption."
+              },
+              {
+                "group": [
+                  "electron",
+                  "**/main/**",
+                  "**/renderer/**"
+                ],
+                "message": "The Puck server runs outside the app; it may import only src/server, src/channel and src/harness."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }

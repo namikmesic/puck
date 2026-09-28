@@ -203,6 +203,7 @@ npm run lint
 npm test            # vitest unit suites
 npm run test:e2e    # boots the real app and smoke-checks the UI
 npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
+npm run build:server  # the Puck server as one file, .webpack/server/puck-server.js
 npm run make        # the release ZIP and its checksum, see RELEASE.md
 ```
 
@@ -211,6 +212,23 @@ It is plain CommonJS, bundled as a raw string and docker-cp'd into environments 
 Runner changes take effect on the next environment restart.
 
 `RELEASE.md` covers versioning, the build target, signing and notarization, and the release checklist.
+
+## Run the Puck server locally
+
+The Puck server (`src/server/`) is the backend that runners register with and that holds GitHub sign-in.
+The app does not use it yet.
+For now it runs on your own machine with Docker Compose:
+
+```bash
+docker compose up -d --wait              # builds the puck-server image, waits until healthy
+curl http://localhost:8765/healthz       # {"ok":true,...}
+docker compose down                      # stop; add -v to also delete the store volume
+```
+
+Its store lives on the `puck-server-data` volume, and it listens on `127.0.0.1:8765` only (`PUCK_SERVER_LOCAL_PORT` changes the port).
+Without configuration it starts with GitHub disabled.
+To enable GitHub sign-in, copy `src/server/puck-server.env.example` to `puck-server.env` (git-ignored) and fill it in.
+`src/server/README.md` lists every setting, the endpoints, and how secrets reach the container.
 
 ## License
 

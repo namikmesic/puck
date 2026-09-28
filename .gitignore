@@ -95,3 +95,7 @@ out/
 test-results/
 playwright-report/
 scratchpad/
+
+# Local Puck server configuration (holds secrets)
+puck-server.env
+.puck-server/
