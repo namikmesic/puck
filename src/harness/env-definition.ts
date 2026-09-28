@@ -12,7 +12,14 @@
  */
 
 import { diffEnvironments } from './definitions/diff';
-import type { DefinitionChange, ResolvedEnvironment, UpdateClass } from './definitions/types';
+import {
+  DEFAULT_GITHUB_POLICIES,
+  INTAKE_LABEL_RE,
+  type DefinitionChange,
+  type GitHubPolicies,
+  type ResolvedEnvironment,
+  type UpdateClass,
+} from './definitions/types';
 import type { SettingsMap } from './options';
 import { harnessDescriptorById } from './providers';
 
@@ -47,14 +54,19 @@ export interface DaemonDefinition {
   agents: DaemonAssignment[];
   agentDefs: Record<string, DaemonAgent>;
   limits: { maxWorkers: number; maxAttempts: number };
-  policies: { asks: 'orchestrator-first' | 'user'; publish: 'manual' | 'orchestrator'; draftPullRequests: boolean };
+  policies: {
+    asks: 'orchestrator-first' | 'user';
+    publish: 'manual' | 'orchestrator';
+    draftPullRequests: boolean;
+    github: GitHubPolicies;
+  };
   git: { userName: string | null; userEmail: string | null };
   env: Record<string, string>;
   secrets: string[];
 }
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.\.?$)[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
+export const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.\.?$)[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** A branch name that is safe as a git argument (no option injection, no traversal). */
@@ -183,6 +195,7 @@ function parse(raw: unknown): DaemonDefinition {
       asks: policies.asks === 'user' ? 'user' : 'orchestrator-first',
       publish: policies.publish === 'manual' ? 'manual' : 'orchestrator',
       draftPullRequests: policies.draftPullRequests !== false,
+      github: readGithubPolicies(policies.github),
     },
     git: {
       userName: str(git.userName) || null,
@@ -190,6 +203,23 @@ function parse(raw: unknown): DaemonDefinition {
     },
     env,
     secrets,
+  };
+}
+
+/** `policies.github`, leniently: a missing or unusable value keeps its default. */
+function readGithubPolicies(raw: unknown): GitHubPolicies {
+  const g = isObj(raw) ? raw : {};
+  const d = DEFAULT_GITHUB_POLICIES;
+  const label = str(g.intakeLabel);
+  return {
+    intake: g.intake === 'label' ? 'label' : 'off',
+    intakeLabel: INTAKE_LABEL_RE.test(label) ? label : d.intakeLabel,
+    agentLabels: g.agentLabels !== false,
+    statusComment: g.statusComment !== false,
+    ci: g.ci === 'fix' ? 'fix' : 'notify',
+    maxCiFixAttempts: int(g.maxCiFixAttempts, d.maxCiFixAttempts, 1, 5),
+    reviews: g.reviews === 'address' ? 'address' : 'notify',
+    allowWorkflowEdits: g.allowWorkflowEdits === true,
   };
 }
 

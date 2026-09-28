@@ -11,13 +11,15 @@ afterEach(async () => {
 });
 
 describe('permissionsFor', () => {
-  const base = { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read', statuses: 'read' };
+  const base = { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read', statuses: 'read', actions: 'write' };
   it.each([
-    [{}, { ...base, issues: 'write', actions: 'read' }],
-    [{ statusComment: false }, { ...base, actions: 'read' }],
-    [{ statusComment: false, intake: 'label' }, { ...base, issues: 'write', actions: 'read' }],
-    [{ ci: 'fix' }, { ...base, issues: 'write', actions: 'write' }],
-    [{ allowWorkflowEdits: true }, { ...base, issues: 'write', actions: 'read', workflows: 'write' }],
+    [{}, { ...base, issues: 'write' }],
+    [{ statusComment: false }, { ...base, issues: 'read' }],
+    [{ statusComment: false, intake: 'label' }, { ...base, issues: 'write' }],
+    [{ ci: 'fix' }, { ...base, issues: 'write' }],
+    [{ ci: 'notify' }, { ...base, issues: 'write' }],
+    [{ allowWorkflowEdits: true }, { ...base, issues: 'write', workflows: 'write' }],
+    [{ allowWorkflowEdits: false, ci: 'fix', intake: 'label' }, { ...base, issues: 'write' }],
   ])('%j → %j', (policies, expected) => {
     expect(permissionsFor({ ...DEFAULT_POLICIES, ...(policies as object) })).toEqual(expected);
   });

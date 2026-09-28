@@ -56,7 +56,11 @@ describe('diffEnvironments: every field has its update class', () => {
     for (const [k, v] of Object.entries(env)) {
       if (['resolverVersion', 'source', 'name', 'repos', 'agents', 'agentDefinitions', 'env', 'secrets'].includes(k)) continue;
       if (v && typeof v === 'object' && !Array.isArray(v) && k !== 'dockerfile') {
-        for (const sub of Object.keys(v)) scalarPaths.push(`${k}.${sub}`);
+        for (const [sub, w] of Object.entries(v)) {
+          // policies.github is one more level of scalars.
+          if (w && typeof w === 'object' && !Array.isArray(w)) for (const leaf of Object.keys(w)) scalarPaths.push(`${k}.${sub}.${leaf}`);
+          else scalarPaths.push(`${k}.${sub}`);
+        }
       } else scalarPaths.push(k);
     }
     expect(scalarPaths.sort()).toEqual(Object.keys(ENVIRONMENT_FIELD_CLASSES).sort());

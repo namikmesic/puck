@@ -14,8 +14,9 @@
  *
  * Orchestration lives in its own modules: items.ts (state machine and
  * backlog), scheduler.ts, work.ts (dispatch, worktrees, results, worker
- * questions), publish.ts, orchestrator.ts (notices and wake) and tools.ts
- * (the orchestrator's in-process tools). This class wires them to the turn
+ * questions), publish.ts, orchestrator.ts (notices and wake), tools.ts
+ * (the orchestrator's in-process tools) and github-sync.ts (issues, pull
+ * requests, CI and reviews on GitHub). This class wires them to the turn
  * loop and to the protocol's commands.
  */
 
@@ -50,6 +51,8 @@ import { harnessEnv } from './harness/spawn';
 import type { HarnessAdapter, OrchestratorTool } from './harness/types';
 import { testAdapters } from './harness/test-adapters';
 import { Git } from './git';
+import { GitHubApi } from './github-api';
+import { GithubSync } from './github-sync';
 import { Backlog, itemLabel, ItemStateError, publicItem } from './items';
 import { tailLog, type Logger } from './log';
 import { dispatch, OpError, type Handlers } from './ops';
@@ -57,6 +60,7 @@ import { Orchestrator } from './orchestrator';
 import { orchestratorPreamble } from './prompts';
 import { Publisher } from './publish';
 import { capacityOf, runningCounts, Scheduler, type SchedulerView } from './scheduler';
+import { githubStore } from './store/github';
 import { itemsStore } from './store/items';
 import type { SessionRecord } from './store/sessions';
 import { orchestratorTools } from './tools';
@@ -114,6 +118,7 @@ export class Daemon {
   private work!: Work;
   private scheduler!: Scheduler;
   private orchestrator!: Orchestrator;
+  private github!: GithubSync;
   private tools: OrchestratorTool[] = [];
   private git!: Git;
   /** True while a reprovision is waiting or provisioning. */
@@ -158,13 +163,14 @@ export class Daemon {
       const asPuck = this.opts.privileged ? { uid: PUCK_UID, gid: PUCK_GID } : {};
       const git = (this.git = new Git({ paths, run: this.run, asPuck }));
       const test = testAdapters !== null;
+      const apiBase = (test && this.opts.env.PUCK_TEST_GITHUB_API) || undefined;
       const publisher = new Publisher({
         git,
         tmpDir: path.join(paths.state, 'tmp'),
         grantFor: (owner) => this.credentials.grantFor(owner),
         definition: () => this.definition,
         envName: () => this.instance.get()?.name || this.definition?.name || '',
-        apiBase: (test && this.opts.env.PUCK_TEST_GITHUB_API) || undefined,
+        apiBase,
         log,
         now: this.now,
       });
@@ -218,6 +224,22 @@ export class Daemon {
         },
         requestTick: () => this.scheduler.request(),
         reprovisioning: () => this.reprovisioning,
+        issueContext: (item) => this.github.issueContext(item),
+        published: (itemId) => this.github.published(itemId),
+        log,
+        now: this.now,
+      });
+      this.github = new GithubSync({
+        api: new GitHubApi({ grantFor: (owner) => this.credentials.grantFor(owner), apiBase, now: this.now }),
+        backlog: this.backlog,
+        work: this.work,
+        store: githubStore(paths.state),
+        definition: () => this.definition,
+        envId: () => this.instance.get()?.envId ?? '',
+        notify: (kind, text, itemId) => {
+          this.orchestrator.push(kind, text, itemId);
+        },
+        canRun: () => this.running(),
         log,
         now: this.now,
       });
@@ -239,6 +261,7 @@ export class Daemon {
           const view = this.schedulerView();
           return view ? runningCounts(view).perAgent : {};
         },
+        github: this.github,
       });
     }
     this.server = new DaemonServer({
@@ -286,6 +309,7 @@ export class Daemon {
     this.emitCapacity();
     this.scheduler.start();
     this.orchestrator.schedule();
+    this.github.start();
     log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length, requeued: requeued.length });
   }
 
@@ -453,6 +477,7 @@ export class Daemon {
 
   private emit(ev: DaemonEvent): void {
     if (!this.events.append(ev)) throw new Error('The event log could not record an event.');
+    if (ev.kind === 'item.upsert') this.github?.itemChanged(ev.item);
   }
 
   /* ---------- Agents, env, notices ---------- */
@@ -568,6 +593,14 @@ export class Daemon {
     'item.retry': ({ itemId }) => publicItem(this.items.retry(itemId)),
     'item.accept': ({ itemId }) => publicItem(this.items.accept(itemId)),
     'item.publish': ({ itemId }) => this.items.publish(itemId, {}, 'user'),
+    'issue.import': async ({ repo, number, agent, position }) => {
+      if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
+      return publicItem(await this.github.importIssue(repo, number, { agent, position }, 'user'));
+    },
+    'github.nudge': ({ repo, kind, number }) => {
+      this.github?.nudge(repo, kind, number);
+      return {};
+    },
     'item.delete': async ({ itemId }) => {
       await this.items.remove(itemId);
       return {};
@@ -590,6 +623,7 @@ export class Daemon {
     'github.put': ({ grants }) => {
       if (!this.credentials.putGithub(grants)) throw new OpError('invalid-args', 'Those are not usable GitHub installation token grants.');
       this.emitGithubAuth(true);
+      this.github?.grantsArrived();
       return {};
     },
     'secrets.put': ({ values }) => {
@@ -661,6 +695,7 @@ export class Daemon {
       this.turns?.stopAccepting();
       this.scheduler?.stop();
       this.orchestrator?.stop();
+      this.github?.stop();
     } catch (err) {
       log.error('daemon.upgrade-failed', err);
       void this.finishExit(1);
@@ -715,6 +750,7 @@ export class Daemon {
     this.turns?.stopAccepting();
     this.scheduler?.stop();
     this.orchestrator?.stop();
+    this.github?.stop();
     this.opts.log.info('daemon.shutdown');
     let code = 0;
     try {

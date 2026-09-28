@@ -46,18 +46,21 @@ export const DEFAULT_POLICIES: GitHubPolicies = { intake: 'off', statusComment: 
 
 /**
  * The App permissions an environment's installation tokens carry: always
- * contents and pull requests (write) and metadata (read); issues (write)
- * while intake or the status comment is on; checks, commit statuses and
- * actions (read) to watch CI, with actions write only for automatic CI
- * fixes (re-running jobs); workflows (write) only when the definition allows
- * workflow edits.
+ * contents and pull requests (write) and metadata (read); issues write
+ * while intake or the status comment is on, and read otherwise (issues can
+ * always be imported by hand); checks and commit statuses (read) to watch
+ * CI; actions write, because the orchestrator may re-run failed jobs under
+ * either CI policy; workflows (write) only when the definition allows
+ * workflow edits. Without workflows, GitHub refuses any push that changes
+ * `.github/workflows/`, so a prompt-injected agent cannot add a workflow
+ * that runs with the repository's secrets.
  */
 export function permissionsFor(p: GitHubPolicies): Instance['permissions'] {
   const perms: Instance['permissions'] = { contents: 'write', pull_requests: 'write', metadata: 'read' };
-  if (p.intake === 'label' || p.statusComment) perms.issues = 'write';
+  perms.issues = p.intake === 'label' || p.statusComment ? 'write' : 'read';
   perms.checks = 'read';
   perms.statuses = 'read';
-  perms.actions = p.ci === 'fix' ? 'write' : 'read';
+  perms.actions = 'write';
   if (p.allowWorkflowEdits) perms.workflows = 'write';
   return perms;
 }

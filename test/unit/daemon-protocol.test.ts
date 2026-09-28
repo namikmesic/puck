@@ -21,7 +21,7 @@ describe('daemon protocol', () => {
 
   it('the op table is total: every op has a daemon-side validator, and nothing else does', () => {
     expect(Object.keys(VALIDATORS).sort()).toEqual([...OPS].sort());
-    expect(OPS).toHaveLength(23);
+    expect(OPS).toHaveLength(25);
     for (const op of OPS) expect(isOp(op)).toBe(true);
     expect(isOp('toString')).toBe(false);
     expect(isOp('item.explode')).toBe(false);
@@ -41,6 +41,7 @@ describe('daemon protocol', () => {
         'item.publish',
         'item.retry',
         'item.update',
+        'issue.import',
         'logs.tail',
         'scheduler.pause',
         'scheduler.resume',
@@ -49,7 +50,7 @@ describe('daemon protocol', () => {
         'snapshot.get',
       ].sort(),
     );
-    for (const op of ['credentials.put', 'credentials.get', 'github.put', 'secrets.put', 'definition.apply', 'daemon.upgrade', 'nope']) {
+    for (const op of ['credentials.put', 'credentials.get', 'github.put', 'github.nudge', 'secrets.put', 'definition.apply', 'daemon.upgrade', 'nope']) {
       expect(() => daemonCommandFrom(op, {})).toThrow(/not allowed/);
     }
     expect(daemonCommandFrom('chat.send', { text: 'hi' })).toEqual({ op: 'chat.send', args: { text: 'hi' } });

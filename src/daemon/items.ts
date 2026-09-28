@@ -12,7 +12,7 @@
  *   - `assign` from `queued` to `queued` re-assigns a waiting item.
  */
 
-import type { DaemonEvent, ItemPosition, ItemStatus, WorkItem } from '../harness/daemon-protocol';
+import type { DaemonEvent, IssueSource, ItemPosition, ItemStatus, WorkItem } from '../harness/daemon-protocol';
 import { newId } from '../harness/ulid';
 import type { JsonStore } from './store/store';
 import type { ItemRecord, ItemsFile } from './store/items';
@@ -146,6 +146,14 @@ export class Backlog {
     return this.get(ref.trim());
   }
 
+  /** Items linked to a GitHub issue (`owner/name`, number), newest last. */
+  byIssue(repo: string, number: number): ItemRecord[] {
+    const key = repo.toLowerCase();
+    return this.list()
+      .filter((i) => i.source?.number === number && i.source.repo.toLowerCase() === key)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   bySession(sessionId: string): ItemRecord | null {
     return this.list().find((i) => i.sessionId === sessionId) ?? null;
   }
@@ -157,6 +165,7 @@ export class Backlog {
     repo: string | null;
     createdBy: 'user' | 'orchestrator';
     position?: ItemPosition;
+    source?: IssueSource | null;
   }): ItemRecord {
     const pos = init.position;
     if (pos && typeof pos === 'object' && !this.get('before' in pos ? pos.before : pos.after)) {
@@ -181,6 +190,7 @@ export class Backlog {
       base: null,
       result: null,
       pr: null,
+      source: init.source ?? null,
       lastError: null,
       cancelReason: null,
       acceptNote: null,

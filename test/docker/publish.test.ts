@@ -28,12 +28,14 @@ async function remoteSha(branch: string): Promise<string> {
   return (await exec(env.container, ['git', '-C', BARE, 'rev-parse', `refs/heads/${branch}`])).stdout.trim();
 }
 
+/** The publish calls (finding, opening and updating the pull request), without the GitHub workflow's background polls. */
 async function githubLog(): Promise<Array<{ method: string; url: string; auth: string | null; body: Record<string, unknown> | null }>> {
   const out = await exec(env.container, ['cat', '/srv/github.log']);
   return out.stdout
     .split('\n')
     .filter(Boolean)
-    .map((l) => JSON.parse(l));
+    .map((l) => JSON.parse(l))
+    .filter((r) => r.method !== 'GET' || r.url.includes('/pulls?'));
 }
 
 const commit = (file: string): string =>
@@ -57,7 +59,7 @@ describe('Docker scenario 4: publish', () => {
     expect(await remoteSha(branch)).toBe(head1);
     const afterFirst = (await client.cmd<Snapshot>('snapshot.get')).items[0];
     expect(afterFirst.status).toBe('review'); // publishing never changes status
-    expect(afterFirst.pr).toEqual({ number: 1, url: first.prUrl, draft: true, lastPushedSha: head1 });
+    expect(afterFirst.pr).toMatchObject({ number: 1, url: first.prUrl, draft: true, lastPushedSha: head1 });
 
     let log = await githubLog();
     expect(log.map((r) => r.method)).toEqual(['GET', 'POST']);

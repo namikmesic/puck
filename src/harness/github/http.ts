@@ -7,6 +7,10 @@
  * primary limit (5,000 requests per hour) is shared by all of a user's
  * tokens, so the last-seen budget is remembered per client and an exhausted
  * budget fails fast without spending a request.
+ *
+ * Conditional GETs: with `ifNoneMatch` a 304 answer comes back as a result
+ * with `status: 304` and no data (GitHub does not count it against the
+ * primary limit), so a poller can keep the body it already has.
  */
 
 export const API_BASE = 'https://api.github.com';
@@ -80,6 +84,10 @@ export interface RequestOptions {
   accept?: string;
   body?: unknown;
   signal?: AbortSignal;
+  /** An ETag from an earlier answer: a 304 then returns `status: 304` and null data. */
+  ifNoneMatch?: string;
+  /** Return the body as text whatever its media type (job logs are plain text). */
+  text?: boolean;
 }
 
 export interface GitHubResponse<T> {
@@ -190,6 +198,7 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
           Authorization: `Bearer ${token}`,
           'X-GitHub-Api-Version': API_VERSION,
           'User-Agent': 'Puck',
+          ...(ro.ifNoneMatch ? { 'If-None-Match': ro.ifNoneMatch } : {}),
           ...(ro.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         body: ro.body !== undefined ? JSON.stringify(ro.body) : undefined,
@@ -197,8 +206,9 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
       });
       record(res.headers);
       const text = await res.text();
+      if (res.status === 304 && ro.ifNoneMatch) return { status: 304, headers: res.headers, data: null as T };
       // The raw and sha media types answer with the bare content, not JSON.
-      const isJson = !/\.(raw|sha)\b/.test(accept);
+      const isJson = !ro.text && !/\.(raw|sha)\b/.test(accept);
       if (res.ok) {
         const data = (isJson ? parseBody(text) : text) as T;
         return { status: res.status, headers: res.headers, data };

@@ -29,7 +29,8 @@ describe('session registry', () => {
   it('remember() writes the scoped key and retires the legacy one', async () => {
     sessions.remember('legacy-agent', 'e1', 'fresh-id');
     expect(sessions.resumeIdFor('legacy-agent', 'e1')).toBe('fresh-id');
-    await new Promise((r) => setTimeout(r, 20)); // atomic write settles
+    // The atomic write is queued; wait for it rather than for a fixed time.
+    for (let i = 0; i < 200 && onDisk()['legacy-agent@e1'] !== 'fresh-id'; i++) await new Promise((r) => setTimeout(r, 10));
     const disk = onDisk();
     expect(disk['legacy-agent@e1']).toBe('fresh-id');
     expect(disk['legacy-agent']).toBeUndefined();

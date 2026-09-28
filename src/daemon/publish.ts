@@ -13,6 +13,12 @@
  *   5. Find the open pull request for the branch; create it (a draft when
  *      the policy says so) or update its body.
  *
+ * An item from a GitHub issue links it in the pull request body:
+ * `Closes owner/name#n` when the publish resolves the issue (the default)
+ * and the base is the repository's default branch, since GitHub honors
+ * closing keywords only there; `Refs owner/name#n` otherwise, saying why
+ * merging will not close the issue. Keywords never go in commit messages.
+ *
  * Publishing never changes the item's status. The token is the grant the
  * runner supplied for the repository's owner; the daemon never refreshes
  * one, so an expired grant fails with a message and waits for the next.
@@ -47,19 +53,40 @@ export interface PublishDeps {
 export interface PublishRequest {
   title?: string;
   body?: string;
+  /** For an item from an issue: whether merging resolves it (default true). */
+  closesIssue?: boolean;
 }
 
 export interface Published {
   pr: NonNullable<ItemRecord['pr']>;
   created: boolean;
+  /** The issue link line, for an item from an issue. */
+  link?: string;
 }
 
-function prBody(item: ItemRecord, envName: string, body?: string): string {
+/**
+ * The issue link of an item's pull request body. `defaultBranch` is the
+ * repository's default branch ('' when unknown, which never closes).
+ */
+export function issueLink(item: Pick<ItemRecord, 'source' | 'base'>, closesIssue: boolean, defaultBranch: string): string | null {
+  const src = item.source;
+  if (!src) return null;
+  const ref = `${src.repo}#${src.number}`;
+  const base = item.base?.branch ?? '';
+  if (closesIssue && base && base === defaultBranch) return `Closes ${ref}`;
+  if (closesIssue) {
+    return `Refs ${ref}\n\nMerging this pull request will not close the issue: it targets \`${base || 'another branch'}\`, not the default branch.`;
+  }
+  return `Refs ${ref}`;
+}
+
+function prBody(item: ItemRecord, envName: string, body: string | undefined, link: string | null): string {
   const parts: string[] = [];
   const summary = body ?? item.result?.summary ?? '';
   if (summary.trim()) parts.push(summary.trim());
   const stat = item.result?.diffStat.text;
   if (stat) parts.push('```\n' + stat + '\n```');
+  if (link) parts.push(link);
   parts.push(`Work item ${itemLabel(item)} in Puck environment ${envName}.`);
   return parts.join('\n\n');
 }
@@ -136,7 +163,12 @@ export class Publisher {
       apiBase: this.deps.apiBase,
       ...(this.deps.fetch ? { deps: { fetch: this.deps.fetch } } : {}),
     });
-    const body = prBody(item, this.deps.envName(), req.body);
+    let link: string | null = null;
+    if (item.source) {
+      const defaultBranch = (await client.repo(owner, name)).default_branch ?? '';
+      link = issueLink(item, req.closesIssue ?? true, defaultBranch);
+    }
+    const body = prBody(item, this.deps.envName(), req.body, link);
     const open = await client.pulls(owner, name, { head: `${owner}:${branch}`, state: 'open' });
     const draft = this.deps.definition()?.policies.draftPullRequests !== false;
     let pull;
@@ -157,6 +189,7 @@ export class Publisher {
     return {
       pr: { number: pull.number, url: pull.html_url, draft: pull.draft ?? (created ? draft : false), lastPushedSha: head },
       created,
+      ...(link ? { link: link.split('\n')[0] } : {}),
     };
   }
 }

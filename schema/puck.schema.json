@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "urn:puck:definitions:v1:6f92a15c",
+  "$id": "urn:puck:definitions:v1:0ffd8974",
   "title": "Puck definition",
   "description": "A Puck agent (agents/<name>.yaml) or environment (environments/<name>.yaml) definition.",
   "type": "object",
@@ -638,6 +638,67 @@
             "draftPullRequests": {
               "type": "boolean",
               "default": true
+            },
+            "github": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "intake": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "label"
+                  ],
+                  "default": "off",
+                  "description": "Take in open issues carrying intakeLabel as work items."
+                },
+                "intakeLabel": {
+                  "type": "string",
+                  "pattern": "^[^,:\\s](?:[^,:]{0,48}[^,:\\s])?$",
+                  "default": "puck",
+                  "description": "The intake label; <intakeLabel>:<agent> also assigns the item."
+                },
+                "agentLabels": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Honor <intakeLabel>:<agent> labels."
+                },
+                "statusComment": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Keep one Puck status comment on each linked issue."
+                },
+                "ci": {
+                  "type": "string",
+                  "enum": [
+                    "notify",
+                    "fix"
+                  ],
+                  "default": "notify",
+                  "description": "fix also queues failing CI to the worker."
+                },
+                "maxCiFixAttempts": {
+                  "type": "integer",
+                  "description": "Automatic CI fix follow-ups per item.",
+                  "minimum": 1,
+                  "maximum": 5,
+                  "default": 2
+                },
+                "reviews": {
+                  "type": "string",
+                  "enum": [
+                    "notify",
+                    "address"
+                  ],
+                  "default": "notify",
+                  "description": "address also queues review feedback from people with write access to the worker."
+                },
+                "allowWorkflowEdits": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Give the environment's GitHub tokens the Workflows permission."
+                }
+              }
             }
           }
         },

@@ -104,6 +104,7 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
       endedAt: 1,
     },
     pr: null,
+    source: null,
     lastError: null,
     cancelReason: null,
     acceptNote: null,
