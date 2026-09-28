@@ -15,9 +15,11 @@ import { codexHarness } from './codex';
 
 /**
  * An npm package installed into containers at an exact version. Pins keep
- * the runner and the SDK it was written against in lockstep; provisioning
- * verifies the installed version after install and fails setup on drift.
- * Bump a pin deliberately, together with any runner adaptation.
+ * the container runner and the environment daemon in lockstep with the
+ * packages they were written against; provisioning verifies the installed
+ * version after install and fails setup on drift. Bump a pin together with
+ * the runner or daemon code that depends on that version. An SDK pin must
+ * also match the devDependency the daemon's types are checked against.
  */
 export interface PinnedPackage {
   name: string;
@@ -30,7 +32,7 @@ export interface HarnessPackages {
   cliBin: string;
   /** npm -g packages that provide the interactive CLI. */
   cli: PinnedPackage[];
-  /** npm packages the runner imports under /opt/puck. */
+  /** npm packages the runner and the daemon load from /opt/puck/node_modules. */
   sdk: PinnedPackage[];
 }
 

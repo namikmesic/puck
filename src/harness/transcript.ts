@@ -1,16 +1,14 @@
 /**
- * Transcript format v2 and its recording reducer.
- *
- * The environment daemon records every session's history as structured
- * entries, the same persisted event dialect the app's conversation files
- * use: consecutive text-deltas with the same parentId merge into one,
+ * Transcript format v2 and its recording reducer, used by the environment
+ * daemon. Consecutive text-deltas with the same parentId merge into one,
  * `thinking` events are dropped, and each recorded event carries a `ts`
- * stamped when it was received. The reducer is pure so the renderer can
- * apply the identical merge to live events it shows before a reload.
+ * stamped when it was received.
  *
  * Entry kinds are append-only: replay skips unknown kinds, so new kinds are
  * fine, while changing an existing kind's shape needs a new `v` and a
- * read-side migration.
+ * read-side migration. The app's conversation files (`ConversationData` in
+ * `bridge.ts`) use the same merge for user and turn entries; this format
+ * also stores `notice` entries and a `turnId` on each turn.
  */
 
 import type { HarnessEvent } from './types';

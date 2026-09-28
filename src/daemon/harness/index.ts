@@ -1,8 +1,7 @@
 /**
  * The daemon's harness adapter registry, keyed by harness id. Every pure
- * harness descriptor (src/harness/providers) must have an adapter here; a
- * unit test derives the check from the descriptor list, so a new harness
- * without an adapter fails the suite.
+ * harness descriptor (src/harness/providers) needs an adapter registered
+ * from `createAdapters`.
  *
  * SDKs are not bundled: they load at runtime from /opt/puck/node_modules,
  * where provisioning installs the exact pinned versions.

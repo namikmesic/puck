@@ -9,7 +9,7 @@ npm run typecheck && npm run lint && npm test
 ```
 
 Lint is at **zero problems** - keep it there.
-CI runs these plus `node --check src/main/runner/runner.js`, the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), `npm run build:server`, `npm run package`, and a `docker compose up` of the server image.
+CI runs these plus `node --check src/main/runner/runner.js`, the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), `npm run build:server`, `npm run build:daemon` then `node .webpack/daemon/puckd.js version`, `npm run test:docker` on the Linux `daemon-docker` job, `npm run package`, and a `docker compose up` of the server image.
 
 ## Things that bite
 
@@ -27,6 +27,10 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The wire contract (opcodes and protocol revision) is declared twice: `WIRE` in `src/main/runner.ts` and `OP`/`RV` at the top of runner.js.
   The same test asserts they match.
   Bump the revision whenever the turn-request wire format grows.
+- **The environment daemon** (`puckd`, `src/daemon/main.ts`) is built beside the container runner and is not what environment start launches.
+  `npm run build:daemon` writes `.webpack/daemon/puckd.js`.
+  Its client protocol is `src/harness/daemon-protocol.ts`.
+  It may import only `src/harness` and itself.
 - **IPC channels** live in one table: `src/harness/channels.ts` (`CHANNELS`).
   `preload.ts` and `src/index.ts` both import it.
   The `satisfies` clause keeps it total over `PuckBridge`, and `test/unit/channels.test.ts` asserts main registers a handler for every entry.
@@ -46,9 +50,9 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The not-found error lists what was searched.
   Everything goes through `docker-client.ts` (argv, timeouts, abort signal, line streaming), and `TIMEOUTS` in `environments.ts` is the one table.
 - **Provider packages are pinned** (`PinnedPackage` in `src/harness/providers/index.ts`).
-  `provisioning.ts` checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every start.
+  `src/harness/provisioning.ts` checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every start.
   With auto-install on, any drift fails the start, and with it off only a missing SDK fails.
-  Bump a pin deliberately, together with any runner.js adaptation.
+  Bump a pin only together with what that `PinnedPackage` comment names.
   colima does not share host temp dirs either, so scripts reach containers as `sh -lc` arguments.
 - **Provider ids** (`claude-code`, `codex`) are persisted in user stores - never rename them.
 - **Release mechanics** live in `scripts/forge.mjs` (the wrapper) and `scripts/release.mjs` (pure helpers, tested).
@@ -110,13 +114,15 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 3. Registry entry in `src/main/providers/index.ts`.
 4. Runner side: `PROVIDERS` entry and `run<Name>` function in `src/main/runner/runner.js`.
    It is untyped JS, so keep it thin and translate SDK events into `HarnessEvent`s.
+   Daemon side, beside that: an adapter under `src/daemon/harness/`, registered from `createAdapters`.
 5. Run the suite.
-   `runner-source.test.ts` and `provider-settings.test.ts` are registry-derived and will point at anything missed.
+   `runner-source.test.ts` checks the runner `PROVIDERS` table, and `provider-settings.test.ts` checks compiled options.
 
 ## Terminology
 
 - *Agent* = a named provider configuration (`AgentConfig`).
-  The Task-tool sub-agents inside a chat are "sub-agents", and the container-side process is "the runner".
+  The Task-tool sub-agents inside a chat are "sub-agents".
+  The process today's containers run is "the runner"; `puckd` is the environment daemon built beside it.
   A `kind: Agent` file in a config repo is a definition (`src/harness/definitions/`), not this record.
 - `AgentConfig.options` = sparse schema-option overrides.
   `TurnRequest.settings` = the *compiled* SDK fragment, whose wire field names are frozen until the next protocol-revision bump.
@@ -130,12 +136,14 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 - `src/index.ts` - main process: window hardening, IPC handler registration, and quit drain wiring.
   Ids, strings, and configs are validated in `src/main/ipcguard.ts`.
   The conversation payload codec lives with its format in `src/main/conversations.ts`: strict `fromIpc` on save, lenient `normalize` on load, one shared field assembly.
-- `src/harness/` - the renderer↔main contract, plus the pure definition library.
+- `src/harness/` - contracts shared by the renderer, main, and the environment daemon, plus the pure definition library.
   Keep this directory free of node/electron imports.
   `bridge.ts` holds the types and `PuckBridge`, `channels.ts` the IPC channel table, `types.ts` the `HarnessEvent` wire protocol.
   `options.ts` holds the provider option schema and `ipc.ts` the `IpcHarness`.
   `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
   `definitions/` holds agent and environment definitions: YAML parse, validation, resolution, JSON Schema, and update-class diff.
+  `provisioning.ts` is the container package plan, `daemon-protocol.ts` the puckd protocol, and `transcript.ts` transcript format v2.
+- `src/daemon/` - puckd. Not launched by environment start. Entry `main.ts`.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.
 - `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.
@@ -170,7 +178,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 
 - Runner as a typed per-provider adapter bundle (retires the hand-synced `PROVIDERS` table structurally).
 - A prepared base image that bakes in the pinned provider packages, replacing the per-start `npm install`.
-  The pins in `provisioning.ts` are what it would install.
+  The pins in `src/harness/provisioning.ts` are what it would install.
 - Wire envelope `{op, req}` at the next protocol-revision bump.
 - Ask-answer encoding (keyed by question text, lossy) redesign.
 

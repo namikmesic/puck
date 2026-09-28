@@ -1,12 +1,10 @@
 /**
  * The part of a resolved environment definition the daemon reads.
  *
- * The app resolves and validates definitions from the config repo; the
- * daemon receives that resolved JSON and reads it through this narrow,
- * lenient reader: unknown fields are ignored, defaults are applied again,
- * and every value that later reaches a command line (repo names,
- * directories, branches) or a process environment is re-checked here,
- * because the daemon runs them as root.
+ * A narrow, lenient reader: unknown fields are ignored, defaults are applied
+ * again, and every value that later reaches a command line (repo names,
+ * directories, branches) or a process environment is re-checked here.
+ * Mirror fetches run as root; workspace checkouts run as the puck user.
  *
  * Referenced agent definitions are embedded either on their assignment
  * (`agents[].definition`, `orchestrator.definition`) or in an

@@ -286,7 +286,9 @@ export type ConversationEntry =
  * merged into one, `thinking` events are dropped, and `ts` is stamped by the
  * renderer. Replay silently skips unknown kinds, so event shapes in `log`
  * are append-only — new kinds are fine, changing an existing kind's shape
- * requires bumping `v` and adding a read-side migration.
+ * requires bumping `v` and adding a read-side migration. The daemon's
+ * transcript format v2 (`transcript.ts`) follows these merge rules and adds
+ * `notice` entries and a `turnId`.
  */
 export interface ConversationData {
   /** Persisted-format version; absent in pre-versioning saves (treated as 1). */

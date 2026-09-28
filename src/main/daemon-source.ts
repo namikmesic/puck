@@ -2,8 +2,9 @@
  * The environment daemon (puckd), embedded as a raw string through the
  * `raw-daemon` alias (webpack `asset/source`), plus the metadata
  * scripts/build-daemon.mjs wrote beside it: the app version and the
- * bundle's sha256, which a running daemon reports as its `build`. The app
- * copies this source into containers as /opt/puck/puckd.js.
+ * bundle's sha256, which a running daemon reports as its `build`.
+ * Environment start still deploys the container runner; nothing copies
+ * this bundle into a container yet.
  */
 
 import daemonSource from 'raw-daemon';

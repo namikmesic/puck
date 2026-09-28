@@ -1,6 +1,7 @@
 /**
- * The environment daemon's client protocol, declared once and compiled into
- * both the app and the daemon (puckd).
+ * The environment daemon's client protocol, declared once in this module.
+ * puckd imports it. The desktop app does not import it yet and still talks
+ * to the container runner.
  *
  * Transport: one NDJSON stream per attach (`docker exec -i <container> node
  * /opt/puck/puckd.js attach`, which pipes stdio to the daemon's unix
@@ -48,7 +49,7 @@ export const EVENT_LOG = {
   segmentSize: 10_000,
   /** The newest events kept; older segments are deleted whole. */
   retention: 50_000,
-  /** Live text-deltas coalesce per (sessionId, parentId) to one event per window. */
+  /** Hold window for live text-deltas. Coalescing is in src/daemon/eventlog.ts. */
   coalesceMs: 50,
 } as const;
 
