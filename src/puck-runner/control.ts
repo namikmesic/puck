@@ -196,15 +196,30 @@ export interface ControlDeps {
 
 type Handlers = { [O in ControlOp]: (args: ControlArgs<O>, emit: (ev: ControlEvent) => void) => Promise<ControlResult<O>> };
 
-/** Serializes operations per environment and counts the ones in flight (self-update waits for none). */
+/**
+ * Serializes operations per environment and counts the ones in flight.
+ * `drain` refuses every new command until `releaseDrain`; commands already
+ * running stay in `busy` until they finish. Self-update holds that drain
+ * across the download and waits for `busy` to clear before it swaps.
+ */
 export class Control {
   private readonly chains = new Map<string, Promise<unknown>>();
   private busyCount = 0;
+  private draining = false;
 
   constructor(private readonly deps: ControlDeps) {}
 
   get busy(): boolean {
     return this.busyCount > 0;
+  }
+
+  /** Refuses new commands. In-flight ones keep running and still count as `busy`. */
+  drain(): void {
+    this.draining = true;
+  }
+
+  releaseDrain(): void {
+    this.draining = false;
   }
 
   private serial<T>(envId: string, fn: () => Promise<T>): Promise<T> {
@@ -265,7 +280,9 @@ export class Control {
       }),
     'instance.rebuild': (args, emit) =>
       this.serial(args.envId, async () => {
-        await this.existing(args.envId);
+        if ((await this.deps.ops.state(args.envId)) === null && !(await this.deps.ops.volumesPresent(args.envId))) {
+          throw new ControlError('not-found', 'This environment has no container on this runner.');
+        }
         const bundle = this.deps.bundles.get(args.bundleSha);
         await this.deps.ops.rebuild(args, { bundle, instance: args.instance }, this.stages(args.envId, emit));
         this.deps.log.info('instance.rebuilt', { envId: args.envId });
@@ -286,6 +303,7 @@ export class Control {
         await this.deps.ops.stageDaemon(id, this.deps.bundles.get(bundleSha));
         return {};
       }),
+    // The support bundle reads this. tailLog redacts the text, and the validator caps the line count.
     'logs.tail': async ({ lines }) => ({ text: tailLog(this.deps.log, lines) }),
   };
 
@@ -298,6 +316,9 @@ export class Control {
     const f = frame as { t?: unknown; id?: unknown; op?: unknown; args?: unknown } | null;
     const id = typeof f?.id === 'string' ? f.id.slice(0, 64) : '';
     if (!f || f.t !== 'cmd' || !id) return { t: 'error', code: 'bad-frame', message: 'Expected { t: "cmd", id, op, args }.' };
+    if (this.draining) {
+      return { t: 'res', id, ok: false, error: { code: 'invalid-state', message: 'The runner is installing an update and is not accepting commands.' } };
+    }
     if (!isControlOp(f.op)) return { t: 'res', id, ok: false, error: { code: 'invalid-args', message: `Unknown op ${String(f.op).slice(0, 40)}.` } };
     const op = f.op;
     this.busyCount++;

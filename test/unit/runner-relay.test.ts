@@ -67,7 +67,11 @@ const echoSpawner: DockerSpawner = () =>
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
-async function bringUp(session: SignedIn, containerState: () => string | null = () => 'running') {
+async function bringUp(
+  session: SignedIn,
+  containerState: () => string | null = () => 'running',
+  extra: { instanceState?: (envId: string) => Promise<string | null>; spawner?: DockerSpawner } = {},
+) {
   const reg = await call(h, 'POST', '/v1/runners/registration-token', { token: session.accessToken });
   const paths = runnerPaths(path.join(dir, 'runner'));
   const docker = fakeDocker(containerState);
@@ -112,14 +116,14 @@ async function bringUp(session: SignedIn, containerState: () => string | null = 
     key: key.privateKey,
     log: nullLogger,
     control,
-    spawner: echoSpawner,
+    spawner: extra.spawner ?? echoSpawner,
     status: async () => ({
       version: '0.1.0',
       docker: { ok: true, version: '27.3.1', problem: null, ncpu: 8, memTotal: 16e9 },
       maxEnvironments: null,
       instances: [],
     }),
-    instanceState: (envId) => ops.state(envId),
+    instanceState: extra.instanceState ?? ((envId) => ops.state(envId)),
     onRemoved: (err) => removed.push(err),
     onOutdated: () => undefined,
   });
@@ -230,6 +234,60 @@ describe('runner relay (in process, real server)', { timeout: 30_000 }, () => {
     expect((cp?.input as Buffer).toString('latin1')).toMatch(/"grants":\[\{"owner":"octo","installationId":9,"repos":\["octo\/app"\],"token":"ghs_/);
     // The token never appears in any argv.
     expect(docker.calls.map((c) => c.args.join(' ')).join('\n')).not.toMatch(/ghs_/);
+  });
+
+  it('drops an attach open when the socket it arrived on is gone', async () => {
+    h = await startServer();
+    h.github.addUser('octo');
+    h.github.addRepo('octo/app', { pushers: ['octo'] });
+    const session = await signIn(h, 'octo');
+    let releaseState: (state: string | null) => void = () => undefined;
+    let sawInspect = false;
+    let holdInspect = true;
+    const spawned: string[][] = [];
+    const { config } = await bringUp(session, () => 'running', {
+      instanceState: () => {
+        if (!holdInspect) return Promise.resolve('running');
+        sawInspect = true;
+        return new Promise((resolve) => {
+          releaseState = (state) => {
+            holdInspect = false;
+            resolve(state);
+          };
+        });
+      },
+      spawner: (args) => {
+        spawned.push(args);
+        return echoSpawner(args);
+      },
+    });
+    const runner = (await call(h, 'GET', '/v1/runners', { token: session.accessToken })).body.runners as { publicKey: string }[];
+    const envId = String(
+      (await call(h, 'POST', '/v1/instances', { token: session.accessToken, body: { runnerId: config.runnerId, definition: 'example', repos: ['octo/app'] } }))
+        .body.envId,
+    );
+    app = await RelayApp.connect(h.base, session.accessToken);
+    const first = app.open(config.runnerId, runner[0].publicKey, 'attach', envId).then(
+      () => 'accepted' as const,
+      (err: unknown) => err,
+    );
+    for (let i = 0; i < 100 && !sawInspect; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(sawInspect).toBe(true);
+    const runners = (h.server.relay as unknown as { runners: Map<string, { ws: { terminate(): void } }> }).runners;
+    runners.get(config.runnerId)?.ws.terminate();
+    for (let i = 0; i < 50 && relay?.connected; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(relay?.connected).toBe(false);
+    for (let i = 0; i < 150 && !relay?.connected; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(relay?.connected).toBe(true);
+    releaseState('running');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(spawned).toEqual([]);
+    expect(await first).toBeInstanceOf(Error);
+
+    const attach = await app.open(config.runnerId, runner[0].publicKey, 'attach', envId);
+    attach.write('hello daemon\n');
+    await attach.until((lines) => lines.find((l) => l === 'echo:hello daemon'), 'echo');
+    expect(spawned).toHaveLength(1);
   });
 
   it('stops for good when the runner is removed from Puck', async () => {

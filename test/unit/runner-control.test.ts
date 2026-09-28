@@ -24,13 +24,17 @@ afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const instance = { envId: ENV, name: 'Example', definition: { name: 'example' } };
 
-function harness(opts: { exists?: boolean; containers?: number; max?: number | null; mintFails?: boolean } = {}) {
+function harness(opts: { exists?: boolean; containers?: number; max?: number | null; mintFails?: boolean; volumes?: boolean; hold?: Promise<void> } = {}) {
   const calls: string[][] = [];
   const inputs: DockerOptions['input'][] = [];
   const run = async (args: string[], o: DockerOptions = {}): Promise<DockerResult> => {
+    if (opts.hold) await opts.hold;
     calls.push(args);
     inputs.push(o.input);
     if (args[0] === 'container' && args[1] === 'inspect') return opts.exists ? { code: 0, stdout: 'running\n', stderr: '' } : { code: 1, stdout: '', stderr: 'No such container' };
+    if (args[0] === 'volume' && args[1] === 'inspect') {
+      return opts.volumes ? { code: 0, stdout: `${args[args.length - 1]}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'No such volume' };
+    }
     if (args[0] === 'ps') {
       const row = (i: number) => JSON.stringify({ Names: `puck-e${i}`, State: 'running', Image: 'x', Labels: `puck=instance,puck.env=env_${i}` });
       return { code: 0, stdout: Array.from({ length: opts.containers ?? 0 }, (_, i) => row(i)).join('\n'), stderr: '' };
@@ -140,6 +144,50 @@ describe('runner control protocol', () => {
     noGithub.bundles.put(sha(bundle), 0, bundle, true);
     expect(await noGithub.cmd('instance.create', args)).toMatchObject({ ok: false, error: { code: 'server' } });
     expect(noGithub.calls.some((c) => c[0] === 'create')).toBe(false);
+  });
+
+  it('refuses new commands while draining and still finishes the one already running', async () => {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = harness({ hold });
+    const bundle = Buffer.from('// puckd');
+    h.bundles.put(sha(bundle), 0, bundle, true);
+    const args = { envId: ENV, image: 'node:22', bundleSha: sha(bundle), inbox: { instance } };
+    const pending = h.cmd('instance.create', args);
+    expect(h.control.busy).toBe(true);
+    h.control.drain();
+    expect(await h.cmd('instance.list', {})).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-state', message: expect.stringMatching(/update/) },
+    });
+    expect(h.control.busy).toBe(true);
+    release();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(h.control.busy).toBe(false);
+    expect(await h.cmd('runner.info', {})).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
+    h.control.releaseDrain();
+    expect(await h.cmd('instance.list', {})).toMatchObject({ ok: true });
+  });
+
+  it('rebuilds when the container is gone but both volumes remain, and not otherwise', async () => {
+    const bundle = Buffer.from('// puckd');
+    const args = { envId: ENV, image: 'node:22', bundleSha: sha(bundle), instance };
+    const gone = harness();
+    gone.bundles.put(sha(bundle), 0, bundle, true);
+    expect(await gone.cmd('instance.rebuild', args)).toMatchObject({ ok: false, error: { code: 'not-found' } });
+    expect(gone.calls.some((c) => c[0] === 'create')).toBe(false);
+
+    const volumes = harness({ volumes: true });
+    volumes.bundles.put(sha(bundle), 0, bundle, true);
+    expect(await volumes.cmd('instance.rebuild', args)).toMatchObject({ ok: true, result: {} });
+    expect(volumes.calls.some((c) => c[0] === 'volume' && c[1] === 'inspect')).toBe(true);
+    const create = volumes.calls.find((c) => c[0] === 'create');
+    expect(create?.join(' ')).toContain(`-v puck-${ENV}-data:/puck`);
+    expect(create?.join(' ')).toContain(`-v puck-${ENV}-ws:/workspace`);
+    expect(volumes.calls.some((c) => c[0] === 'volume' && c[1] === 'create')).toBe(false);
+    expect(volumes.started).toEqual([ENV]);
   });
 
   it('refuses start, stop and upgrades for an environment it does not host', async () => {

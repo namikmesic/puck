@@ -147,6 +147,16 @@ describe('runner docker ops: argv', () => {
     expect(entries(r.calls[5].input as Buffer).map((e) => e.name)).toEqual(['opt/puck/', 'opt/puck/puckd.js', 'puck/inbox/', 'puck/inbox/instance.json']);
   });
 
+  it('recreates a missing container on the existing volumes', async () => {
+    const r = recorder((args) => (args[0] === 'container' && args[1] === 'inspect' ? { code: 1, stderr: 'Error: No such container: puck-x' } : {}));
+    await new DockerOps(r.run).rebuild({ envId: ENV, image: 'img:2', bundleSha: BUNDLE_SHA }, { bundle: Buffer.from('// b'), instance }, () => undefined);
+    const argv = r.argv();
+    expect(argv.some((line) => line.startsWith('stop '))).toBe(false);
+    expect(argv.join('\n')).not.toContain('volume create');
+    expect(argv.some((line) => line.startsWith('create ') && line.includes(`-v puck-${ENV}-data:/puck`) && line.includes(`-v puck-${ENV}-ws:/workspace`))).toBe(true);
+    expect(argv.slice(-2)).toEqual([`cp - puck-${ENV}:/`, `start puck-${ENV}`]);
+  });
+
   it('deletes the container, both volumes and a built image, tolerating ones already gone', async () => {
     const r = recorder((args) => (args[0] === 'image' ? { code: 1, stderr: 'Error: No such image: puck-img-x' } : {}));
     await new DockerOps(r.run).delete(ENV, () => undefined);

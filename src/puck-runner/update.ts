@@ -77,8 +77,12 @@ export class UpdateError extends Error {
   }
 }
 
-/** Downloads, verifies, unpacks, smoke-tests and swaps in `asset`. On failure nothing in the runner directory changed. */
-export async function applyUpdate(deps: UpdateDeps, asset: ReleaseAsset): Promise<void> {
+/**
+ * Downloads, verifies, unpacks, smoke-tests and swaps in `asset`.
+ * `beforeSwap` runs after the smoke test and before anything in the runner
+ * directory is replaced. On failure nothing in the runner directory changed.
+ */
+export async function applyUpdate(deps: UpdateDeps, asset: ReleaseAsset, beforeSwap?: () => Promise<void>): Promise<void> {
   const exec = deps.exec ?? realExec;
   const { paths, log } = deps;
   if (!/^\d+\.\d+\.\d+$/.test(asset.version) || !/^[0-9a-f]{64}$/.test(asset.sha256) || path.basename(asset.file) !== asset.file) {
@@ -112,6 +116,7 @@ export async function applyUpdate(deps: UpdateDeps, asset: ReleaseAsset): Promis
     if (probe.code !== 0 || !probe.stdout.includes(asset.version)) {
       throw new UpdateError(`The new runner does not start on this machine: ${(probe.stderr || probe.stdout).trim().slice(-300)}`);
     }
+    if (beforeSwap) await beforeSwap();
     swapIn(paths, staging);
     log.info('update.installed', { from: deps.version, to: asset.version });
   } finally {

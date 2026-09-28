@@ -249,6 +249,8 @@ export class RelayConnection {
   }
 
   private async open(frame: Record<string, unknown>): Promise<void> {
+    const socket = this.ws;
+    const same = (): boolean => socket !== null && this.ws === socket && !this.stopped && socket.readyState === WebSocket.OPEN;
     const { ch, appCh, kind } = frame;
     if (!isChannelId(ch)) return;
     if (!isChannelId(appCh) || (kind !== 'control' && kind !== 'attach') || !rawKey((frame.e2e as Record<string, unknown> | undefined)?.appEphemeralPub)) {
@@ -262,12 +264,14 @@ export class RelayConnection {
       try {
         state = await this.deps.instanceState(envId);
       } catch {
+        if (!same()) return;
         return this.refuse(ch, 'docker-unavailable');
       }
+      if (!same()) return;
       if (state === null) return this.refuse(ch, 'not-found');
       if (state !== 'running') return this.refuse(ch, 'not-running');
     }
-    if (this.stopped || !this.connected) return;
+    if (!same()) return;
     let handshake: ReturnType<typeof acceptRunnerHandshake>;
     try {
       const appEphemeralPub = (frame.e2e as { appEphemeralPub: string }).appEphemeralPub;

@@ -84,6 +84,22 @@ describe('runner self-update', () => {
     expect(fs.readdirSync(paths.update)).toEqual(['previous']);
   });
 
+  it('runs beforeSwap after the smoke test and leaves the runner in place when that throws', async () => {
+    const { api, paths } = await setup({ 'puck-runner-linux-x64-0.2.0.tar.gz': release('0.2.0') });
+    const deps = { api, paths, log: nullLogger, version: '0.1.0', os: 'linux' as const, arch: 'x64' as const };
+    const asset = (await findUpdate(deps)) as NonNullable<Awaited<ReturnType<typeof findUpdate>>>;
+    let during = '';
+    await expect(
+      applyUpdate(deps, asset, async () => {
+        during = fs.readFileSync(paths.version, 'utf8');
+        throw new Error('stopped');
+      }),
+    ).rejects.toThrow('stopped');
+    expect(during).toBe('0.1.0\n');
+    expect(fs.readFileSync(paths.version, 'utf8')).toBe('0.1.0\n');
+    expect(fs.readFileSync(paths.bundle, 'utf8')).toBe('// runner 0.1.0\n');
+  });
+
   it('changes nothing when the download does not match its sha256 or the new runner does not start', async () => {
     const { api, paths } = await setup({ 'puck-runner-linux-x64-0.2.0.tar.gz': release('0.2.0', 'broken') });
     const deps = { api, paths, log: nullLogger, version: '0.1.0', os: 'linux' as const, arch: 'x64' as const };

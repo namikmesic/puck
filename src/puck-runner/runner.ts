@@ -15,7 +15,6 @@
  * label.
  */
 
-import * as fs from 'node:fs';
 import { ServerApi, RunnerSession, type Fetch, type RunnerOutdatedError, type RunnerRemovedError } from './api';
 import { BundleCache } from './bundles';
 import type { Platform } from './configure';
@@ -26,11 +25,14 @@ import { dockerHealth } from './docker/health';
 import { DockerOps } from './docker/ops';
 import { readConfig, readCredentials, type RunnerPaths } from './files';
 import { loadRunnerKey } from './identity';
+import { acquireLock } from './lock';
 import type { Logger } from './log';
 import { TokenPump } from './pump';
 import { RelayConnection } from './relay';
 import { REMOVED_EXIT } from './service';
 import { applyUpdate, CHECK_EVERY_MS, findUpdate, UPDATE_EXIT } from './update';
+
+export { LockError } from './lock';
 
 export interface RunDeps {
   paths: RunnerPaths;
@@ -41,41 +43,6 @@ export interface RunDeps {
   spawner: DockerSpawner;
   fetch?: Fetch;
   print(line: string): void;
-}
-
-export class LockError extends Error {}
-
-/** One runner process per directory: two would fight over the server connection. */
-export function acquireLock(file: string): () => void {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = fs.openSync(file, 'wx', 0o600);
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      return () => {
-        try {
-          if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.rmSync(file, { force: true });
-        } catch {
-          // already gone
-        }
-      };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const pid = Number(fs.readFileSync(file, 'utf8').trim());
-      let alive = false;
-      try {
-        if (pid > 0 && pid !== process.pid) {
-          process.kill(pid, 0);
-          alive = true;
-        }
-      } catch {
-        alive = false;
-      }
-      if (alive) throw new LockError(`Another runner process (pid ${pid}) is running from this directory.`);
-      fs.rmSync(file, { force: true });
-    }
-  }
-  throw new LockError('Could not take the runner lock.');
 }
 
 export async function run(deps: RunDeps): Promise<number> {
@@ -155,19 +122,26 @@ export async function run(deps: RunDeps): Promise<number> {
     if (!force && Date.now() - lastUpdateCheck < CHECK_EVERY_MS) return;
     lastUpdateCheck = Date.now();
     updating = true;
+    let drained = false;
+    let installed = false;
     try {
       const deps2 = { api, paths, version: deps.version, os: deps.platform.os, arch: deps.platform.arch, log };
       const asset = await findUpdate(deps2);
-      if (!asset) return;
-      // Never in the middle of a create or rebuild.
-      while (control.busy && !stopping) await new Promise((r) => setTimeout(r, 2_000));
+      if (!asset || stopping) return;
+      control.drain();
+      drained = true;
+      await applyUpdate(deps2, asset, async () => {
+        while (control.busy && !stopping) await new Promise((r) => setTimeout(r, 2_000));
+        if (stopping) throw new Error('The runner stopped before the update was installed.');
+      });
+      installed = true;
       if (stopping) return;
-      await applyUpdate(deps2, asset);
       deps.print(`Updated to ${asset.version}; restarting.`);
-      void shutdown(UPDATE_EXIT);
+      await shutdown(UPDATE_EXIT);
     } catch (err) {
-      log.warn('update.failed', { error: (err as Error).message.slice(0, 300) });
+      if (!stopping) log.warn('update.failed', { error: (err as Error).message.slice(0, 300) });
     } finally {
+      if (drained && !installed) control.releaseDrain();
       updating = false;
     }
   };

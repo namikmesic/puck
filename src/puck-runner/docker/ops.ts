@@ -95,6 +95,18 @@ export class DockerOps {
     return out;
   }
 
+  /** True when both of the environment's volumes exist. */
+  async volumesPresent(envId: string): Promise<boolean> {
+    const names = instanceNames(envId);
+    for (const volume of [names.data, names.workspace]) {
+      const r = await this.docker(['volume', 'inspect', '--format', '{{.Name}}', volume], { timeoutMs: TIMEOUTS.inspect });
+      if (r.code === 0) continue;
+      if (/no such volume/i.test(r.stderr)) return false;
+      throw new DockerError(`Inspecting volume ${volume}: ${stderrTail(r)}`, r);
+    }
+    return true;
+  }
+
   /** The container's state (`running`, `exited`, ...), or null when it does not exist. */
   async state(envId: string): Promise<string | null> {
     const { container } = instanceNames(envId);

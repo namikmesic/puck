@@ -19,7 +19,7 @@
  * the whole runner.
  */
 
-import type { GithubGrant } from '../harness/daemon-protocol';
+import type { GithubAuth, GithubGrant } from '../harness/daemon-protocol';
 import { ApiError, RunnerRemovedError } from './api';
 import type { DaemonLink } from './daemon-link';
 import type { Logger } from './log';
@@ -128,26 +128,31 @@ export class TokenPump {
   /** One check; returns how long to wait before the next. */
   private async refresh(envId: string): Promise<number> {
     const link = await this.deps.link(envId);
+    let gh: GithubAuth;
     try {
-      const snap = await link.cmd('snapshot.get', {});
-      const gh = snap.github;
-      const now = this.now();
-      if (gh.state === 'ok' && typeof gh.expiresAt === 'number' && gh.expiresAt - now > REFRESH_BEFORE_MS) {
-        return clampWait(gh.expiresAt - REFRESH_BEFORE_MS - now);
-      }
-      const grants = await this.deps.mint(envId);
-      await link.cmd('github.put', { grants });
-      const earliest = Math.min(...grants.map((g) => g.expiresAt));
-      this.deps.log.info('pump.pushed', {
-        envId,
-        was: gh.state,
-        installations: grants.length,
-        expiresInS: Math.round((earliest - this.now()) / 1000),
-      });
-      return clampWait(earliest - REFRESH_BEFORE_MS - this.now());
+      gh = (await link.cmd('snapshot.get', {})).github;
     } finally {
       link.close();
     }
+    const now = this.now();
+    if (gh.state === 'ok' && typeof gh.expiresAt === 'number' && gh.expiresAt - now > REFRESH_BEFORE_MS) {
+      return clampWait(gh.expiresAt - REFRESH_BEFORE_MS - now);
+    }
+    const grants = await this.deps.mint(envId);
+    const put = await this.deps.link(envId);
+    try {
+      await put.cmd('github.put', { grants });
+    } finally {
+      put.close();
+    }
+    const earliest = Math.min(...grants.map((g) => g.expiresAt));
+    this.deps.log.info('pump.pushed', {
+      envId,
+      was: gh.state,
+      installations: grants.length,
+      expiresInS: Math.round((earliest - this.now()) / 1000),
+    });
+    return clampWait(earliest - REFRESH_BEFORE_MS - this.now());
   }
 
   private onFailure(envId: string, t: Tracked, err: unknown): number {
