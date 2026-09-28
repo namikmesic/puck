@@ -2,9 +2,10 @@
 /**
  * Builds puck-runner into one file, `.webpack/runner/puck-runner.js`, that
  * runs on the tarball's bundled Node 22 with no node_modules: `ws` is
- * bundled, and every `node:` import stays external. ws's optional native
- * helpers (bufferutil, utf-8-validate) stay external too; ws loads them in
- * a try/catch and falls back to JavaScript.
+ * bundled, SQLite is Node's built-in `node:sqlite`, and every `node:`
+ * import stays external. ws's optional native helpers (bufferutil,
+ * utf-8-validate) stay external too; ws loads them in a try/catch and
+ * falls back to JavaScript.
  *
  * Writes `puck-runner.meta.json` beside it ({ version, sha256 }) and fails
  * if the bundle still requires anything that is not a Node built-in.
@@ -55,7 +56,7 @@ export async function buildRunner() {
 
   const bundlePath = join(RUNNER_OUT, 'puck-runner.js');
   const bundle = readFileSync(bundlePath, 'utf8');
-  const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)]);
+  const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`), 'node:sqlite']);
   const foreign = [...bundle.matchAll(/require\("([^"]+)"\)/g)].map((m) => m[1]).filter((name) => !builtins.has(name) && !OPTIONAL.includes(name));
   if (foreign.length) throw new Error(`The runner bundle requires modules outside Node: ${[...new Set(foreign)].join(', ')}`);
 
