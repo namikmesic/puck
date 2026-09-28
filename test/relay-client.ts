@@ -123,6 +123,20 @@ export class RelayApp {
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(frame));
   }
 
+  /** App channel ids still waiting for the runner to accept. */
+  openingIds(): number[] {
+    return [...this.accepts.keys()];
+  }
+
+  /** Closes an app channel before accept. The server does not echo that close. */
+  cancelOpen(ch: number, reason = 'cancel'): void {
+    this.send({ type: 'close', ch, reason });
+    const done = this.accepts.get(ch);
+    if (!done) return;
+    this.accepts.delete(ch);
+    done({ type: 'close', reason });
+  }
+
   forget(ch: number): void {
     this.channels.delete(ch);
   }

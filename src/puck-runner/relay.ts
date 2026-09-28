@@ -80,9 +80,15 @@ interface Channel {
   close(reason: string, tell: boolean): void;
 }
 
+interface PendingOpen {
+  socket: WebSocket;
+  cancelled: boolean;
+}
+
 export class RelayConnection {
   private ws: WebSocket | null = null;
   private readonly channels = new Map<number, Channel>();
+  private readonly pending = new Map<number, PendingOpen>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private failures = 0;
@@ -109,6 +115,7 @@ export class RelayConnection {
     this.stopped = true;
     if (this.retry) clearTimeout(this.retry);
     this.stopHeartbeat();
+    this.cancelPending(null);
     for (const c of [...this.channels.values()]) c.close('runner-stopping', true);
     const ws = this.ws;
     this.ws = null;
@@ -181,6 +188,7 @@ export class RelayConnection {
     ws.on('close', (code, reason) => {
       if (this.ws === ws) this.ws = null;
       this.stopHeartbeat();
+      this.cancelPending(ws);
       for (const c of [...this.channels.values()]) c.close('relay-lost', false);
       if (this.stopped) return;
       const why = reason.toString();
@@ -230,8 +238,10 @@ export class RelayConnection {
         void this.open(frame);
         return;
       case 'close': {
-        const c = isChannelId(frame.ch) ? this.channels.get(frame.ch) : undefined;
-        c?.close(typeof frame.reason === 'string' ? frame.reason : 'closed', false);
+        if (!isChannelId(frame.ch)) return;
+        const pending = this.pending.get(frame.ch);
+        if (pending) pending.cancelled = true;
+        this.channels.get(frame.ch)?.close(typeof frame.reason === 'string' ? frame.reason : 'closed', false);
         return;
       }
       case 'window': {
@@ -248,29 +258,43 @@ export class RelayConnection {
     this.send({ type: 'close', ch, reason });
   }
 
+  private cancelPending(socket: WebSocket | null): void {
+    for (const [ch, pending] of this.pending) {
+      if (socket !== null && pending.socket !== socket) continue;
+      pending.cancelled = true;
+      this.pending.delete(ch);
+    }
+  }
+
   private async open(frame: Record<string, unknown>): Promise<void> {
     // Bound to the socket that received this open. Docker inspect can outlive
-    // it, and a reconnect numbers channels from 1 again, so a late close,
-    // accept, or exec must not land on the new socket.
+    // it: a close for this channel, or a reconnect (channels number from 1
+    // again), must not accept or exec.
     const socket = this.ws;
-    const same = (): boolean => socket !== null && this.ws === socket && !this.stopped && socket.readyState === WebSocket.OPEN;
+    if (!socket) return;
+    const same = (): boolean => this.ws === socket && !this.stopped && socket.readyState === WebSocket.OPEN;
     const { ch, appCh, kind } = frame;
     if (!isChannelId(ch)) return;
     if (!isChannelId(appCh) || (kind !== 'control' && kind !== 'attach') || !rawKey((frame.e2e as Record<string, unknown> | undefined)?.appEphemeralPub)) {
       return this.refuse(ch, 'bad-open');
     }
     if (this.channels.has(ch)) return this.refuse(ch, 'channel-in-use');
+    if (this.pending.has(ch)) return;
     const envId = kind === 'attach' ? frame.envId : null;
     if (kind === 'attach') {
       if (typeof envId !== 'string' || !ENV_ID_RE.test(envId)) return this.refuse(ch, 'bad-open');
-      let state: string | null;
+      const pending: PendingOpen = { socket, cancelled: false };
+      this.pending.set(ch, pending);
+      let state: string | null = null;
       try {
         state = await this.deps.instanceState(envId);
       } catch {
-        if (!same()) return;
+        if (pending.cancelled || !same()) return;
         return this.refuse(ch, 'docker-unavailable');
+      } finally {
+        if (this.pending.get(ch) === pending) this.pending.delete(ch);
       }
-      if (!same()) return;
+      if (pending.cancelled || !same()) return;
       if (state === null) return this.refuse(ch, 'not-found');
       if (state !== 'running') return this.refuse(ch, 'not-running');
     }

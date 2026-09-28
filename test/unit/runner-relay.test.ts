@@ -291,6 +291,62 @@ describe('runner relay (in process, real server)', { timeout: 30_000 }, () => {
     expect(spawned).toHaveLength(1);
   });
 
+  it('spawns no exec when the server closes an attach during inspect', async () => {
+    h = await startServer();
+    h.github.addUser('octo');
+    h.github.addRepo('octo/app', { pushers: ['octo'] });
+    const session = await signIn(h, 'octo');
+    let releaseState: (state: string | null) => void = () => undefined;
+    let sawInspect = false;
+    let holdInspect = true;
+    const spawned: string[][] = [];
+    const { config } = await bringUp(session, () => 'running', {
+      instanceState: () => {
+        if (!holdInspect) return Promise.resolve('running');
+        sawInspect = true;
+        return new Promise((resolve) => {
+          releaseState = (state) => {
+            holdInspect = false;
+            resolve(state);
+          };
+        });
+      },
+      spawner: (args) => {
+        spawned.push(args);
+        return echoSpawner(args);
+      },
+    });
+    const runner = (await call(h, 'GET', '/v1/runners', { token: session.accessToken })).body.runners as { publicKey: string }[];
+    const envId = String(
+      (await call(h, 'POST', '/v1/instances', { token: session.accessToken, body: { runnerId: config.runnerId, definition: 'example', repos: ['octo/app'] } }))
+        .body.envId,
+    );
+    app = await RelayApp.connect(h.base, session.accessToken);
+    const first = app.open(config.runnerId, runner[0].publicKey, 'attach', envId).then(
+      () => 'accepted' as const,
+      (err: unknown) => err,
+    );
+    for (let i = 0; i < 100 && !sawInspect; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(sawInspect).toBe(true);
+    const opening = app.openingIds();
+    expect(opening).toHaveLength(1);
+    app.cancelOpen(opening[0], 'cancel');
+    const runners = (h.server.relay as unknown as { runners: Map<string, { channels: Map<number, unknown> }> }).runners;
+    for (let i = 0; i < 100 && (runners.get(config.runnerId)?.channels.size ?? 0) > 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(runners.get(config.runnerId)?.channels.size ?? 0).toBe(0);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    releaseState('running');
+    await new Promise((r) => setImmediate(r));
+    expect(spawned).toEqual([]);
+    expect(await first).toBeInstanceOf(Error);
+
+    const attach = await app.open(config.runnerId, runner[0].publicKey, 'attach', envId);
+    attach.write('hello daemon\n');
+    await attach.until((lines) => lines.find((l) => l === 'echo:hello daemon'), 'echo');
+    expect(spawned).toHaveLength(1);
+  });
+
   it('stops for good when the runner is removed from Puck', async () => {
     h = await startServer();
     h.github.addUser('octo');
