@@ -217,18 +217,32 @@ export class Git {
 
   /**
    * Create the item's worktree on a new branch from origin/<base>, or adopt
-   * one an interrupted dispatch already created. Returns the base sha.
+   * one an interrupted dispatch already created. Returns the commit the
+   * branch was created from.
    */
   async addWorktree(dir: string, worktree: string, branch: string, base: string): Promise<string> {
     const work = this.workspaceDir(dir);
     if (!validBranch(branch) || !validBranch(base)) throw new GitError('Invalid branch name.');
     const baseSha = await this.revParse(work, `refs/remotes/origin/${base}`);
     const existing = await this.asPuck(['-C', worktree, 'rev-parse', '--abbrev-ref', 'HEAD'], { allowFail: true });
-    if (existing.code === 0 && existing.stdout.trim() === branch) return baseSha;
+    if (existing.code === 0 && existing.stdout.trim() === branch) return this.forkPoint(work, branch, base);
     const hasBranch = await this.asPuck(['-C', work, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true });
-    if (hasBranch.code === 0) await this.asPuck(['-C', work, 'worktree', 'add', worktree, branch]);
-    else await this.asPuck(['-C', work, 'worktree', 'add', '-b', branch, worktree, baseSha]);
+    if (hasBranch.code === 0) {
+      await this.asPuck(['-C', work, 'worktree', 'add', worktree, branch]);
+      return this.forkPoint(work, branch, base);
+    }
+    await this.asPuck(['-C', work, 'worktree', 'add', '-b', branch, worktree, baseSha]);
     return baseSha;
+  }
+
+  private async forkPoint(work: string, branch: string, base: string): Promise<string> {
+    const merged = await this.asPuck(
+      ['-C', work, 'merge-base', '--end-of-options', `refs/heads/${branch}`, `refs/remotes/origin/${base}`],
+      { allowFail: true },
+    );
+    const sha = merged.stdout.trim();
+    if (merged.code === 0 && /^[0-9a-f]{40,64}$/.test(sha)) return sha;
+    return this.revParse(work, `refs/heads/${branch}`);
   }
 
   async removeWorktree(dir: string, worktree: string): Promise<void> {

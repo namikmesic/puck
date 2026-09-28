@@ -372,21 +372,25 @@ export class Work {
       const git = this.deps.git;
       const worktree = git.worktreeDir(item.number);
       const branch = item.branch ?? itemBranch(item.number, item.title);
-      const base = await git.serial(repo.dir, async () => {
-        await git.fetchMirror(repo.dir, repo.github);
-        await git.fetchWorkspace(repo.dir);
-        const baseBranch = repo.branch ?? (await git.defaultBranch(repo.dir));
-        const sha = await git.addWorktree(repo.dir, worktree, branch, baseBranch);
-        return { branch: baseBranch, sha };
-      });
-      if (item.status !== 'running') return; // cancelled while the worktree was prepared
-      const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id });
-      this.deps.backlog.patch(item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
-      this.deps.turns.send(
-        session.id,
-        workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base }),
-        'system',
-      );
+      try {
+        const base = await git.serial(repo.dir, async () => {
+          await git.fetchMirror(repo.dir, repo.github);
+          await git.fetchWorkspace(repo.dir);
+          const baseBranch = repo.branch ?? (await git.defaultBranch(repo.dir));
+          const sha = await git.addWorktree(repo.dir, worktree, branch, baseBranch);
+          return { branch: baseBranch, sha };
+        });
+        if (item.status !== 'running') return; // cancelled while the worktree was prepared
+        const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id });
+        this.deps.backlog.patch(item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
+        this.deps.turns.send(
+          session.id,
+          workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base }),
+          'system',
+        );
+      } finally {
+        if (!item.worktree) await this.dropUnrecordedWorktree(item, repo.dir, worktree);
+      }
       return;
     }
     // Later dispatches reuse the worktree and the session.
@@ -404,6 +408,12 @@ export class Work {
     } else {
       this.deps.turns.kick(item.sessionId);
     }
+  }
+
+  private dropUnrecordedWorktree(item: ItemRecord, dir: string, worktree: string): Promise<void> {
+    return this.deps.git.serial(dir, () => this.deps.git.removeWorktree(dir, worktree)).catch((err: unknown) => {
+      this.deps.log.warn('item.worktree-remove-failed', { itemId: item.id, detail: (err as Error).message });
+    });
   }
 
   /** Preparing a dispatch failed: count it like a failed turn. */

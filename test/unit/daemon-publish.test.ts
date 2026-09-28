@@ -266,6 +266,61 @@ describe('push rejections', () => {
   });
 });
 
+describe('worktree adoption', () => {
+  const ORIGIN = 'b'.repeat(40);
+  const FORK = 'a'.repeat(40);
+  const branch = 'puck/W-1-fix';
+
+  function adopting(mode: 'worktree' | 'branch' | 'new' | 'unrelated') {
+    const fake = fakeRunner((argv) => {
+      const sub = argv[1] === '-C' ? argv[3] : '';
+      const rest = argv.slice(4);
+      if (sub === 'rev-parse' && rest.some((a) => a.startsWith('refs/remotes/origin/'))) return { stdout: `${ORIGIN}\n` };
+      if (sub === 'rev-parse' && rest[0] === '--abbrev-ref') {
+        return mode === 'worktree' ? { stdout: `${branch}\n` } : { code: 128, stderr: 'not a git repository' };
+      }
+      if (sub === 'rev-parse' && rest.includes('--quiet')) return mode === 'branch' || mode === 'unrelated' ? { code: 0 } : { code: 1 };
+      if (sub === 'merge-base') return mode === 'unrelated' ? { code: 1, stderr: 'no merge base' } : { stdout: `${FORK}\n` };
+      if (sub === 'rev-parse' && rest.some((a) => a.startsWith('refs/heads/'))) return { stdout: `${FORK}\n` };
+      return undefined;
+    });
+    return { git: new Git({ paths: root.paths, run: fake.run, asPuck: PUCK }), calls: fake.calls };
+  }
+
+  it('adopts an existing worktree at the branch fork point', async () => {
+    const { git, calls } = adopting('worktree');
+    const worktree = git.worktreeDir(1);
+    await expect(git.addWorktree('app', worktree, branch, 'main')).resolves.toBe(FORK);
+    expect(calls.some((c) => c.argv.includes('worktree') && c.argv.includes('add'))).toBe(false);
+    expect(calls.some((c) => c.argv.includes('merge-base'))).toBe(true);
+  });
+
+  it('adopts a leftover branch at the branch fork point', async () => {
+    const { git, calls } = adopting('branch');
+    const worktree = git.worktreeDir(1);
+    await expect(git.addWorktree('app', worktree, branch, 'main')).resolves.toBe(FORK);
+    const add = defined(calls.find((c) => c.argv.includes('worktree') && c.argv.includes('add')));
+    expect(add.argv).not.toContain('-b');
+    expect(add.argv).not.toContain(ORIGIN);
+    expect(add.argv).toContain(branch);
+  });
+
+  it('uses the branch tip when the fork point cannot be named, not today’s origin', async () => {
+    const { git } = adopting('unrelated');
+    await expect(git.addWorktree('app', git.worktreeDir(1), branch, 'main')).resolves.toBe(FORK);
+  });
+
+  it('branches a new worktree from today’s origin tip', async () => {
+    const { git, calls } = adopting('new');
+    const worktree = git.worktreeDir(1);
+    await expect(git.addWorktree('app', worktree, branch, 'main')).resolves.toBe(ORIGIN);
+    const add = defined(calls.find((c) => c.argv.includes('worktree') && c.argv.includes('add')));
+    expect(add.argv).toContain('-b');
+    expect(add.argv).toContain(ORIGIN);
+    expect(calls.some((c) => c.argv.includes('merge-base'))).toBe(false);
+  });
+});
+
 describe('branch names and diff stats', () => {
   it('slugs titles into puck/W-<n>-<slug>, at most 40 characters of slug', () => {
     expect(itemBranch(4, 'Fix login redirect!')).toBe('puck/W-4-fix-login-redirect');

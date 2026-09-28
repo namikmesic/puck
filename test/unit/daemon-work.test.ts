@@ -36,6 +36,10 @@ let workerSteps: Step[];
 let commits: string;
 let onGit: ((argv: string[]) => Promise<void>) | null;
 let trace: string[];
+let originTip: string;
+let forkSha: string;
+let failWorktreeAdd: boolean;
+const adoptedBranches = new Set<string>();
 
 const end = (ctx: AdapterContext): void => ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
 const say = (text: string): Step => (req, ctx) => {
@@ -84,9 +88,23 @@ async function launch(): Promise<void> {
     const rest = argv.slice(i + 3);
     if (sub === 'rev-parse' && rest.includes('origin/HEAD')) return { stdout: 'origin/main\n' };
     if (sub === 'rev-parse' && rest[0] === '--abbrev-ref') return { code: 128, stderr: 'not a git repository' };
-    if (sub === 'rev-parse' && rest.includes('--quiet')) return { code: 1 };
-    if (sub === 'rev-parse' && rest.some((a) => a.startsWith('refs/remotes/origin/'))) return { stdout: `${BASE}\n` };
+    if (sub === 'rev-parse' && rest.includes('--quiet')) {
+      const ref = rest.find((a) => a.startsWith('refs/heads/'));
+      const name = ref?.slice('refs/heads/'.length);
+      if (name && adoptedBranches.has(name)) return { code: 0 };
+      return { code: 1 };
+    }
+    if (sub === 'rev-parse' && rest.some((a) => a.startsWith('refs/remotes/origin/'))) return { stdout: `${originTip}\n` };
+    if (sub === 'rev-parse' && rest.some((a) => a.startsWith('refs/heads/'))) return { stdout: `${forkSha}\n` };
     if (sub === 'rev-parse') return { stdout: `${HEAD}\n` };
+    if (sub === 'merge-base') return { stdout: `${forkSha}\n` };
+    if (sub === 'worktree' && rest[0] === 'add' && failWorktreeAdd) return { code: 128, stderr: 'fatal: worktree add failed' };
+    if (sub === 'worktree' && rest[0] === 'add' && rest.includes('-b')) {
+      const name = rest[rest.indexOf('-b') + 1];
+      if (name) adoptedBranches.add(name);
+      const sha = rest[rest.length - 1];
+      if (/^[0-9a-f]{40,64}$/.test(sha)) forkSha = sha;
+    }
     if (sub === 'log') return { stdout: commits };
     if (sub === 'diff' && rest.includes('--shortstat')) return { stdout: commits ? ' 1 file changed, 2 insertions(+)\n' : '' };
     if (sub === 'diff') return { stdout: commits ? ' a.txt | 2 ++\n' : '' };
@@ -198,6 +216,10 @@ beforeEach(async () => {
   commits = `${HEAD}\tAdd a.txt\n`;
   onGit = null;
   trace = [];
+  originTip = BASE;
+  forkSha = BASE;
+  failWorktreeAdd = false;
+  adoptedBranches.clear();
   deliver();
   await launch();
 });
@@ -363,6 +385,62 @@ describe('work items through the daemon', () => {
     expect((await item(c, 2)).status).toBe('cancelled');
     await c.cmd('item.delete', { itemId: cancelled.id });
     expect(calls.some((x) => x.argv.includes('worktree') && x.argv.includes('remove'))).toBe(true);
+  });
+
+  it('removes a worktree cancelled while it is prepared, and a retry keeps the branch’s original base', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const moved = 'd'.repeat(40);
+    onGit = async (argv) => {
+      if (!argv.includes('worktree') || !argv.includes('add') || !argv.includes('-b')) return;
+      held = true;
+      await gate;
+    };
+    const c = client();
+    const worktree = path.join(root.paths.workspace, '.puck', 'worktrees', 'W-1');
+    try {
+      const creating = c.cmd('item.create', { title: 'Keep the base', agent: 'implementer' });
+      await vi.waitFor(() => expect(held).toBe(true));
+      const running = await item(c, 1);
+      expect(running).toMatchObject({ status: 'running', worktree: null, base: null });
+      await c.cmd('item.cancel', { itemId: running.id });
+      release();
+      await creating;
+      await vi.waitFor(() => expect(calls.some((x) => x.argv.includes('worktree') && x.argv.includes('remove') && x.argv.includes(worktree))).toBe(true));
+      const cancelled = await item(c, 1);
+      expect(cancelled).toMatchObject({ status: 'cancelled', worktree: null, base: null });
+      expect(workerCalls).toHaveLength(0);
+
+      originTip = moved;
+      await c.cmd('item.retry', { itemId: cancelled.id });
+      const again = await until(c, 1, 'review');
+      expect(again.base).toEqual({ branch: 'main', sha: BASE });
+      expect(again.worktree).toBe(worktree);
+      expect(workerCalls).toHaveLength(1);
+      expect(workerCalls[0].prompt).toContain(`at ${BASE.slice(0, 7)}`);
+      const adds = calls.filter((x) => x.argv.includes('worktree') && x.argv.includes('add'));
+      expect(adds.some((x) => x.argv.includes('-b') && x.argv.includes(moved))).toBe(false);
+      expect(adds.some((x) => !x.argv.includes('-b') && x.argv.includes('puck/W-1-keep-the-base'))).toBe(true);
+    } finally {
+      release();
+      onGit = null;
+    }
+  });
+
+  it('removes a worktree when creating it fails before the item records it', async () => {
+    failWorktreeAdd = true;
+    const c = client();
+    const worktree = path.join(root.paths.workspace, '.puck', 'worktrees', 'W-1');
+    await c.cmd('item.create', { title: 'Boom', agent: 'implementer' });
+    const failed = await until(c, 1, 'failed');
+    expect(failed.worktree).toBeNull();
+    expect(failed.base).toBeNull();
+    expect(failed.lastError).toContain('git worktree failed');
+    expect(workerCalls).toHaveLength(0);
+    expect(calls.some((x) => x.argv.includes('worktree') && x.argv.includes('remove') && x.argv.includes(worktree))).toBe(true);
   });
 
   it('runs a follow-up that was queued during the turn after the user interrupts', async () => {

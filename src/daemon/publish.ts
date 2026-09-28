@@ -65,7 +65,6 @@ function prBody(item: ItemRecord, envName: string, body?: string): string {
 }
 
 export class Publisher {
-  private readonly inFlight = new Set<string>();
   private readonly now: () => number;
 
   constructor(private readonly deps: PublishDeps) {
@@ -77,13 +76,7 @@ export class Publisher {
     if (item.status !== 'review' && item.status !== 'done') {
       throw new PublishError(`${itemLabel(item)} is ${item.status}; publish it once it is in review.`);
     }
-    if (this.inFlight.has(item.id)) throw new PublishError(`${itemLabel(item)} is already being published.`);
-    this.inFlight.add(item.id);
-    try {
-      return await this.run(item, req, onPushed);
-    } finally {
-      this.inFlight.delete(item.id);
-    }
+    return this.run(item, req, onPushed);
   }
 
   private repoOf(item: ItemRecord): DaemonRepo {
