@@ -37,6 +37,17 @@ describe('parseDefinitionFile', () => {
     expect(f.errors[0].message).not.toMatch(/at line/);
   });
 
+  it('rejects a cyclic anchor and still allows a shared one', () => {
+    for (const text of ['advanced: &a\n  inner: *a\n', 'list: &a\n  - *a\n']) {
+      const f = parseDefinitionFile('agents/x.yaml', text);
+      expect(f.value, text).toBeUndefined();
+      expect(f.errors.map((e) => e.rule), text).toEqual(['yaml.syntax']);
+    }
+    const shared = parseDefinitionFile('x.yaml', 'a: &a\n  x: 1\nb: *a\n');
+    expect(shared.errors).toEqual([]);
+    expect(shared.value).toEqual({ a: { x: 1 }, b: { x: 1 } });
+  });
+
   it('caps alias expansion', () => {
     const bomb = ['a: &a [x, x, x, x, x, x, x, x, x, x]'];
     for (const k of 'bcdefg') bomb.push(`${k}: &${k} [${Array(10).fill(`*${String.fromCharCode(k.charCodeAt(0) - 1)}`).join(', ')}]`);

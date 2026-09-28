@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 import { harnessDescriptors } from '../../src/harness/providers';
 import { definitionSchema, schemaText } from '../../src/harness/definitions/schema';
-import { definitionPaths } from '../../src/harness/definitions/validate';
+import { definitionPaths, isRepoRelativePath } from '../../src/harness/definitions/validate';
 import { exampleFiles } from './definitions-fixtures';
 
 const root = join(__dirname, '..', '..');
@@ -50,6 +50,53 @@ describe('the generated JSON Schema', () => {
     expect(validate(agent({ harness: 'codex', options: { 'tool.Bash': false } }))).toBe(false);
     expect(validate(agent({ effort: 'max' }))).toBe(true);
     expect(validate(agent({ harness: 'codex', effort: 'max' }))).toBe(false);
+  });
+
+  it('accepts a repo path exactly when the validator does', () => {
+    const max = 'a'.repeat(1024);
+    const paths = [
+      'a.md',
+      'prompts/a/b.md',
+      '.github/x.md',
+      'prompts/lead.md',
+      'Dockerfile',
+      'docker/Dev',
+      '...md',
+      'foo./x.md',
+      'a/..b.md',
+      '.hidden/x.md',
+      max,
+      'prompts//lead.md',
+      'prompts/lead.md/',
+      'docker/Dev/',
+      '/prompts/lead.md',
+      'a/../b.md',
+      './a.md',
+      '../a.md',
+      'a/./b.md',
+      'a\\b.md',
+      'prompts/a\0.md',
+      `${max}x`,
+      '',
+      '.',
+      '..',
+      'a//b',
+      'a/',
+    ];
+    const dockerfileOnly = (dockerfile: string) => ({
+      apiVersion: 'puck/v1',
+      kind: 'Environment',
+      name: 'e',
+      dockerfile,
+      repos: [{ github: 'acme/web' }],
+      orchestrator: { agent: 'lead' },
+      agents: [{ agent: 'lead' }],
+    });
+    for (const p of paths) {
+      expect(validate(dockerfileOnly(p)), `dockerfile ${JSON.stringify(p)}`).toBe(isRepoRelativePath(p));
+      const fileOk = isRepoRelativePath(p) && /\.(md|txt)$/.test(p);
+      expect(validate(agent({ instructionsFile: p })), `instructionsFile ${JSON.stringify(p)}`).toBe(fileOk);
+    }
   });
 
   it('rejects single-file mistakes', () => {

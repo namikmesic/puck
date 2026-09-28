@@ -121,13 +121,14 @@ export interface ConfigRepoDeps {
 }
 
 interface CacheFile {
-  v: 1;
+  v: 2;
   sha: string;
   tree: Record<string, TreeBlob>;
   files: Record<string, string>;
 }
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
+const SYMLINK_MODE = '120000';
 /** Snapshots kept in memory; each is a small file map. */
 const MEMORY_ENTRIES = 16;
 /** Parallel blob requests while loading one commit. */
@@ -227,7 +228,7 @@ export function createConfigRepo(deps: ConfigRepoDeps) {
     const started = Date.now();
     const tree: Record<string, TreeBlob> = Object.create(null);
     for (const entry of await client.tree(owner, name, sha)) {
-      if (entry.type === 'blob') tree[entry.path] = { size: entry.size ?? 0, sha: entry.sha };
+      if (entry.type === 'blob' && entry.mode !== SYMLINK_MODE) tree[entry.path] = { size: entry.size ?? 0, sha: entry.sha };
     }
     const files: Record<string, string> = Object.create(null);
     const fetchFiles = (paths: string[]): Promise<void> =>

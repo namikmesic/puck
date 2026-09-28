@@ -572,8 +572,13 @@ describe('pure checks', () => {
   });
 
   it('repo-relative paths', () => {
-    for (const ok of ['a.md', 'prompts/a/b.md', '.github/x.yml']) expect(isRepoRelativePath(ok), ok).toBe(true);
-    for (const bad of ['', '/a', 'a/../b', './a', 'a//b', 'a\\b', 'a/']) expect(isRepoRelativePath(bad), bad).toBe(false);
+    const max = 'a'.repeat(1024);
+    for (const ok of ['a.md', 'prompts/a/b.md', '.github/x.yml', max, `${'a'.repeat(1022)}/b`]) {
+      expect(isRepoRelativePath(ok), ok).toBe(true);
+    }
+    for (const bad of ['', '/a', 'a/../b', './a', 'a//b', 'a\\b', 'a/', 'a\0b', `${max}x`, 'a/./b', '.', '..', 'docker/Dev/']) {
+      expect(isRepoRelativePath(bad), bad).toBe(false);
+    }
   });
 
   it('Docker references', () => {

@@ -74,6 +74,10 @@ export function parseDefinitionFile(path: string, text: string): ParsedFile {
     } catch (err) {
       add(0, 'yaml.syntax', err instanceof Error ? err.message : String(err));
     }
+    if (errors.length === 0 && hasCycle(value)) {
+      value = undefined;
+      add(0, 'yaml.syntax', 'YAML anchors must not form a cycle.');
+    }
   }
 
   function locate(field: FieldPath, opts: { key?: boolean } = {}): SourcePos {
@@ -105,4 +109,19 @@ export function parseDefinitionFile(path: string, text: string): ParsedFile {
 
 function isNodeWithRange(node: unknown): node is Node & { range: [number, number, number] } {
   return typeof node === 'object' && node !== null && Array.isArray((node as { range?: unknown }).range);
+}
+
+function hasCycle(value: unknown): boolean {
+  const stack = new Set<object>();
+  const walk = (node: unknown): boolean => {
+    if (typeof node !== 'object' || node === null) return false;
+    if (stack.has(node)) return true;
+    stack.add(node);
+    for (const child of Object.values(node)) {
+      if (walk(child)) return true;
+    }
+    stack.delete(node);
+    return false;
+  };
+  return walk(value);
 }

@@ -115,10 +115,19 @@ export function byteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
+/**
+ * A repo-relative path: 1-1024 characters, `/`-separated, no empty, `.` or
+ * `..` segment, and no leading slash, backslash, or NUL. The JSON Schema
+ * uses this same pattern.
+ */
+export const REPO_PATH_PATTERN =
+  '^(?=[\\s\\S]{1,1024}$)(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$';
+
+const REPO_PATH_RE = new RegExp(REPO_PATH_PATTERN);
+
 /** A path inside the repo: relative, `/`-separated, no empty, `.` or `..` segments. */
 export function isRepoRelativePath(p: string): boolean {
-  if (!p || p.length > 1024 || p.startsWith('/') || /[\\\0]/.test(p)) return false;
-  return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+  return REPO_PATH_RE.test(p);
 }
 
 /** A commit pin as typed: an abbreviated or full SHA. */

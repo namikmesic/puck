@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -23,6 +23,8 @@ interface Commit {
   files: Files;
   /** Tree sizes that differ from the content (to simulate huge files). */
   sizes?: Record<string, number>;
+  /** Path → link target. Emitted as a mode 120000 blob whose content is that target. */
+  symlinks?: Record<string, string>;
 }
 
 /**
@@ -37,7 +39,10 @@ function fakeConfigRepo(opts: {
   const tags = opts.tags ?? {};
   const branches = opts.branches ?? {};
   const blobs = new Map<string, string>();
-  for (const c of Object.values(opts.commits)) for (const [p, t] of Object.entries(c.files)) blobs.set(blobSha(p + t), t);
+  for (const c of Object.values(opts.commits)) {
+    for (const [p, t] of Object.entries(c.files)) blobs.set(blobSha(p + t), t);
+    for (const [p, target] of Object.entries(c.symlinks ?? {})) blobs.set(blobSha(p + target), target);
+  }
 
   const handler = (req: Recorded): Scripted => {
     const path = req.url.replace(API, '');
@@ -67,6 +72,15 @@ function fakeConfigRepo(opts: {
         sha: blobSha(p + t),
         size: c.sizes?.[p] ?? Buffer.byteLength(t),
       }));
+      for (const [p, target] of Object.entries(c.symlinks ?? {})) {
+        tree.push({
+          path: p,
+          mode: '120000',
+          type: 'blob',
+          sha: blobSha(p + target),
+          size: Buffer.byteLength(target),
+        });
+      }
       return { body: { tree, truncated: false } };
     }
     if ((m = /^\/git\/blobs\/([0-9a-f]{40})$/.exec(path))) {
@@ -174,13 +188,30 @@ describe('definitionsAt', () => {
     expect(first).toBe(7);
 
     const cached = JSON.parse(readFileSync(join(dir, `${V1}.json`), 'utf8'));
-    expect(cached).toMatchObject({ v: 1, sha: V1 });
+    expect(cached).toMatchObject({ v: 2, sha: V1 });
     expect(cached.files['prompts/lead.md']).toBe(files['prompts/lead.md']);
 
     // A fresh instance (the next launch) reads the disk cache.
     const again = setup({}, dir);
     await again.repo.listing({ kind: 'tag', name: 'v1.0.0' });
     expect(again.gh.requests.map((r) => r.url.replace(API, ''))).toEqual(['/commits/tags/v1.0.0']);
+  });
+
+  it('refetches a cache written before symlink blobs were omitted', async () => {
+    const first = setup();
+    writeFileSync(
+      join(first.dir, `${V1}.json`),
+      JSON.stringify({
+        v: 1,
+        sha: V1,
+        tree: { 'prompts/lead.md': { size: 15, sha: 'a'.repeat(40) } },
+        files: { 'prompts/lead.md': 'prompts/real.md' },
+      }),
+    );
+    const again = setup({}, first.dir);
+    const listing = await again.repo.listing({ kind: 'tag', name: 'v1.0.0' });
+    expect(listing.errors).toEqual([]);
+    expect(again.gh.requests.some((r) => r.url.includes('/git/trees/'))).toBe(true);
   });
 
   it('ignores a corrupt or foreign cache file', async () => {
@@ -210,6 +241,30 @@ describe('definitionsAt', () => {
     const line = files['agents/lead.yaml'].split('\n').indexOf('effort: ludicrous') + 1;
     expect(listing.errors[0].url).toBe(`https://github.com/acme/config/blob/${V2}/agents/lead.yaml#L${line}`);
     expect(listing.environments[0]).toMatchObject({ valid: true, startable: false });
+  });
+});
+
+describe('symlink blobs', () => {
+  it('are not files, so a symlinked instructions file or dockerfile does not exist', async () => {
+    const files = exampleFiles();
+    delete files['prompts/lead.md'];
+    files['prompts/real.md'] = 'real instructions\n';
+    files['docker/real.Dockerfile'] = 'FROM node:22\n';
+    patchYaml(files, ENV, { image: undefined, dockerfile: 'Dockerfile' });
+    const { repo } = setup({
+      commits: {
+        [V2]: {
+          files,
+          symlinks: { 'prompts/lead.md': 'prompts/real.md', Dockerfile: 'docker/real.Dockerfile' },
+        },
+      },
+      tags: { 'v2.0.0': V2 },
+    });
+    const listing = await repo.listing({ kind: 'tag', name: 'v2.0.0' });
+    expect(listing.errors.map((e) => [e.file, e.rule])).toEqual([
+      ['agents/lead.yaml', 'instructionsFile.exists'],
+      [ENV, 'dockerfile.exists'],
+    ]);
   });
 });
 

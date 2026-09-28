@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "urn:puck:definitions:v1:0632fac0",
+  "$id": "urn:puck:definitions:v1:6f92a15c",
   "title": "Puck definition",
   "description": "A Puck agent (agents/<name>.yaml) or environment (environments/<name>.yaml) definition.",
   "type": "object",
@@ -108,7 +108,7 @@
           "description": "A .md or .txt file in this repo holding the instructions (at most 64 KB).",
           "allOf": [
             {
-              "pattern": "^(?!/)(?!(?:.*/)?\\.\\.?(?:/|$))[^\\\\]+$"
+              "pattern": "^(?=[\\s\\S]{1,1024}$)(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
             },
             {
               "pattern": "\\.(md|txt)$"
@@ -495,7 +495,7 @@
         "dockerfile": {
           "type": "string",
           "description": "A Dockerfile in this repo, built without a context. Use this or image.",
-          "pattern": "^(?!/)(?!(?:.*/)?\\.\\.?(?:/|$))[^\\\\]+$"
+          "pattern": "^(?=[\\s\\S]{1,1024}$)(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
         },
         "resources": {
           "type": "object",

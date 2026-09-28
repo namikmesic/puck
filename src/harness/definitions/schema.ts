@@ -15,15 +15,12 @@
 import type { ProviderOption } from '../options';
 import { harnessDescriptors, type HarnessDescriptor } from '../providers';
 import { API_VERSION, ENV_KEY_RE, LIMITS, NAME_RE, RESERVED_ENV_PREFIX } from './types';
-import { DOCKER_REF_PATTERN, ORCHESTRATOR_HARNESS, REPO_RE } from './validate';
+import { DOCKER_REF_PATTERN, ORCHESTRATOR_HARNESS, REPO_PATH_PATTERN, REPO_RE } from './validate';
 
 export type JsonSchema = Record<string, unknown>;
 
 export const SCHEMA_DRAFT = 'http://json-schema.org/draft-07/schema#';
 const ID_PREFIX = 'urn:puck:definitions:v1:';
-
-/** A repo-relative path: no leading slash, backslash, or `.`/`..` segment. */
-const REPO_PATH_PATTERN = '^(?!/)(?!(?:.*/)?\\.\\.?(?:/|$))[^\\\\]+$';
 
 /** FNV-1a (32-bit) as 8 hex digits. */
 function fnv1a(text: string): string {
