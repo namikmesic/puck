@@ -16,7 +16,12 @@ export const GITHUB_APP_CLIENT_ID = 'Iv23liEFTqLz112apImK';
 /** The app's URL slug (github.com/apps/<slug>). */
 export const GITHUB_APP_SLUG = 'puck-agents';
 
-/** Development override for the client id (and slug) of a test app. */
+/**
+ * Development overrides for one test app. Setting either variable selects
+ * this pair: each half comes only from its own variable, and the install
+ * link is offered only when both are set. With neither set, the registered
+ * Puck Agents pair is used.
+ */
 export const CLIENT_ID_ENV = 'PUCK_GITHUB_CLIENT_ID';
 export const APP_SLUG_ENV = 'PUCK_GITHUB_APP_SLUG';
 

@@ -222,9 +222,9 @@ export interface GitHubStatus {
   login: string | null;
   /** `owner/name` of the config repo, or null until one is chosen. */
   configRepo: string | null;
-  /** Where to install the GitHub App on an account; null when the build has no app configured. */
+  /** Where to install the GitHub App on an account; null unless the client id and slug are both set. */
   installUrl: string | null;
-  /** False when the build has no GitHub App client id. */
+  /** False when no GitHub App client id is selected. */
   appConfigured: boolean;
   /** The device code of a sign-in in progress, if any. */
   pendingCode: DeviceCodePrompt | null;

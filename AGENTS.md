@@ -88,7 +88,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.
 - **Provider logins** for harnesses run in the system browser (RFC 8252).
-  GitHub uses the OAuth device flow with a client id only (`src/main/providers/github-app.ts`, overridden by `PUCK_GITHUB_CLIENT_ID`) - never add a client secret.
+  GitHub uses the OAuth device flow with a client id only (`src/main/providers/github-app.ts`; `PUCK_GITHUB_CLIENT_ID` and `PUCK_GITHUB_APP_SLUG` override that app as one pair) - never add a client secret.
   The authorize URL goes through `shell.openExternal`.
   The redirect lands on the shared loopback listener `src/main/providers/loopback.ts` (127.0.0.1 only, one request, state check, timeout).
   Claude binds an ephemeral port (`http://localhost:<port>/callback`, the shape Claude Code registers).
