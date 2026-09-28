@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "electron-forge start",
+    "start:isolated": "PUCK_ISOLATED=1 electron-forge start",
     "package": "node scripts/forge.mjs package",
     "make": "node scripts/forge.mjs make",
     "publish": "electron-forge publish",

@@ -83,7 +83,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   Only options needing cross-key coupling get a line in the provider's `compileSettings`.
   A test asserts every overridden option reaches the compiled output.
   Values are sparse (only user overrides are stored and compiled), and the runner base encodes the defaults.
-- **Driving the running app for verification**: launch with `npm start -- -- --remote-debugging-port=9222` and attach playwright-core over CDP.
+- **Driving the running app for verification**: launch with `npm run start:isolated -- -- --remote-debugging-port=9222` (throwaway data dir, mock keychain, never replace HOME) and attach playwright-core over CDP.
   Never call `page.setViewportSize` on the live app.
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.

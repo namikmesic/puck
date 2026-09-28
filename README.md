@@ -197,11 +197,23 @@ npm install
 npm start
 ```
 
+`npm start` uses your real app data folder and macOS Keychain.
+For any automated test or live check, launch isolated instead:
+
+```bash
+npm run start:isolated                                   # a fresh data folder under the OS temp dir
+PUCK_ISOLATED_DIR=/path/to/dir npm run start:isolated    # a data folder you choose (and remove)
+npm run start:isolated -- -- --remote-debugging-port=9222  # attach playwright-core over CDP
+```
+
+Isolated mode (`PUCK_ISOLATED=1`) keeps every app data path in that folder, encrypts secrets with Electron's mock keychain so macOS is never asked, and opens the window without taking focus.
+Never replace `HOME` to isolate Puck: macOS then finds no keychain and pops up a "Reset To Defaults" dialog on the desktop.
+
 ```bash
 npm run typecheck   # strict tsc
 npm run lint
 npm test            # vitest unit suites
-npm run test:e2e    # boots the real app and smoke-checks the UI
+npm run test:e2e    # boots the real app isolated and smoke-checks the UI
 npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
 npm run build:server  # the Puck server as one file, .webpack/server/puck-server.js
 npm run make        # the release ZIP and its checksum, see RELEASE.md
