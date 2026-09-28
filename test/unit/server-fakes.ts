@@ -10,7 +10,8 @@
 
 import { createHash, generateKeyPairSync, randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 import WebSocket from 'ws';
-import { FakeClock } from '../../src/server/clock';
+import { createServer as createNetServer } from 'node:net';
+import { FakeClock, systemClock, type Clock } from '../../src/server/clock';
 import { loadConfig, type ServerConfig } from '../../src/server/config';
 import { createServerLog } from '../../src/server/log';
 import { createPuckServer, type PuckServer } from '../../src/server/server';
@@ -56,6 +57,8 @@ export class FakeGitHub {
   private repoPause: { need: number; seen: number; arrive: () => void; gate: Promise<void> } | null = null;
   /** Access-token life GitHub hands out (8 h, like user-to-server tokens). */
   tokenLifeMs = 8 * 60 * 60_000;
+  /** Installation-token life (one hour, as GitHub's). */
+  installationTokenLifeMs = 60 * 60_000;
 
   constructor(private clock: { now(): number }) {
     const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -232,7 +235,7 @@ export class FakeGitHub {
       this.mints.push({ installationId: Number(mint[1]), repositoryIds: body.repository_ids, permissions: body.permissions });
       return json(201, {
         token: `ghs_${randomBytes(16).toString('hex')}`,
-        expires_at: new Date(this.clock.now() + 60 * 60_000).toISOString(),
+        expires_at: new Date(this.clock.now() + this.installationTokenLifeMs).toISOString(),
         permissions: body.permissions,
       });
     }
@@ -253,6 +256,41 @@ export interface Harness {
 
 export async function startServer(overrides: Record<string, string> = {}, opts: { github?: boolean } = {}): Promise<Harness> {
   const clock = new FakeClock();
+  const { server, github, base, logs, close } = await runServer(clock, overrides, opts);
+  return { server, clock, github, base, logs, close };
+}
+
+/**
+ * The same server on the real clock, listening where its public URL says,
+ * for tests where a separate process (a real runner) signs assertions with
+ * its own clock and derives audiences from the URL the server announced.
+ */
+export async function startLiveServer(overrides: Record<string, string> = {}): Promise<Omit<Harness, 'clock'>> {
+  const port = await freePort();
+  return runServer(systemClock, {
+    PUCK_SERVER_URL: `http://127.0.0.1:${port}`,
+    PUCK_SERVER_HOST: '127.0.0.1',
+    PUCK_SERVER_PORT: String(port),
+    ...overrides,
+  }, {});
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as { port: number };
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function runServer(
+  clock: Clock,
+  overrides: Record<string, string>,
+  opts: { github?: boolean },
+): Promise<Omit<Harness, 'clock'>> {
   const github = new FakeGitHub(clock);
   const env: Record<string, string> = {
     PUCK_SERVER_URL: 'http://puck.test',
@@ -285,7 +323,6 @@ export async function startServer(overrides: Record<string, string> = {}, opts: 
   const { url } = await server.listen();
   return {
     server,
-    clock,
     github,
     base: url,
     logs,
@@ -297,7 +334,7 @@ export async function startServer(overrides: Record<string, string> = {}, opts: 
 }
 
 export async function call(
-  h: Harness,
+  h: Pick<Harness, 'base'>,
   method: string,
   path: string,
   opts: { token?: string; body?: unknown } = {},
@@ -333,7 +370,7 @@ export interface SignedIn {
 }
 
 /** The whole web-flow sign-in, as the app and the browser would do it. */
-export async function signIn(h: Harness, login: string): Promise<SignedIn> {
+export async function signIn(h: Pick<Harness, 'base' | 'github'>, login: string): Promise<SignedIn> {
   const { verifier, challenge } = pkcePair();
   const start = await call(h, 'POST', '/v1/auth/github/start', {
     body: { redirectUri: 'http://127.0.0.1:53123/callback', codeChallenge: challenge, state: 'app-state' },

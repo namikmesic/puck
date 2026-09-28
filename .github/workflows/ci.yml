@@ -33,6 +33,16 @@ jobs:
         run: npm run build:daemon
       - name: Environment daemon runs
         run: node .webpack/daemon/puckd.js version
+      - name: Runner bundle (Node built-ins only)
+        run: npm run build:runner
+      - name: macOS runner tarball runs config.sh --help on its bundled Node
+        run: |
+          npm run package:runner -- --targets macos-arm64
+          mkdir -p "$RUNNER_TEMP/puck-runner" && cd "$RUNNER_TEMP/puck-runner"
+          VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          tar xzf "$GITHUB_WORKSPACE/out/puck-runner/$VERSION/puck-runner-macos-arm64-$VERSION.tar.gz"
+          ./config.sh --help
+          ./bin/node --version
 
   daemon-docker:
     # The daemon's Docker suite needs a Docker engine; macOS runners have none.
@@ -44,9 +54,13 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      # The runner tarball scenario runs the linux-arm64 tarball under emulation.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - name: Build the environment daemon
         run: npm run build:daemon
-      - name: Docker suite (real containers, fake harness)
+      - name: Docker suite (real containers, fake harness, real puck-runner processes)
         run: npm run test:docker
 
   package:

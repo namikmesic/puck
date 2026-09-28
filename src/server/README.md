@@ -4,7 +4,7 @@ The hosted backend for Puck.
 It signs users in with GitHub, keeps the registry of runners (machines users register to host their environments), keeps the index of environments and the repositories each may touch, mints short-lived GitHub installation tokens for them, and relays end-to-end encrypted channels between the app and runners.
 It runs no agents and stores no transcripts, definitions, harness credentials, or environment secrets.
 
-The app does not talk to it yet; runners and the app's client come later.
+Runners (`puck-runner`, `src/puck-runner/`) register with it and connect to it; the app does not talk to it yet, and its client comes later.
 
 ## Run it
 
@@ -44,7 +44,7 @@ Each secret can be given as `NAME` or as `NAME_FILE`, a path to a file holding i
 | `PUCK_GITHUB_CLIENT_SECRET[_FILE]` | The App's client secret, for the web-flow code exchange. |
 | `PUCK_GITHUB_PRIVATE_KEY[_FILE]` | The App's private key: PEM, or PEM base64-encoded on one line. Signs App JWTs. |
 | `PUCK_GITHUB_API_URL`, `PUCK_GITHUB_WEB_URL` | GitHub endpoints (default github.com). Optional. |
-| `PUCK_RUNNER_DOWNLOADS` | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz`. |
+| `PUCK_RUNNER_DOWNLOADS` | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz`: the layout `npm run package:runner` writes under `out/puck-runner/`. |
 | `PUCK_RUNNER_MIN_VERSION` | Runners older than this are refused. |
 
 GitHub sign-in needs the App id, client id, client secret, and private key together, plus `PUCK_SERVER_TOKEN_KEY`. With none of those four App settings the server still starts, and GitHub routes answer 503 `github-not-configured`. Setting some of them but not all four, or setting all four without the token key, stops the server at start. The App slug and the GitHub endpoint URLs are optional.
