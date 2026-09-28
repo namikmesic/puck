@@ -9,7 +9,7 @@ npm run typecheck && npm run lint && npm test
 ```
 
 Lint is at **zero problems** - keep it there.
-CI runs these plus `node --check src/main/runner/runner.js`, the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), and `npm run package`.
+CI runs these plus `node --check src/main/runner/runner.js`, the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), `npm run build:server`, `npm run package`, and a `docker compose up` of the server image.
 
 ## Things that bite
 

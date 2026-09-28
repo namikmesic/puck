@@ -201,7 +201,10 @@ export function createRequestHandler(router: Router, log: ServerLog) {
         else res.destroy();
       }
     } finally {
-      log.info('request', { method, path: url.pathname, status, ms: Date.now() - started });
+      // The health probe runs every few seconds; only its failures are news.
+      if (url.pathname !== '/healthz' || status !== 200) {
+        log.info('request', { method, path: url.pathname, status, ms: Date.now() - started });
+      }
     }
   };
 }

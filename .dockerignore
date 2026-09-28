@@ -1,0 +1,13 @@
+# Only what the puck-server image build copies matters; keep the context small.
+.git
+node_modules
+out
+.webpack
+.claude
+.puck-server
+puck-server.env
+test-results
+playwright-report
+scratchpad
+*.db
+*.db-*

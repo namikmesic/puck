@@ -101,6 +101,14 @@ describe('toolchain pin', () => {
     expect(major(pkg.engines.node)).toBe('22');
   });
 
+  it('builds the server image on the same Node major', () => {
+    const froms = [...read('src/server/Dockerfile').matchAll(/^FROM node:([\d.]+)-/gm)].map((m) => m[1]);
+    expect(froms.length).toBeGreaterThan(0);
+    for (const tag of froms) expect(major(tag)).toBe(major(read('.nvmrc')));
+    // node:sqlite needs no flag from Node 22.13 on.
+    for (const tag of froms) expect(Number(tag.split('.')[1])).toBeGreaterThanOrEqual(13);
+  });
+
   it('installs from the lockfile on that Node in CI', () => {
     const ci = read('.github/workflows/ci.yml');
     expect(ci).toContain('node-version-file: .nvmrc');

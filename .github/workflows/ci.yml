@@ -27,6 +27,8 @@ jobs:
         run: |
           npm run schema
           git diff --exit-code schema/ docs/examples/config-repo/puck.schema.json
+      - name: Puck server bundle (Node built-ins only)
+        run: npm run build:server
 
   package:
     runs-on: macos-latest
@@ -39,3 +41,19 @@ jobs:
       - run: npm ci
       - name: Package the app (fails without a fresh app bundle under out/)
         run: npm run package
+
+  server-image:
+    # macOS runners have no Docker; the server image is Linux anyway.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the puck-server image and bring it up with Compose
+        run: docker compose up -d --build --wait --wait-timeout 120
+      - name: Health check
+        run: curl -fsS http://127.0.0.1:8765/healthz
+      - name: Server logs
+        if: always()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

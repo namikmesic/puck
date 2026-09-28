@@ -16,6 +16,7 @@
     "lint": "eslint --ext .ts,.tsx,.mjs .",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "build:server": "node scripts/build-server.mjs",
     "test:e2e": "node test/e2e/smoke.mjs",
     "schema": "node scripts/gen-schema.mjs"
   },

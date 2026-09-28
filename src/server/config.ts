@@ -19,7 +19,7 @@
  * | PUCK_SERVER_TOKEN_KEY[_FILE] | 32 bytes, base64: encrypts GitHub user tokens at rest |
  * | PUCK_GITHUB_APP_ID, PUCK_GITHUB_CLIENT_ID, PUCK_GITHUB_APP_SLUG | The GitHub App's public identity |
  * | PUCK_GITHUB_CLIENT_SECRET[_FILE] | The App's client secret (web-flow code exchange) |
- * | PUCK_GITHUB_PRIVATE_KEY[_FILE] | The App's private key, PEM (App JWTs) |
+ * | PUCK_GITHUB_PRIVATE_KEY[_FILE] | The App's private key: PEM, or the PEM base64-encoded on one line (for env files) |
  * | PUCK_GITHUB_API_URL, PUCK_GITHUB_WEB_URL | GitHub endpoints (default github.com) |
  * | PUCK_RUNNER_DOWNLOADS | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz` |
  * | PUCK_RUNNER_MIN_VERSION | Runners older than this are refused |
@@ -117,11 +117,16 @@ export function loadConfig(env: Env, read?: (path: string) => string): ServerCon
   if (missing.length < 4) {
     if (missing.length) throw new ConfigError(`GitHub App configuration is incomplete; missing: ${missing.join(', ')}.`);
     if (!tokenKey) throw new ConfigError('PUCK_SERVER_TOKEN_KEY is required when the GitHub App is configured.');
+    let pem = parts.privateKeyPem as string;
+    if (!pem.includes('-----BEGIN')) {
+      pem = Buffer.from(pem, 'base64').toString('utf8');
+      if (!pem.includes('-----BEGIN')) throw new ConfigError('PUCK_GITHUB_PRIVATE_KEY is neither a PEM key nor a base64-encoded one.');
+    }
     github = {
       appId: parts.appId as string,
       clientId: parts.clientId as string,
       clientSecret: parts.clientSecret as string,
-      privateKeyPem: parts.privateKeyPem as string,
+      privateKeyPem: pem,
       slug: plain(env, 'PUCK_GITHUB_APP_SLUG'),
       apiUrl: httpUrl('PUCK_GITHUB_API_URL', plain(env, 'PUCK_GITHUB_API_URL') ?? 'https://api.github.com'),
       webUrl: httpUrl('PUCK_GITHUB_WEB_URL', plain(env, 'PUCK_GITHUB_WEB_URL') ?? 'https://github.com'),

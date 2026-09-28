@@ -25,7 +25,7 @@ const GITHUB = {
   PUCK_GITHUB_APP_ID: '1',
   PUCK_GITHUB_CLIENT_ID: 'Iv1.x',
   PUCK_GITHUB_CLIENT_SECRET: 's',
-  PUCK_GITHUB_PRIVATE_KEY: 'pem',
+  PUCK_GITHUB_PRIVATE_KEY: 'not a key',
 };
 
 describe('loadConfig', () => {
@@ -49,6 +49,13 @@ describe('loadConfig', () => {
     expect(c.github).toMatchObject({ clientSecret: 'from-file', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' });
     expect(c.github?.privateKeyPem).toContain('BEGIN PRIVATE KEY');
     expect(c.publicUrl).toBe('https://puck.example.com');
+  });
+
+  it('accepts the private key base64-encoded on one line', () => {
+    const pem = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    const c = loadConfig({ ...GITHUB, PUCK_GITHUB_PRIVATE_KEY: Buffer.from(pem).toString('base64') });
+    expect(c.github?.privateKeyPem).toBe(pem);
+    expect(() => loadConfig(GITHUB)).toThrow(/neither a PEM/);
   });
 
   it.each([
