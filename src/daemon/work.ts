@@ -21,7 +21,7 @@
 import type { AskQuestion } from '../harness/types';
 import type { ItemPosition, WorkItem } from '../harness/daemon-protocol';
 import type { NoticeKind, TranscriptEntry, TurnEntry } from '../harness/transcript';
-import type { DaemonDefinition, DaemonRepo } from './definition';
+import type { DaemonDefinition, DaemonRepo } from '../harness/env-definition';
 import { capBytes, type Git, GitError, itemBranch, RESULT_LIMITS } from './git';
 import { type Backlog, holdsSlot, itemLabel, ItemStateError } from './items';
 import type { Logger } from './log';

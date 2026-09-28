@@ -5,7 +5,7 @@
  * requeued item continues with.
  */
 
-import type { DaemonDefinition } from './definition';
+import type { DaemonDefinition } from '../harness/env-definition';
 
 export interface WorkerPromptInput {
   number: number;

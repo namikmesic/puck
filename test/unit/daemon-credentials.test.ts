@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Credentials, GRANT_EXPIRING_MS, normalizeGrants } from '../../src/daemon/credentials';
+import { Credentials, EXPIRING_WITHIN_MS, githubAuthOf, normalizeGithub } from '../../src/daemon/credentials';
 import { nullLogger } from '../../src/daemon/log';
 import { exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
 
@@ -12,8 +12,7 @@ beforeEach(() => {
 });
 afterEach(() => root.cleanup());
 
-const grant = { owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_installationtoken', expiresAt: 4102444800000 };
-
+const grant = { owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_abcdefghijk', expiresAt: 99 * 60_000 };
 const claudeCred = JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } });
 
 describe('credential ingest', () => {
@@ -43,8 +42,8 @@ describe('credential ingest', () => {
     expect(fs.statSync(github).mode & 0o777).toBe(0o600);
     expect(creds.envSecrets()).toEqual({ NPM_TOKEN: 's3cret' });
     expect(fs.readFileSync(path.join(root.paths.stagedCredentials, 'claude-code.json'), 'utf8')).toBe(claudeCred);
-    expect(creds.githubAuth()).toEqual({ state: 'ok' });
-    expect(creds.grantFor('OCTO')?.token).toBe('ghs_installationtoken');
+    expect(creds.githubAuth()).toEqual({ state: 'ok', expiresAt: grant.expiresAt });
+    expect(creds.grantFor('OCTO')?.token).toBe('ghs_abcdefghijk');
     expect(creds.grantFor('acme')).toBeNull();
   });
 
@@ -86,31 +85,49 @@ describe('credential ingest', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('accepts only per-owner installation grants with an expiry', () => {
-    expect(normalizeGrants({ grants: [grant] }, 1)).toEqual({ grants: [grant], savedAt: 1 });
-    expect(normalizeGrants([grant], 1)).toEqual({ grants: [grant], savedAt: 1 });
-    // A bare token, a device-flow pair, or a grant without an expiry is not an environment credential.
-    expect(normalizeGrants('ghp_abcdefgh', 1)).toBeNull();
-    expect(normalizeGrants({ accessToken: 'ghu_abcdefgh', refreshToken: 'ghr_abcdefgh', expiresAt: 9 }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [] }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [{ ...grant, expiresAt: undefined }] }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [{ ...grant, token: 'has space x' }] }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [{ ...grant, owner: '-bad' }] }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [{ ...grant, repos: ['../etc'] }] }, 1)).toBeNull();
-    expect(normalizeGrants({ grants: [grant, { ...grant, owner: 'OCTO' }] }, 1)).toBeNull();
-    // Stateless installation tokens are long; they still fit.
-    const long = { ...grant, token: `ghs_${'a'.repeat(1500)}` };
-    expect(normalizeGrants({ grants: [long] }, 1)?.grants[0].token).toBe(long.token);
+  it('accepts only installation token grants with an expiry, one per owner', () => {
+    expect(normalizeGithub({ grants: [grant] }, 1)).toEqual({ grants: [grant], savedAt: 1 });
+    expect(normalizeGithub([grant], 1)).toEqual({ grants: [grant], savedAt: 1 });
+    const other = { ...grant, owner: 'acme', installationId: 7, repos: ['acme/api', 'acme/web'] };
+    expect(normalizeGithub({ grants: [grant, other] }, 1)?.grants).toHaveLength(2);
+    // The stateless installation-token format is far longer than 40 characters.
+    const stateless = `ghs_424242_${'e'.repeat(36)}.${'p'.repeat(400)}.${'s'.repeat(86)}`;
+    expect(normalizeGithub({ grants: [{ ...grant, token: stateless }] }, 1)).not.toBeNull();
+    // A refreshable user-token pair or a bare token is not an environment credential.
+    expect(normalizeGithub({ accessToken: 'ghu_abcdefgh', refreshToken: 'ghr_abcdefgh', expiresAt: 99 }, 1)).toBeNull();
+    expect(normalizeGithub('ghp_abcdefgh', 1)).toBeNull();
+    expect(normalizeGithub({ grants: [] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [{ ...grant, expiresAt: undefined }] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [{ ...grant, token: 'has space x' }] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [{ ...grant, owner: '-bad' }] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [{ ...grant, repos: ['../etc'] }] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [{ ...grant, installationId: 0 }] }, 1)).toBeNull();
+    // Every repository belongs to the grant's owner, and an owner has one grant.
+    expect(normalizeGithub({ grants: [{ ...grant, repos: ['acme/api'] }] }, 1)).toBeNull();
+    expect(normalizeGithub({ grants: [grant, { ...grant, owner: 'OCTO', repos: ['OCTO/x'] }] }, 1)).toBeNull();
   });
 
-  it('reports expiring when any grant has under ten minutes left', () => {
+  it('reads the state from the earliest grant: ok, expiring under ten minutes, missing once all expired', () => {
+    const at = (min: number) => min * 60_000;
+    const cred = { grants: [{ ...grant, expiresAt: at(60) }, { ...grant, owner: 'acme', repos: ['acme/api'], expiresAt: at(30) }], savedAt: 0 };
+    expect(githubAuthOf(null, 0)).toEqual({ state: 'missing' });
+    expect(githubAuthOf(cred, at(0))).toEqual({ state: 'ok', expiresAt: at(30) });
+    expect(githubAuthOf(cred, at(21))).toEqual({ state: 'expiring', expiresAt: at(30) });
+    // One installation's token lapsed: the environment is short of access.
+    expect(githubAuthOf(cred, at(31))).toEqual({ state: 'expiring', expiresAt: at(30) });
+    expect(githubAuthOf(cred, at(61))).toEqual({ state: 'missing', expiresAt: at(30) });
+  });
+
+  it('reports expiring when any stored grant has under ten minutes left', () => {
     let now = 1_000;
     const creds = new Credentials({ paths: root.paths, log: nullLogger, run: fakeRunner().run, asPuck: {}, now: () => now });
     expect(creds.githubAuth()).toEqual({ state: 'missing' });
-    const other = { ...grant, owner: 'acme', repos: ['acme/web'], expiresAt: now + GRANT_EXPIRING_MS + 5 };
+    const soon = now + EXPIRING_WITHIN_MS + 5;
+    const other = { ...grant, owner: 'acme', repos: ['acme/web'], expiresAt: soon };
     expect(creds.putGithub({ grants: [{ ...grant, expiresAt: now + 3_600_000 }, other] })).toBe(true);
-    expect(creds.githubAuth()).toEqual({ state: 'ok' });
+    expect(creds.githubAuth()).toEqual({ state: 'ok', expiresAt: soon });
+    expect(creds.grantFor('acme')?.token).toBe(grant.token);
     now += 10;
-    expect(creds.githubAuth()).toEqual({ state: 'expiring' });
+    expect(creds.githubAuth()).toEqual({ state: 'expiring', expiresAt: soon });
   });
 });

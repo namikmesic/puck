@@ -22,7 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createGitHubClient, type GitHubDeps } from '../harness/github';
 import type { GithubGrant } from '../harness/daemon-protocol';
-import type { DaemonDefinition, DaemonRepo } from './definition';
+import type { DaemonDefinition, DaemonRepo } from '../harness/env-definition';
 import { type Git, pushable } from './git';
 import { itemLabel } from './items';
 import type { Logger } from './log';

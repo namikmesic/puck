@@ -24,7 +24,7 @@ import * as path from 'node:path';
 import type { ItemResult } from '../harness/daemon-protocol';
 import { type CommandRunner, type RunOptions, tailOf } from './exec';
 import { HARNESS_PATH } from './harness/spawn';
-import { validBranch } from './definition';
+import { validBranch } from '../harness/env-definition';
 import { PUCK_USER, type DaemonPaths } from './paths';
 import { mirrorGitEnv } from './provision';
 

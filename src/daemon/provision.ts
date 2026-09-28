@@ -27,7 +27,7 @@ import {
   verifyScript,
 } from '../harness/provisioning';
 import type { Credentials } from './credentials';
-import { referencedHarnesses, type DaemonDefinition } from './definition';
+import { referencedHarnesses, type DaemonDefinition } from '../harness/env-definition';
 import { type CommandRunner, type RunOptions, tailOf } from './exec';
 import { codexWrapperScript, CODEX_AS_PUCK, HARNESS_PATH } from './harness/spawn';
 import type { Logger } from './log';
@@ -237,6 +237,8 @@ export async function provision(deps: ProvisionDeps): Promise<Record<string, str
     if (report.errors.length) throw new ProvisionError('verifying-packages', describePinFailure(report, true));
   });
 
+  // Installation tokens act as the Puck GitHub App, not as a user, so there
+  // is no login to derive an identity from.
   const userName = definition.git.userName ?? 'Puck';
   const userEmail = definition.git.userEmail ?? 'puck@users.noreply.github.com';
   await stage('configuring-git', [userName, userEmail, askpassScript(paths), codexWrapperScript()], async () => {

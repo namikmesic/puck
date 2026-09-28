@@ -1,6 +1,7 @@
 /**
- * `puckd attach`: the app's stdio bridge into the daemon. The app runs
- * `docker exec -i <container> node /opt/puck/puckd.js attach`; this process
+ * `puckd attach`: the stdio bridge into the daemon. The runner hosting the
+ * environment runs `docker exec -i <container> node /opt/puck/puckd.js
+ * attach` for each attach channel and for its token pushes; this process
  * pipes stdin to the control socket and the socket to stdout, and exits
  * when either side closes. With no daemon listening it prints one
  * `daemon-unavailable` error frame and exits 3.

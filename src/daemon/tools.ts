@@ -10,7 +10,7 @@
 
 import type * as Z from 'zod';
 import type { ItemPosition, ItemStatus, Pin, WorkItem } from '../harness/daemon-protocol';
-import type { DaemonDefinition } from './definition';
+import type { DaemonDefinition } from '../harness/env-definition';
 import type { OrchestratorTool } from './harness/types';
 import { type Backlog, itemLabel, publicItem } from './items';
 import type { ItemRecord } from './store/items';

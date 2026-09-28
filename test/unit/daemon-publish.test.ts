@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { GithubGrant } from '../../src/harness/daemon-protocol';
-import { readDefinition } from '../../src/daemon/definition';
+import { readDefinition } from '../../src/harness/env-definition';
 import { Git, itemBranch, parseShortstat, pushable, slugify } from '../../src/daemon/git';
 import { nullLogger } from '../../src/daemon/log';
 import { askpassScript } from '../../src/daemon/provision';

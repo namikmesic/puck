@@ -12,7 +12,7 @@ let client: Awaited<ReturnType<typeof waitReady>>;
 
 beforeAll(async () => {
   env = await startEnv({
-    'github.json': { grants: [{ owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_isolationtoken', expiresAt: 4102444800000 }] },
+    'github.json': { grants: [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_isolationtoken', expiresAt: 4102444800000 }] },
     'secrets.json': { values: { NPM_TOKEN: 'npm-visible-by-design' } },
   });
   client = await waitReady(env.container);

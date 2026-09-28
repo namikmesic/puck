@@ -19,6 +19,8 @@
     "typecheck": "tsc --noEmit",
     "build:server": "node scripts/build-server.mjs",
     "build:daemon": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-daemon.mjs",
+    "build:runner": "node scripts/build-runner.mjs",
+    "package:runner": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/package-runner.mjs",
     "test:e2e": "node test/e2e/smoke.mjs",
     "test:docker": "vitest run --config vitest.docker.config.ts",
     "schema": "node scripts/gen-schema.mjs"

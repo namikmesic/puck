@@ -41,7 +41,7 @@ import {
   referencedHarnesses,
   type DaemonAgent,
   type DaemonDefinition,
-} from './definition';
+} from '../harness/env-definition';
 import { EventLog } from './eventlog';
 import { runCommand, type CommandRunner } from './exec';
 import { createAdapters } from './harness';
@@ -93,8 +93,10 @@ export interface DaemonOptions {
   shutdownGraceMs?: number;
 }
 
-/** Ops a failed daemon still answers. */
-const FAILED_OPS: ReadonlySet<Op> = new Set<Op>(['snapshot.get', 'logs.tail']);
+/** Ops a failed daemon still answers (fresh GitHub grants help the next boot). */
+const FAILED_OPS: ReadonlySet<Op> = new Set<Op>(['snapshot.get', 'logs.tail', 'github.put']);
+/** How often the GitHub credential state is re-read, so `expiring` and `missing` reach clients as time passes. */
+const GITHUB_CHECK_MS = 60_000;
 /** Ops that need a ready environment. */
 const READY_OPS: ReadonlySet<Op> = new Set<Op>(['chat.send', 'credentials.get', 'daemon.upgrade']);
 
@@ -118,6 +120,8 @@ export class Daemon {
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
   private exited = false;
+  private githubShown = '';
+  private githubTimer: ReturnType<typeof setInterval> | null = null;
   private readonly run: CommandRunner;
   private readonly now: () => number;
   private readonly shutdownGraceMs: number;
@@ -252,7 +256,9 @@ export class Daemon {
     if (!migrated.ok) return this.fail(migrated.error);
     this.setState({ status: 'provisioning', detail: 'reading the inbox' });
     this.credentials.ingestInbox((update) => this.applyInstance(update));
-    this.emit({ kind: 'github.auth', ...this.credentials.githubAuth() });
+    this.emitGithubAuth(true);
+    this.githubTimer = setInterval(() => this.emitGithubAuth(false), GITHUB_CHECK_MS);
+    this.githubTimer.unref?.();
 
     const record = this.instance.get();
     if (!record) return this.fail('No environment definition has been delivered to this container.');
@@ -434,6 +440,15 @@ export class Daemon {
     this.emit({ kind: 'instance.status', ...next });
   }
 
+  /** Emits `github.auth` when the state changed since the last one (or always, when forced). */
+  private emitGithubAuth(force: boolean): void {
+    const auth = this.credentials.githubAuth();
+    const shown = JSON.stringify(auth);
+    if (!force && shown === this.githubShown) return;
+    this.githubShown = shown;
+    this.emit({ kind: 'github.auth', ...auth });
+  }
+
   private emit(ev: DaemonEvent): void {
     if (!this.events.append(ev)) throw new Error('The event log could not record an event.');
   }
@@ -571,8 +586,8 @@ export class Daemon {
       return { harness: await this.credentials.getHarness(ids) };
     },
     'github.put': ({ grants }) => {
-      if (!this.credentials.putGithub({ grants })) throw new OpError('invalid-args', 'That is not a usable set of GitHub grants.');
-      this.emit({ kind: 'github.auth', ...this.credentials.githubAuth() });
+      if (!this.credentials.putGithub(grants)) throw new OpError('invalid-args', 'Those are not usable GitHub installation token grants.');
+      this.emitGithubAuth(true);
       return {};
     },
     'secrets.put': ({ values }) => {
@@ -726,6 +741,7 @@ export class Daemon {
 
   private async finishExit(code: number): Promise<void> {
     if (this.exited) return;
+    if (this.githubTimer) clearInterval(this.githubTimer);
     try {
       await this.server?.close();
     } catch (err) {

@@ -52,7 +52,7 @@ import { isStaleResumeError } from '../harness/resume';
 import { harnessDescriptorById } from '../harness/providers';
 import { validateSettings } from '../harness/options';
 import { newId } from '../harness/ulid';
-import type { DaemonAgent } from './definition';
+import type { DaemonAgent } from '../harness/env-definition';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';
@@ -405,7 +405,7 @@ export class Turns {
     return true;
   }
 
-  /** Interrupt every running turn and wait for all of them to end. */
+  /** Interrupt every running turn for a shutdown or upgrade, and wait for all of them to end. */
   async interruptAll(): Promise<void> {
     for (const sessionId of [...this.active.keys()]) this.interrupt(sessionId, 'restart');
     await this.idle();

@@ -1,11 +1,13 @@
 /**
  * The environment daemon's client protocol, declared once in this module.
- * puckd imports it. The desktop app does not import it yet and still talks
- * to the container runner.
+ * puckd imports it, and so does puck-runner for its own short connections
+ * (GitHub token pushes). The desktop app does not import it yet and still
+ * talks to the container runner.
  *
- * Transport: one NDJSON stream per attach (the runner runs `docker exec -i
- * <container> node /opt/puck/puckd.js attach`, which pipes stdio to the
- * daemon's unix socket). The client sends `hello`, then commands; the daemon answers
+ * Transport: one NDJSON stream per attach. The runner hosting the
+ * environment runs `docker exec -i <container> node /opt/puck/puckd.js
+ * attach`, which pipes stdio to the daemon's unix socket, and relays that
+ * stream to the app over an attach channel. The client sends `hello`, then commands; the daemon answers
  * `welcome`, replays the events the client missed, then streams live ones.
  * Every state change the UI renders is an event with a strictly increasing
  * `seq` that survives daemon restarts.
@@ -93,9 +95,23 @@ export interface InstanceState {
 export type GithubAuthState = 'ok' | 'expiring' | 'revoked' | 'missing';
 
 /**
- * One GitHub installation token for the repositories of one owner, minted by
- * the Puck server and pushed by the runner before the previous one expires.
- * The daemon never refreshes a token itself.
+ * The environment's GitHub credential state: `expiring` when a grant has
+ * under ten minutes left, `missing` when no grant is live. `expiresAt` is
+ * the earliest live grant's expiry, so the runner can schedule its next
+ * push without asking the server.
+ */
+export interface GithubAuth {
+  state: GithubAuthState;
+  login?: string;
+  expiresAt?: number;
+}
+
+/**
+ * One short-lived GitHub App installation token for an environment: the
+ * token covers `repos` (`owner/name`) of one installation and expires at
+ * `expiresAt` (epoch ms). An environment whose repositories span several
+ * owners holds one grant per installation. There is no refresh token: the
+ * runner hosting the environment pushes fresh grants before these expire.
  */
 export interface GithubGrant {
   /** The account that owns `repos` (the installation's account login). */
@@ -207,7 +223,7 @@ export interface Snapshot {
   /** The last event seq included in this snapshot; live events follow from head + 1. */
   head: number;
   instance: InstanceState & { pin: Pin | null; sha: string | null };
-  github: { state: GithubAuthState; login?: string };
+  github: GithubAuth;
   sessions: SessionSummary[];
   /** The current orchestrator session, once one exists. */
   orchestratorSessionId: string | null;
@@ -336,7 +352,7 @@ export function daemonCommandFrom(op: unknown, args: unknown): { op: RendererOp;
 export type DaemonEvent =
   | ({ kind: 'instance.status' } & InstanceState)
   | { kind: 'instance.definition'; sha: string; pin: Pin; classes: string[] }
-  | { kind: 'github.auth'; state: GithubAuthState; login?: string }
+  | ({ kind: 'github.auth' } & GithubAuth)
   | { kind: 'session.upsert'; session: SessionSummary }
   | { kind: 'turn.user'; sessionId: string; entry: UserEntry }
   | { kind: 'turn.notice'; sessionId: string; entry: NoticeEntry }
