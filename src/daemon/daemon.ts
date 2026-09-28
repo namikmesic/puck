@@ -84,6 +84,7 @@ export class Daemon {
   private schedulerPaused = false;
   private homeReady = false;
   private stopping = false;
+  private shuttingDown = false;
   private readonly run: CommandRunner;
   private readonly now: () => number;
   private readonly shutdownGraceMs: number;
@@ -416,17 +417,25 @@ export class Daemon {
         this.opts.exit(UPGRADE_EXIT);
       })().catch((err) => {
         log.error('daemon.upgrade-failed', err);
-        if (this.turns && !this.turns.resumeAccepting()) return;
-        this.stopping = false;
-        this.setState(before);
+        void this.settleFailedUpgrade(before);
       });
     });
     return {};
   }
 
+  private async settleFailedUpgrade(before: InstanceState): Promise<void> {
+    if (this.shuttingDown) return;
+    this.stopping = false;
+    await this.turns?.idle();
+    if (this.shuttingDown || this.stopping) return;
+    this.turns?.resumeAccepting();
+    this.setState(before);
+  }
+
   /** SIGTERM: stop taking commands, interrupt every turn, persist, exit 0. */
   async shutdown(): Promise<void> {
-    if (this.stopping && this.state.status === 'stopping') return;
+    if (this.shuttingDown || (this.stopping && this.state.status === 'stopping')) return;
+    this.shuttingDown = true;
     this.stopping = true;
     this.server?.stopAccepting();
     this.turns?.stopAccepting();

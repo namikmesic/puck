@@ -377,6 +377,9 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
     expect(exit).not.toHaveBeenCalled();
     expect(prompts).toEqual(['hang']);
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(prompts).toEqual(['hang']);
   });
 
   it('exits 75 after the shutdown grace', async () => {
@@ -403,6 +406,63 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     for (let i = 0; i < 40 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 25));
     expect(exit).toHaveBeenCalledWith(75);
     expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+  });
+
+  it('resumes the held follow-up after a failed upgrade once the ignored turn settles', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const prompts: string[] = [];
+    let release: (() => void) | null = null;
+    const hang: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req, ctx) => {
+        prompts.push(req.prompt);
+        if (prompts.length === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return;
+        }
+        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
+      },
+    };
+    await boot({
+      shutdownGraceMs: 40,
+      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+    });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
+    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
+    );
+    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+    expect(prompts).toEqual(['hang']);
+    if (!release) throw new Error('the running turn never started');
+    release();
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'turn.user' && f.ev.entry.text === 'later',
+    );
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance.status).toBe('ready');
+    expect(prompts).toContain('later');
+    expect(await c.cmd('chat.send', { text: 'after' })).toMatchObject({ ok: true });
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledWith(0);
   });
 });
 
