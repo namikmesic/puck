@@ -18,7 +18,9 @@ import * as agents from './agents';
 import { docker } from './docker-client';
 import * as environments from './environments';
 import { log, redact } from './log';
+import * as instances from './instances';
 import { byKind } from './providers';
+import * as runners from './runners';
 import { zipBuffer, type ZipEntry } from './zip';
 
 /** What the Settings → Support page shows: version and the two data paths. */
@@ -66,6 +68,16 @@ export interface SupportSummary {
     stage: string | null;
     active: boolean;
   }>;
+  /** The Puck server connection and the user's runners (no keys, no tokens). */
+  runners: {
+    server: string;
+    signedIn: boolean;
+    connection: string;
+    thisMac: { installed: boolean; runnerId: string | null };
+    list: Array<{ id: string; name: string; os: string; arch: string; version: string; status: string; docker: string | null; local: boolean }>;
+  };
+  /** Environments on runners, by id, definition name, runner, and state. */
+  instances: Array<{ id: string; name: string; runnerId: string; status: string; attach: string | null; daemon: string | null; lastSeq: number | null }>;
   docker: { version: string; containers: string[] };
   logs: string[];
 }
@@ -122,6 +134,34 @@ export async function supportSummary(now: Date = new Date()): Promise<SupportSum
       stage: e.stage,
       active: e.active,
     })),
+    runners: (() => {
+      const r = runners.state();
+      return {
+        server: r.server,
+        signedIn: r.signedIn,
+        connection: r.connection,
+        thisMac: { installed: r.local.installed, runnerId: r.local.runnerId },
+        list: r.runners.map((x) => ({
+          id: x.id,
+          name: x.name,
+          os: x.os,
+          arch: x.arch,
+          version: x.version,
+          status: x.status,
+          docker: x.docker?.version ?? x.docker?.problem ?? null,
+          local: x.local,
+        })),
+      };
+    })(),
+    instances: instances.list().map((i) => ({
+      id: i.id,
+      name: i.name,
+      runnerId: i.runnerId,
+      status: i.status,
+      attach: i.attach,
+      daemon: i.daemon?.status ?? null,
+      lastSeq: i.lastSeq,
+    })),
     docker: {
       version: version.code === 0 ? version.stdout.trim() : dockerError(version),
       containers:
@@ -136,7 +176,8 @@ export async function supportSummary(now: Date = new Date()): Promise<SupportSum
 const BUNDLE_README = `Puck support bundle
 
 summary.json  app, Electron, and Docker versions; providers (connected or not);
-              agents and environments by id and name, with option and key NAMES only.
+              agents and environments by id and name, with option and key NAMES only;
+              runners and environments on them by id, name and state.
 logs/         Puck's diagnostic log, newest file first (puck.log, then puck.log.1, ...).
 
 Nothing here is a token, a secret value, an environment-variable value, a

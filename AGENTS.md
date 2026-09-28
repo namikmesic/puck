@@ -92,7 +92,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.
 - **Provider logins** for harnesses run in the system browser (RFC 8252).
-  GitHub uses the OAuth device flow with a client id only (`src/main/providers/github-app.ts`; `PUCK_GITHUB_CLIENT_ID` and `PUCK_GITHUB_APP_SLUG` override that app as one pair) - never add a client secret.
+  GitHub sign-in is the Puck server's web flow (`src/main/server/session.ts`); the server holds the App's client secret and the app keeps only its Puck session - never add a client secret to the app (`src/main/providers/github-app.ts` has the public identity; `PUCK_GITHUB_CLIENT_ID` and `PUCK_GITHUB_APP_SLUG` override that app as one pair).
   The authorize URL goes through `shell.openExternal`.
   The redirect lands on the shared loopback listener `src/main/providers/loopback.ts` (127.0.0.1 only, one request, state check, timeout).
   Claude binds an ephemeral port (`http://localhost:<port>/callback`, the shape Claude Code registers).
@@ -123,7 +123,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 - *Agent* = a named provider configuration (`AgentConfig`).
   The Task-tool sub-agents inside a chat are "sub-agents".
   The process today's containers run is the container runner (`src/main/runner/runner.js`); `puckd` is the environment daemon built beside it.
-  `puck-runner` (`src/puck-runner/`) is the program installed on a machine that hosts environments; the app does not use it yet. See `src/puck-runner/README.md`.
+  `puck-runner` (`src/puck-runner/`) is the program installed on a machine that hosts environments; the app reaches it through `src/main/runners/`. See `src/puck-runner/README.md`.
   A `kind: Agent` file in a config repo is a definition (`src/harness/definitions/`), not this record.
 - `AgentConfig.options` = sparse schema-option overrides.
   `TurnRequest.settings` = the *compiled* SDK fragment, whose wire field names are frozen until the next protocol-revision bump.
@@ -171,7 +171,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   - `settings/cards.ts` and `settings/env-rail.ts` - card-grid kit and the ONE environment op ladder (list cards and detail header share it).
   - `env-progress.ts` - lifecycle presentation: status chip, "stage · elapsed" line, and composer gate text.
     Its tracker merges pushed lifecycle events and runs the elapsed-time ticker.
-  - `settings/providers.ts` - the Providers section grouped by kind, with `github.ts` and `ssh-hosts.ts` for its cards.
+  - `settings/providers.ts` - the Providers section grouped by kind, with `github.ts` and `runners.ts` for its cards.
   - `settings/support.ts` - the Support section: version, data paths, and the support-bundle export button.
   - `nav.ts` - pure nav state machine (`navTransition`, `escapeTarget`).
   - `options.ts`, `util.ts`, `dom.ts`, `format.ts`, `markdown.ts`.

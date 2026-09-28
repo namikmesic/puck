@@ -13,8 +13,10 @@ Every turn executes inside a Docker container you configure.
 - **Environments** are persistent Docker containers with a host directory mounted at `/workspace`.
   Puck installs the provider CLIs and SDKs into the container, deploys a small runner agent, and speaks NDJSON to it over `docker exec` stdio.
   The container is the safety boundary: agents run with full tool access inside it, and the workspace folder is the only host folder they reach.
-- **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH), and integrations (GitHub).
-  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; GitHub signs in through the "Puck Agents" GitHub App (<https://github.com/apps/puck-agents>) with the device flow.
+- **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), runners (where environments run), and integrations (GitHub).
+  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; signing in to Puck with GitHub goes through the Puck server and the "Puck Agents" GitHub App (<https://github.com/apps/puck-agents>) the same way.
+- **Runners** are the machines that host environments: this Mac (set up in one click in **Settings → Providers → Runners**) or any Linux machine you register with **Add runner**, which shows copy-paste commands like GitHub's self-hosted runners.
+  The app reaches a runner through the Puck server's end-to-end encrypted relay, and this Mac's runner over a local socket; see `src/puck-runner/README.md`.
   Tokens are encrypted via the OS keychain.
   Adding a harness is one pure descriptor under `src/harness/providers/`, its host half, one registry entry, and one entry in the container runner's `PROVIDERS` table.
 
@@ -103,7 +105,11 @@ Everything Puck stores on your Mac is in one folder: `~/Library/Application Supp
 | `puck-environments.json` | Environments: name, image, Dockerfile, workspace path, environment variables |
 | `puck-resume.json` | Provider session ids, so a conversation continues after a restart |
 | `puck-convos/<agent id>.json` | One conversation transcript per agent |
-| `puck-providers.json` | Provider settings: Docker-over-SSH hosts and the GitHub config repo |
+| `puck-providers.json` | Provider settings: the GitHub config repo |
+| `puck-session.bin` | Your Puck session (signed in with GitHub), encrypted through the macOS Keychain |
+| `puck-runners.json` | Runner key fingerprints first seen, and the This Mac runner's location |
+| `puck-instances.json` | Per environment on a runner: the last event seen (for replay) and its definition pin |
+| `runner/` | The This Mac runner, when you set it up: its release, registration, key and logs |
 | `puck-defs-cache/<commit>.json` | Cached config-repo files for one commit; safe to delete |
 | `claude-oauth.bin`, `codex-oauth.bin`, `github-oauth.bin` | Provider tokens, encrypted through the macOS Keychain |
 | `env-secrets-<environment id>.bin` | Environment secrets, encrypted the same way |
@@ -233,7 +239,7 @@ The environment daemon, puckd, is built beside that runner (`npm run build:daemo
 ## Run the Puck server locally
 
 The Puck server (`src/server/`) is the backend that runners register with and that holds GitHub sign-in.
-The app does not use it yet.
+The app signs in to it and reaches runners through it, at `http://localhost:8765` unless `PUCK_SERVER_URL` says otherwise.
 For now it runs on your own machine with Docker Compose:
 
 ```bash

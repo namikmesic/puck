@@ -4,7 +4,7 @@ The hosted backend for Puck.
 It signs users in with GitHub, keeps the registry of runners (machines users register to host their environments), keeps the index of environments and the repositories each may touch, mints short-lived GitHub installation tokens for them, and relays end-to-end encrypted channels between the app and runners.
 It runs no agents and stores no transcripts, definitions, harness credentials, or environment secrets.
 
-Runners (`puck-runner`, `src/puck-runner/`) register with it and connect to it; the app does not talk to it yet, and its client comes later.
+Runners (`puck-runner`, `src/puck-runner/`) register with it and connect to it; the desktop app signs in to it and reaches runners through it (`src/main/server/`).
 
 ## Run it
 

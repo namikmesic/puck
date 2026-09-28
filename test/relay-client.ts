@@ -1,6 +1,7 @@
 /**
- * The app's side of the relay, as the tests need it (the desktop app's own
- * client comes later): one `/v1/app/connect` socket, channels opened to a
+ * The app's side of the relay, as the runner tests need it (the desktop
+ * app's own client is src/main/server/connection.ts; this scripted one
+ * keeps the runner's tests independent of it): one `/v1/app/connect` socket, channels opened to a
  * runner with the end-to-end handshake verified against the runner's
  * listed key, and two speakers on top of a channel:
  *
