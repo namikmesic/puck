@@ -84,3 +84,16 @@ A runner removed from Settings while its machine was offline stops with exit sta
   The runner never mounts a host directory or the Docker socket into them, and copies files in as a tar stream.
 - **GitHub tokens.** The runner keeps each environment supplied with one-hour GitHub App installation tokens from the server, renewing them before they expire, so agents can push while your laptop is closed.
   No refresh token reaches the runner or the environment.
+
+## Design notes
+
+For contributors; the code's module headers carry the detail.
+
+- **One bundle, thin scripts.** `config.sh`, `run.sh` and `svc.sh` only call `bin/puck-runner.js` with the bundled Node, so the Docker argv, the service units and their `systemctl`/`launchctl` calls are unit-tested TypeScript. `npm run build:runner` bundles `ws` and allows only Node built-ins; `npm run package:runner` writes the three tarballs, their `.sha256` files and `SHA256SUMS` in the layout the server's `PUCK_RUNNER_DOWNLOADS` serves. macOS is `macos` in file names, as the server names it.
+- **Pinned runtime.** The Node release and the sha256 of each platform's archive are pinned in `scripts/package-runner.mjs`; a download that does not match is refused. Archives come from the runner's own ustar writer (`tar.ts`) with fixed owners and modes and the commit time, so the same commit packs to the same bytes.
+- **Exit codes are the service contract.** 0 stopped, 3 updated (run.sh starts the new version), 78 removed from Puck (systemd's `RestartPreventExitStatus`; run.sh reports it as a clean exit under launchd, which has no such setting).
+- **The channel stream is shared.** `src/channel/stream.ts` (encryption, framing and credit for one channel) is written for both ends; the runner uses it now and the app's client can reuse it. Credit returns only once the consumer took the bytes, so a slow `docker exec` stdin holds the app back rather than filling the runner's memory. An end must install a channel in the same tick its `accept` or `open` is handled: the first data frame can arrive in the same socket read.
+- **GitHub tokens never touch argv or disk on the host.** The first grants go into the copy-in tar at create; later ones go over a short `docker exec … attach` connection as `github.put`. The daemon holds one grant per repository owner and `git-askpass` picks by owner.
+- **Machine scope.** Environments are the machine's `puck=instance` containers: status, rediscovery and `config.sh remove` all see every one of them, including environments kept by an earlier registration on the same machine; removal names them before asking.
+- **Serial per environment.** Control operations on one environment run one at a time, and a self-update waits until none is in flight.
+- **Not built yet.** Key rotation (`--rotate-key`) needs a server endpoint that signs the new key with the old one; `HTTPS_PROXY` is not honoured yet.
