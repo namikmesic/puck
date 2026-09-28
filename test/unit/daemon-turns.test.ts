@@ -1081,4 +1081,254 @@ describe('daemon turns: crash windows and storage failures', () => {
     turns.reconcile();
     expect(events.filter((e) => e.kind === 'turn.end')).toHaveLength(2);
   });
+
+  /** Real commit, but the directory rejects the write after the debounce is cancelled. */
+  function failFinishedCommit(failing: () => boolean): void {
+    const commit = transcripts.commit.bind(transcripts);
+    const transcriptDir = path.join(dir, 'transcripts');
+    transcripts.commit = (sessionId: string) => {
+      const last = [...transcripts.get(sessionId).log].reverse().find((e) => e.kind === 'turn');
+      const finished = last?.kind === 'turn' && last.events.some((e) => e.kind === 'turn-end');
+      if (failing() && finished) {
+        fs.chmodSync(transcriptDir, 0o500);
+        try {
+          commit(sessionId);
+        } finally {
+          fs.chmodSync(transcriptDir, 0o700);
+        }
+        return;
+      }
+      commit(sessionId);
+    };
+  }
+
+  it('keeps the handoff when the turn-end transcript write fails, and a restart resumes it', async () => {
+    const errors: string[] = [];
+    turns = build({ log: { ...nullLogger, error: (message) => errors.push(message) } });
+    failFinishedCommit(() => true);
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+    ];
+    await send(s.id, 'hello');
+    expect(errors).toContain('turn.end-failed');
+    expect(turns.get(s.id)?.status).toBe('running');
+    expect(turns.get(s.id)?.handoff).toMatchObject({ handedOff: true, inputs: [{ text: 'hello', author: 'user' }] });
+    expect(lastTurnKinds(diskLog(s.id))).not.toContain('turn-end');
+
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    expect(turns.send(s.id, 'next')).toEqual({ queued: true });
+    expect(calls.map((c) => c.prompt)).toEqual(['hello']);
+    expect(turns.get(s.id)?.handoff).toMatchObject({ handedOff: true, inputs: [{ text: 'hello', author: 'user' }] });
+    await flushJsonWrites();
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
+      string,
+      { status: string; queue: Array<{ text: string }>; handoff?: { handedOff: boolean } }
+    >;
+    expect(saved[s.id].status).toBe('running');
+    expect(saved[s.id].handoff?.handedOff).toBe(true);
+    expect(saved[s.id].queue).toEqual([{ text: 'next', author: 'user' }]);
+
+    calls = [];
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    turns = build();
+    expect(turns.reconcile().map((t) => t.id)).toEqual([s.id]);
+    expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+    turns.startRestored();
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['Continue.\n\nnext']);
+    expect(turns.get(s.id)?.status).toBe('idle');
+  });
+
+  it('writes the reply before the session is marked idle once the transcript write succeeds', async () => {
+    const sessions = sessionsStore(dir);
+    const idleWithoutReply: string[] = [];
+    const commitSessions = sessions.commit.bind(sessions);
+    sessions.commit = () => {
+      for (const s of Object.values(sessions.get())) {
+        if (s.status === 'idle' && s.turns > 0 && !lastTurnKinds(diskLog(s.id)).includes('turn-end')) idleWithoutReply.push(s.id);
+      }
+      commitSessions();
+    };
+    let failed = false;
+    turns = build({ sessions });
+    const commit = transcripts.commit.bind(transcripts);
+    const transcriptDir = path.join(dir, 'transcripts');
+    transcripts.commit = (sessionId: string) => {
+      const last = [...transcripts.get(sessionId).log].reverse().find((e) => e.kind === 'turn');
+      const finished = last?.kind === 'turn' && last.events.some((e) => e.kind === 'turn-end');
+      if (finished && !failed) {
+        failed = true;
+        fs.chmodSync(transcriptDir, 0o500);
+        try {
+          commit(sessionId);
+        } finally {
+          fs.chmodSync(transcriptDir, 0o700);
+        }
+        return;
+      }
+      commit(sessionId);
+    };
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+      (_req, ctx) => ctx.emit(END),
+    ];
+    await send(s.id, 'hello');
+    expect(turns.get(s.id)?.status).toBe('running');
+    expect(turns.get(s.id)?.handoff?.handedOff).toBe(true);
+    await send(s.id, 'next');
+    expect(calls.map((c) => c.prompt)).toEqual(['hello', 'next']);
+    expect(idleWithoutReply).toEqual([]);
+    const recorded = diskLog(s.id).flatMap((e) => e.events?.map((ev) => ev.kind) ?? []);
+    expect(recorded).toContain('text-delta');
+    expect(recorded).toContain('turn-end');
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+    const users = transcripts.get(s.id).log.flatMap((e) => (e.kind === 'user' ? [e.text] : []));
+    expect(users).toEqual(['hello', 'next']);
+  });
+
+  it('does not resume a turn whose transcript already finished', async () => {
+    const sessions = sessionsStore(dir);
+    const elog = new EventLog(path.join(dir, 'events'));
+    let snap = '';
+    const commitSessions = sessions.commit.bind(sessions);
+    sessions.commit = () => {
+      const session = Object.values(sessions.get()).find((s) => s.status === 'idle' && s.turns > 0);
+      if (session && !snap) {
+        snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
+        fs.cpSync(dir, snap, { recursive: true });
+        return;
+      }
+      commitSessions();
+    };
+    turns = build({
+      sessions,
+      emit: (ev) => {
+        if (!elog.append(ev)) throw new Error('The event log could not record an event.');
+      },
+      retained: () => (elog.since(0) ?? []).map((e) => e.ev),
+    });
+    const s = orchestrator();
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+    ];
+    await send(s.id, 'hello');
+    expect(snap).not.toBe('');
+    const live = dir;
+    dir = snap;
+    try {
+      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { status: string; handoff?: { handedOff: boolean } }>;
+      expect(saved[s.id].status).toBe('running');
+      expect(saved[s.id].handoff?.handedOff).toBe(true);
+      expect(lastTurnKinds(diskLog(s.id))).toEqual(['text-delta', 'turn-end']);
+      const bootLog = new EventLog(path.join(dir, 'events'));
+      events = [];
+      calls = [];
+      attempts = [(_req, ctx) => ctx.emit(END)];
+      turns = build({
+        emit: (ev) => {
+          if (!bootLog.append(ev)) throw new Error('The event log could not record an event.');
+          events.push(ev);
+        },
+        retained: () => (bootLog.since(0) ?? []).map((e) => e.ev),
+      });
+      expect(turns.reconcile()).toEqual([]);
+      expect(turns.resumeInterrupted()).toEqual([]);
+      expect(turns.get(s.id)?.status).toBe('idle');
+      expect(turns.get(s.id)?.handoff).toBeUndefined();
+      expect(events.filter((e) => e.kind === 'turn.end')).toMatchObject([{ stats: { inputTokens: 1, outputTokens: 2, durationMs: 0 } }]);
+      turns.startRestored();
+      await turns.idle();
+      expect(calls).toEqual([]);
+      expect(lastTurnKinds(diskLog(s.id))).toEqual(['text-delta', 'turn-end']);
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes a second identical user line the event log does not hold', async () => {
+    let failSecond = true;
+    let pings = 0;
+    turns = build({
+      emit: (ev) => {
+        if (failSecond && ev.kind === 'turn.user' && ev.entry.text === 'ping' && ++pings === 2) {
+          throw new Error('The event log could not record an event.');
+        }
+        events.push(ev);
+      },
+    });
+    const s = orchestrator();
+    let failRollback = true;
+    const commit = transcripts.commit.bind(transcripts);
+    transcripts.commit = (sessionId: string) => {
+      const recorded = transcripts.get(sessionId).log.filter((e) => e.kind === 'user' && e.text === 'ping').length;
+      if (failRollback && recorded === 1) throw new Error('ENOSPC: no space left on device');
+      commit(sessionId);
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        await gate;
+        ctx.emit(END);
+      },
+      (_req, ctx) => ctx.emit(END),
+    ];
+    turns.send(s.id, 'hello');
+    await new Promise((r) => setTimeout(r, 0));
+    turns.send(s.id, 'ping');
+    turns.send(s.id, 'ping');
+    release();
+    await turns.idle();
+    expect(diskLog(s.id).filter((e) => e.text === 'ping')).toHaveLength(2);
+    expect(events.flatMap((e) => (e.kind === 'turn.user' ? [e.entry.text] : []))).toEqual(['hello', 'ping']);
+    expect(calls.map((c) => c.prompt)).toEqual(['hello']);
+
+    failSecond = false;
+    failRollback = false;
+    turns.send(s.id, 'next');
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['hello', 'ping\n\nping\n\nnext']);
+    expect(events.flatMap((e) => (e.kind === 'turn.user' ? [e.entry.text] : []))).toEqual(['hello', 'ping', 'ping', 'next']);
+  });
+
+  it('queues a send instead of returning a turn id while the previous turn.end is held', async () => {
+    let refuse = 1;
+    turns = build({
+      emit: (ev) => {
+        if (ev.kind === 'turn.end' && refuse > 0) {
+          refuse -= 1;
+          throw new Error('The event log could not record an event.');
+        }
+        events.push(ev);
+      },
+      endRetryMs: 5,
+    });
+    const s = orchestrator();
+    attempts = [(_req, ctx) => ctx.emit(END), (_req, ctx) => ctx.emit(END)];
+    await send(s.id, 'first');
+    expect(events.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['first', 'second']);
+    const starts = events.flatMap((e) => (e.kind === 'turn.start' ? [e.turnId] : []));
+    const ends = events.flatMap((e) => (e.kind === 'turn.end' ? [e.turnId] : []));
+    expect(starts).toHaveLength(2);
+    expect(ends).toEqual(starts);
+  });
 });

@@ -264,16 +264,24 @@ export class Turns {
    * appended) so replay renders a finished turn. The closed entry is
    * fsynced before the session record changes, and a session an earlier
    * boot already marked interrupted gets the same close if its entry is
-   * still open. Every turn the event log started without ending gets a
+   * still open. A turn the transcript already finished is marked idle and
+   * is not resumed. Every turn the event log started without ending gets a
    * `turn.end`. Returns the sessions that became interrupted.
    */
   reconcile(): SessionRecord[] {
     const touched: SessionRecord[] = [];
     const at = this.now();
+    let dirty = false;
     for (const session of this.list()) {
       if (session.status !== 'running' && session.status !== 'interrupted') continue;
       const log = this.deps.transcripts.get(session.id).log;
       const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
+      if (last && finishedTurn(last.events) && (!session.handoff || session.handoff.turnId === last.turnId)) {
+        session.status = 'idle';
+        if (session.handoff) delete session.handoff;
+        dirty = true;
+        continue;
+      }
       if (last && !last.events.some((e) => e.kind === 'turn-end')) {
         for (const e of last.events) if (e.kind === 'ask' && e.answers === undefined) e.answers = null;
         last.events.push({ kind: 'error', message: RESTART_ERROR, ts: at });
@@ -288,9 +296,10 @@ export class Turns {
       if (session.status === 'running') {
         session.status = 'interrupted';
         touched.push(session);
+        dirty = true;
       }
     }
-    if (touched.length) this.deps.sessions.save();
+    if (dirty) this.deps.sessions.save();
     this.restoreQueues();
     this.endOrphanTurns();
     return touched;
@@ -306,8 +315,20 @@ export class Turns {
     const running = new Set([...this.active.values()].map((t) => t.turnId));
     for (const { sessionId, turnId } of open.values()) {
       if (running.has(turnId) || this.unsentEnds.has(turnId)) continue;
-      this.publishEnd({ kind: 'turn.end', sessionId, turnId, stats: { ...ZERO_STATS } });
+      this.publishEnd({ kind: 'turn.end', sessionId, turnId, stats: this.statsFor(sessionId, turnId) });
     }
+  }
+
+  /** Stats of a clean transcript turn-end, or zeros when the turn did not finish. */
+  private statsFor(sessionId: string, turnId: string): TurnStats {
+    if (!this.get(sessionId)) return { ...ZERO_STATS };
+    const log = this.deps.transcripts.get(sessionId).log;
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i];
+      if (entry.kind !== 'turn' || entry.turnId !== turnId) continue;
+      return finishedStats(entry.events) ?? { ...ZERO_STATS };
+    }
+    return { ...ZERO_STATS };
   }
 
   /** Append a `turn.end`. One the event log refuses is kept and retried until it lands. */
@@ -347,7 +368,7 @@ export class Turns {
         if ([...this.unsentEnds.values()].some((ev) => ev.sessionId === sessionId)) continue;
         this.blockedStarts.delete(sessionId);
         const session = this.get(sessionId);
-        if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId)) continue;
+        if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId) || !this.canStart(session)) continue;
         if (this.queues.get(sessionId)?.length) this.startTurn(session);
       }
     }, this.deps.endRetryMs ?? END_RETRY_MS);
@@ -429,7 +450,22 @@ export class Turns {
       this.upsert(session);
       return { queued: true };
     }
-    return { queued: false, turnId: this.startTurn(session) };
+    if (this.endHeld(sessionId)) {
+      this.blockedStarts.add(sessionId);
+      this.upsert(session);
+      return { queued: true };
+    }
+    const turnId = this.startTurn(session);
+    if (turnId === null) {
+      this.upsert(session);
+      return { queued: true };
+    }
+    return { queued: false, turnId };
+  }
+
+  private endHeld(sessionId: string): boolean {
+    for (const ev of this.unsentEnds.values()) if (ev.sessionId === sessionId) return true;
+    return false;
   }
 
   /**
@@ -594,7 +630,30 @@ export class Turns {
     }));
   }
 
-  private startTurn(session: SessionRecord): string {
+  private finishDurable(session: SessionRecord): boolean {
+    if (session.status !== 'running' || !session.handoff || this.active.has(session.id)) return true;
+    const handoff = session.handoff;
+    const log = this.deps.transcripts.get(session.id).log;
+    const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
+    if (!last || last.turnId !== handoff.turnId || !finishedTurn(last.events)) return false;
+    try {
+      this.deps.transcripts.commit(session.id);
+    } catch (err) {
+      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+      return false;
+    }
+    session.status = 'idle';
+    delete session.handoff;
+    try {
+      this.deps.sessions.commit();
+    } catch (err) {
+      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+    }
+    return true;
+  }
+
+  private startTurn(session: SessionRecord): string | null {
+    if (!this.finishDurable(session)) return null;
     const turnId = newId('trn', this.now());
     const turn: ActiveTurn = {
       turnId,
@@ -612,15 +671,12 @@ export class Turns {
       .finally(() => {
         this.active.delete(session.id);
         const next = this.queues.get(session.id);
-        if (turn.started && next?.length && this.accepting && session.status !== 'closed' && this.canStart(session)) {
-          this.startTurn(session);
-        }
-        else {
-          try {
-            this.upsert(session);
-          } catch (err) {
-            this.deps.log.error('turn.event-failed', err, { sessionId: session.id });
-          }
+        const chain = turn.started && !!next?.length && this.accepting && session.status !== 'closed' && this.canStart(session);
+        if (chain && this.startTurn(session) !== null) return;
+        try {
+          this.upsert(session);
+        } catch (err) {
+          this.deps.log.error('turn.event-failed', err, { sessionId: session.id });
         }
       });
     return turnId;
@@ -790,6 +846,8 @@ export class Turns {
         if (tokens > 0) session.lastTurnTokens = tokens;
         if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
         session.lastActiveAt = this.now();
+        const previousStatus = session.status;
+        const previousHandoff = session.handoff;
         // Cut off by shutdown or upgrade: the next boot resumes it.
         if (session.status === 'running') session.status = turn.reason === 'restart' ? 'interrupted' : 'idle';
         delete session.handoff;
@@ -800,10 +858,17 @@ export class Turns {
         // The reply is durable before the record says the turn is over. If the
         // transcript cannot be written, the record on disk stays running and
         // handed off, so a restart resumes the turn instead of dropping it.
+        let transcriptLanded = false;
         try {
           transcripts.commit(session.id);
+          transcriptLanded = true;
           this.deps.sessions.commit();
         } catch (err) {
+          if (!transcriptLanded) {
+            session.status = previousStatus;
+            if (previousHandoff) session.handoff = previousHandoff;
+            else delete session.handoff;
+          }
           log.error('turn.end-failed', err, { sessionId: session.id });
         }
         this.publishEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
@@ -963,19 +1028,24 @@ export class Turns {
 
   /** Publish, in transcript order, each reused line the event log does not already hold. */
   private republish(sessionId: string, log: TranscriptEntry[], reused: TranscriptEntry[]): void {
-    const retained = this.deps.retained();
-    const published = (entry: TranscriptEntry): boolean =>
-      retained.some((ev) => {
-        if (!('sessionId' in ev) || ev.sessionId !== sessionId) return false;
+    const unused = this.deps.retained().filter((ev) => 'sessionId' in ev && ev.sessionId === sessionId);
+    const take = (entry: TranscriptEntry): boolean => {
+      const index = unused.findIndex((ev) => {
         if (ev.kind === 'turn.user' && entry.kind === 'user') {
           return ev.entry.ts === entry.ts && ev.entry.text === entry.text && ev.entry.author === entry.author;
         }
         return ev.kind === 'turn.notice' && entry.kind === 'notice' && sameNotices(ev.entry.notices, entry.notices);
       });
+      if (index < 0) return false;
+      unused.splice(index, 1);
+      return true;
+    };
     for (const entry of log) {
-      if (!reused.includes(entry) || published(entry)) continue;
+      if (entry.kind !== 'user' && entry.kind !== 'notice') continue;
+      const matched = take(entry);
+      if (!reused.includes(entry) || matched) continue;
       if (entry.kind === 'notice') this.deps.emit({ kind: 'turn.notice', sessionId, entry });
-      else if (entry.kind === 'user') this.deps.emit({ kind: 'turn.user', sessionId, entry });
+      else this.deps.emit({ kind: 'turn.user', sessionId, entry });
     }
   }
 
@@ -1044,9 +1114,18 @@ function userTail(log: TranscriptEntry[]): UserEntry[] {
 }
 
 function finishedTurn(events: TurnEntry['events']): boolean {
+  return finishedStats(events) !== null;
+}
+
+function finishedStats(events: TurnEntry['events']): TurnStats | null {
   const ended = events.some((event) => event.kind === 'turn-end');
   const restarted = events.some((event) => event.kind === 'error' && event.message === RESTART_ERROR);
-  return ended && !restarted;
+  if (!ended || restarted) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === 'turn-end') return { ...event.stats };
+  }
+  return null;
 }
 
 /** How many of `inputs`, from the front, the tail already records (as its last lines). */
