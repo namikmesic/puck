@@ -184,7 +184,6 @@ export class Turns {
     }
     if (touched.length) this.deps.sessions.save();
     this.restoreQueues();
-    this.startQueued();
     return touched;
   }
 
@@ -198,7 +197,8 @@ export class Turns {
     }
   }
 
-  private startQueued(): void {
+  /** Start restored inputs on open sessions that are not already running. */
+  startRestored(): void {
     if (!this.accepting) return;
     for (const session of this.list()) {
       if (session.status === 'closed' || this.active.has(session.id)) continue;
@@ -218,9 +218,12 @@ export class Turns {
     this.accepting = false;
   }
 
-  /** Take input again (an upgrade that failed before the swap). */
-  resumeAccepting(): void {
+  /** Take input again after a failed upgrade. False when a turn is still running. */
+  resumeAccepting(): boolean {
+    if (this.active.size > 0) return false;
     this.accepting = true;
+    this.startRestored();
+    return true;
   }
 
   isAccepting(): boolean {

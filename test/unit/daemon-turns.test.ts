@@ -328,9 +328,66 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     events = [];
     turns = build();
     turns.reconcile();
+    expect(calls).toEqual([]);
+    pendingNotices.push({ id: 'ntc_1', kind: 'environment.restarted', at: 1, text: 'The environment restarted.' });
+    turns.startRestored();
     await turns.idle();
-    expect(calls.map((c) => c.prompt)).toEqual(['second']);
+    expect(calls.map((c) => c.prompt)).toEqual([
+      '[Puck] Updates since your last turn:\n- The environment restarted.\n\nsecond',
+    ]);
     expect(turns.get(s.id)?.queue).toEqual([]);
+  });
+
+  it('does not deliver a closed session queue onto the session that replaces it', async () => {
+    const s = orchestrator();
+    attempts = [() => new Promise<void>(() => undefined), (_req, ctx) => ctx.emit(END)];
+    expect(turns.send(s.id, 'first').queued).toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
+    await transcripts.flush();
+    await flushJsonWrites();
+    calls = [];
+    turns = build();
+    turns.reconcile();
+    turns.close(s.id);
+    const replacement = turns.create({ kind: 'orchestrator', agent: 'next', harness: 'claude-code', cwd: '/workspace' });
+    turns.startRestored();
+    await turns.idle();
+    expect(calls).toEqual([]);
+    expect(turns.get(s.id)?.status).toBe('closed');
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'second', author: 'user' }]);
+    expect(turns.get(replacement.id)?.queue).toEqual([]);
+    expect(turns.get(replacement.id)?.status).toBe('idle');
+  });
+
+  it('does not resume accepting while a turn is still active', async () => {
+    const s = orchestrator();
+    attempts = [() => new Promise<void>(() => undefined)];
+    turns.send(s.id, 'first');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
+    turns.stopAccepting();
+    expect(turns.resumeAccepting()).toBe(false);
+    expect(turns.isAccepting()).toBe(false);
+    expect(calls.map((c) => c.prompt)).toEqual(['first']);
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'second', author: 'user' }]);
+  });
+
+  it('starts a held queue when accepting resumes and nothing is running', async () => {
+    const s = orchestrator();
+    let finish: () => void = () => undefined;
+    attempts = [() => new Promise<void>((resolve) => (finish = resolve)), (_req, ctx) => ctx.emit(END)];
+    turns.send(s.id, 'first');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
+    turns.stopAccepting();
+    finish();
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['first']);
+    expect(turns.resumeAccepting()).toBe(true);
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['first', 'second']);
+    expect(turns.isAccepting()).toBe(true);
   });
 
   it('refuses input once it stops accepting, and for closed sessions', () => {

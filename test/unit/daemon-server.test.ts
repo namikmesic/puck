@@ -337,6 +337,48 @@ describe('inbox instance durability', () => {
 });
 
 describe('upgrade now is bounded when a turn ignores interrupt', () => {
+  it('does not resume accepting when the grace elapses and the swap fails', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const prompts: string[] = [];
+    const hang: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req) => {
+        prompts.push(req.prompt);
+        return new Promise<void>(() => undefined);
+      },
+    };
+    await boot({
+      shutdownGraceMs: 40,
+      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+    });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
+    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
+    );
+    await new Promise((r) => setTimeout(r, 80));
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance.status).toBe('stopping');
+    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+    expect(exit).not.toHaveBeenCalled();
+    expect(prompts).toEqual(['hang']);
+  });
+
   it('exits 75 after the shutdown grace', async () => {
     deliver({
       'instance.json': {
@@ -361,6 +403,91 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     for (let i = 0; i < 40 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 25));
     expect(exit).toHaveBeenCalledWith(75);
     expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+  });
+});
+
+describe('restored follow-up through Daemon.start', () => {
+  function scripted(): { prompts: string[]; adapters: Record<string, HarnessAdapter> } {
+    const prompts: string[] = [];
+    const claude: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req, ctx) => {
+        prompts.push(req.prompt);
+        if (prompts.length === 1) return new Promise<void>(() => undefined);
+        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
+      },
+    };
+    return { prompts, adapters: { 'claude-code': claude, codex: { id: 'codex', run: async () => undefined } } };
+  }
+
+  async function queueFollowUp(text: string, adapters: Record<string, HarnessAdapter>): Promise<void> {
+    await boot({ shutdownGraceMs: 30, adapters });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'first' })).toMatchObject({ ok: true, result: { queued: false } });
+    expect(await c.cmd('chat.send', { text })).toMatchObject({ ok: true, result: { queued: true } });
+    await daemon.shutdown();
+  }
+
+  it('gives the restored follow-up the environment.restarted notice', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const { prompts, adapters } = scripted();
+    await queueFollowUp('second', adapters);
+    await boot({ shutdownGraceMs: 30, adapters });
+    const c = client();
+    c.hello(0);
+    const notice = await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'turn.notice',
+    );
+    expect(notice.ev).toMatchObject({
+      kind: 'turn.notice',
+      entry: {
+        notices: [expect.objectContaining({ kind: 'environment.restarted', text: expect.stringContaining('The environment restarted') })],
+      },
+    });
+    const restored = prompts.find((p) => p.includes('second'));
+    expect(restored).toContain('The environment restarted');
+    expect(restored).toContain('second');
+    const user = c.events().find((e) => e.ev.kind === 'turn.user' && e.ev.entry.text === 'second');
+    expect(user?.ev).toMatchObject({ sessionId: notice.ev.kind === 'turn.notice' ? notice.ev.sessionId : '' });
+  });
+
+  it('does not move a replaced orchestrator queue onto the new session', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const { prompts, adapters } = scripted();
+    await queueFollowUp('kept', adapters);
+    const file = path.join(root.paths.state, 'instance.json');
+    const record = JSON.parse(fs.readFileSync(file, 'utf8')) as { definition: { orchestrator: { agent: string } } };
+    record.definition.orchestrator.agent = 'implementer';
+    fs.writeFileSync(file, JSON.stringify(record));
+    await boot({ shutdownGraceMs: 30, adapters });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance.status).toBe('ready');
+    expect(snap.result.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ agent: 'lead', status: 'closed' }),
+        expect.objectContaining({ agent: 'implementer', kind: 'orchestrator', status: 'idle', queued: 0 }),
+      ]),
+    );
+    expect(prompts.some((p) => p.includes('kept'))).toBe(false);
   });
 });
 

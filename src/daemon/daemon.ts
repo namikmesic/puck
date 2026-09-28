@@ -185,6 +185,7 @@ export class Daemon {
       );
     }
     this.ensureOrchestrator(def.value);
+    this.turns.startRestored();
     this.setState({ status: 'ready' });
     this.emit({ kind: 'capacity', ...this.capacity() });
     log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length });
@@ -415,8 +416,8 @@ export class Daemon {
         this.opts.exit(UPGRADE_EXIT);
       })().catch((err) => {
         log.error('daemon.upgrade-failed', err);
+        if (this.turns && !this.turns.resumeAccepting()) return;
         this.stopping = false;
-        this.turns?.resumeAccepting();
         this.setState(before);
       });
     });
