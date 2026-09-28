@@ -5,8 +5,8 @@
  * Every provider package is PINNED (`PinnedPackage`): the install scripts
  * install exact versions, and `verifyScript` + `verifyPins` check what is
  * actually on disk afterwards, so a container never silently runs an SDK the
- * runner or the environment daemon was not written against. The pins are also what a prepared base
- * image (a follow-up) would bake in.
+ * runner or the environment daemon was not written against. The pins are
+ * also what a prepared base image (a follow-up) would bake in.
  */
 
 import type { HarnessDescriptor, PinnedPackage } from './providers';

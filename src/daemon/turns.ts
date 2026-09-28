@@ -539,37 +539,38 @@ export class Turns {
       if (!turn.started) failStart(err);
       else forward({ kind: 'error', message: errText(err) });
     } finally {
-      if (!turn.started) return;
-      this.cancelAsks(session.id);
-      if (!ended) {
-        if (thinking) forward({ kind: 'thinking', active: false });
-        forward({ kind: 'turn-end', stats: { ...ZERO_STATS, durationMs: this.now() - turn.startedAt } });
+      if (turn.started) {
+        this.cancelAsks(session.id);
+        if (!ended) {
+          if (thinking) forward({ kind: 'thinking', active: false });
+          forward({ kind: 'turn-end', stats: { ...ZERO_STATS, durationMs: this.now() - turn.startedAt } });
+        }
+        const tokens = stats.inputTokens + stats.outputTokens;
+        if (tokens > 0) session.lastTurnTokens = tokens;
+        if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
+        session.lastActiveAt = this.now();
+        if (session.status === 'running') session.status = 'idle';
+        delete session.handoff;
+        const t = transcripts.get(session.id);
+        t.turns = session.turns;
+        t.lastTurnTokens = session.lastTurnTokens;
+        t.lastActiveAt = session.lastActiveAt;
+        transcripts.saveNow(session.id);
+        try {
+          this.deps.sessions.commit();
+        } catch (err) {
+          log.error('turn.end-failed', err, { sessionId: session.id });
+        }
+        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
+        log.info('turn.end', {
+          sessionId: session.id,
+          turnId: turn.turnId,
+          ms: this.now() - turn.startedAt,
+          interrupted: turn.interrupted,
+          inputTokens: stats.inputTokens,
+          outputTokens: stats.outputTokens,
+        });
       }
-      const tokens = stats.inputTokens + stats.outputTokens;
-      if (tokens > 0) session.lastTurnTokens = tokens;
-      if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
-      session.lastActiveAt = this.now();
-      if (session.status === 'running') session.status = 'idle';
-      delete session.handoff;
-      const t = transcripts.get(session.id);
-      t.turns = session.turns;
-      t.lastTurnTokens = session.lastTurnTokens;
-      t.lastActiveAt = session.lastActiveAt;
-      transcripts.saveNow(session.id);
-      try {
-        this.deps.sessions.commit();
-      } catch (err) {
-        log.error('turn.end-failed', err, { sessionId: session.id });
-      }
-      this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
-      log.info('turn.end', {
-        sessionId: session.id,
-        turnId: turn.turnId,
-        ms: this.now() - turn.startedAt,
-        interrupted: turn.interrupted,
-        inputTokens: stats.inputTokens,
-        outputTokens: stats.outputTokens,
-      });
     }
   }
 
