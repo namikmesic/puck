@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLock, isServingArgv, releaseLock } from '../../src/daemon/lock';
 import { createLogger, tailLog } from '../../src/daemon/log';
-import { flushJsonWrites, readJsonFile, writeJsonAtomic } from '../../src/daemon/store/jsonfile';
+import { flushJsonWrites, readJsonFile, writeJsonAtomic, writeJsonAtomicSync } from '../../src/daemon/store/jsonfile';
 import { FORMAT_VERSION, migrateState, type Migration } from '../../src/daemon/store/meta';
 import { sessionsStore } from '../../src/daemon/store/sessions';
 import { ulid, newId } from '../../src/harness/ulid';
@@ -29,6 +29,41 @@ describe('daemon stores', () => {
     const store = sessionsStore(dir);
     expect(store.get().ses_1).toMatchObject({ id: 'ses_1', kind: 'orchestrator', status: 'idle', turns: 0, cwd: '/workspace' });
     expect(store.get().bad).toBeUndefined();
+    await flushJsonWrites();
+  });
+
+  it('a failed synchronous commit leaves the previous file and flush still finishes', async () => {
+    const store = sessionsStore(dir);
+    store.get().ses_1 = {
+      id: 'ses_1',
+      kind: 'orchestrator',
+      agent: 'lead',
+      harness: 'claude-code',
+      cwd: '/workspace',
+      status: 'idle',
+      queue: [{ text: 'keep me', author: 'user' }],
+      turns: 0,
+      lastTurnTokens: 0,
+      costUsd: 0,
+      createdAt: 1,
+      lastActiveAt: 1,
+    };
+    store.commit();
+    const good = fs.readFileSync(store.file, 'utf8');
+    fs.chmodSync(dir, 0o500);
+    try {
+      store.get().ses_1.queue = [];
+      store.get().ses_1.status = 'running';
+      expect(() => store.commit()).toThrow();
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+    await flushJsonWrites();
+    expect(fs.readFileSync(store.file, 'utf8')).toBe(good);
+
+    const parent = path.join(dir, 'not-a-directory');
+    fs.writeFileSync(parent, 'x');
+    expect(() => writeJsonAtomicSync(path.join(parent, 'child.json'), { n: 1 })).toThrow();
     await flushJsonWrites();
   });
 });

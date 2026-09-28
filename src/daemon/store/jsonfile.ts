@@ -65,11 +65,11 @@ export function writeJsonAtomicSync(file: string, value: unknown, mode = 0o600):
   const text = JSON.stringify(value);
   const marker = Promise.resolve();
   chains.set(file, marker);
-  writeFileAtomicSync(file, text, mode);
-  const settled = (): void => {
+  try {
+    writeFileAtomicSync(file, text, mode);
+  } finally {
     if (chains.get(file) === marker) chains.delete(file);
-  };
-  marker.then(settled, settled);
+  }
 }
 
 /** Queue an atomic write; resolves once this write, or a newer one for the same file, is durable. */

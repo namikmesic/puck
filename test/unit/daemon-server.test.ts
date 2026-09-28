@@ -11,6 +11,7 @@ import { Daemon } from '../../src/daemon/daemon';
 import { EventLog } from '../../src/daemon/eventlog';
 import type { HarnessAdapter } from '../../src/daemon/harness/types';
 import { createLogger, nullLogger } from '../../src/daemon/log';
+import { writeJsonAtomicSync } from '../../src/daemon/store/jsonfile';
 import { DaemonServer } from '../../src/daemon/server';
 import { defined, exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
 
@@ -302,6 +303,15 @@ describe('puckd server (in process)', () => {
     expect(exit).toHaveBeenCalledWith(1);
     await daemon.shutdown();
     expect(exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits shutdown after a failed synchronous write', async () => {
+    const parent = path.join(root.paths.state, 'not-a-directory');
+    fs.writeFileSync(parent, 'x');
+    expect(() => writeJsonAtomicSync(path.join(parent, 'child.json'), { n: 1 })).toThrow();
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
   });
 });
 

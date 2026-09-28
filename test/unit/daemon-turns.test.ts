@@ -377,12 +377,20 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     const notices = noticesStore(dir);
     notices.get().pending.push({ id: 'ntc_1', kind: 'environment.restarted', at: 1, text: 'The environment restarted.' });
     notices.commit();
+    const errors: string[] = [];
     turns = build({
       sessions,
+      log: { ...nullLogger, error: (message) => errors.push(message) },
       peekNotices: () => notices.get().pending.slice(),
       commitNotices: (count) => {
-        notices.get().pending.splice(0, count);
-        notices.commit();
+        const pending = notices.get().pending;
+        const removed = pending.splice(0, count);
+        try {
+          notices.commit();
+        } catch (err) {
+          pending.unshift(...removed);
+          throw err;
+        }
       },
     });
     const s = orchestrator();
@@ -390,6 +398,11 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     attempts = [(_req, ctx) => ctx.emit(END)];
     turns.send(s.id, 'keep me');
     await turns.idle();
+    expect(errors).toEqual(['turn.crash']);
+    expect(calls).toEqual([]);
+    expect(turns.isRunning(s.id)).toBe(false);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'keep me', author: 'user' }]);
 
     const transcriptFile = path.join(dir, 'transcripts', `${s.id}.json`);
     const savedTranscript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8')) as { log: Array<{ kind: string; text?: string }> };
@@ -411,6 +424,49 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
     expect(log.filter((e) => e.kind === 'notice')).toHaveLength(1);
     expect(calls.map((c) => c.prompt)).toEqual(['[Puck] Updates since your last turn:\n- The environment restarted.\n\nkeep me']);
+  });
+
+  it('recovers a message whose turn-start commit landed before a crash', async () => {
+    const s = orchestrator();
+    attempts = [
+      () => new Promise<void>(() => undefined),
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'continued' });
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'keep me');
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
+      string,
+      { status: string; queue: unknown }
+    >;
+    expect(saved[s.id].status).toBe('running');
+    expect(saved[s.id].queue).toEqual([]);
+    const transcriptFile = path.join(dir, 'transcripts', `${s.id}.json`);
+    const savedTranscript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8')) as { log: Array<{ kind: string; text?: string }> };
+    expect(savedTranscript.log.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual(['keep me']);
+
+    const snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
+    fs.cpSync(dir, snap, { recursive: true });
+    const live = dir;
+    dir = snap;
+    calls = [];
+    try {
+      turns = build();
+      expect(turns.reconcile().map((t) => t.id)).toEqual([s.id]);
+      expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+      turns.startRestored();
+      await turns.idle();
+      expect(calls.map((c) => c.prompt)).toEqual(['keep me']);
+      const log = transcripts.get(s.id).log;
+      expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
+      expect(turns.get(s.id)?.status).toBe('idle');
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
   });
 
   it('resumes an interrupted turn after restart without a new message', async () => {

@@ -268,8 +268,14 @@ export class Daemon {
 
   private commitNotices(count: number): void {
     if (count <= 0) return;
-    this.notices.get().pending.splice(0, count);
-    this.notices.commit();
+    const pending = this.notices.get().pending;
+    const removed = pending.splice(0, count);
+    try {
+      this.notices.commit();
+    } catch (err) {
+      pending.unshift(...removed);
+      throw err;
+    }
   }
 
   private capacity(): Capacity {

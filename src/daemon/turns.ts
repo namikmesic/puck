@@ -7,7 +7,8 @@
  * for the orchestrator, any pending notices) as one prompt. A turn:
  *
  *   - records the inputs as `user`/`notice` entries, durable before the
- *     queue and pending notices are cleared, then a `turn` entry;
+ *     queue and pending notices are cleared and the session is marked
+ *     running, then a `turn` entry;
  *   - runs the session's harness adapter, streaming every HarnessEvent as a
  *     `turn.event` and recording it in the persisted dialect;
  *   - resumes the provider conversation with the session's resume id. If
@@ -74,6 +75,7 @@ interface PendingAsk {
 interface ActiveTurn {
   turnId: string;
   startedAt: number;
+  started: boolean;
   interrupted: boolean;
   /** Interrupt hooks of the current attempt. */
   interruptFns: Array<() => void>;
@@ -211,20 +213,30 @@ export class Turns {
   }
 
   /**
-   * Queue a short continue on every session a restart left interrupted, so
-   * the saved resume id is used without waiting for a new message. Returns
-   * the sessions that will resume.
+ * Queue a short continue on every session a restart left interrupted, so
+ * the saved resume id is used without waiting for a new message. A start
+ * the provider never saw is sent its accepted input again. Returns the
+ * sessions that will resume.
    */
   resumeInterrupted(): SessionRecord[] {
     const resumed: SessionRecord[] = [];
     for (const session of this.list()) {
       if (session.status !== 'interrupted') continue;
       const queue = this.queues.get(session.id) ?? [];
-      if (!queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
-        queue.unshift({ text: RESUME_PROMPT, author: 'system' });
-        this.queues.set(session.id, queue);
-        this.persistQueue(session);
+      let redeliver = false;
+      if (!session.resumeId) {
+        const unsent = unsentUserInputs(this.deps.transcripts.get(session.id).log);
+        if (unsent.length && queue.length === 0) queue.push(...unsent);
+        redeliver =
+          unsent.length > 0 &&
+          queue.length === unsent.length &&
+          queue.every((item, i) => item.text === unsent[i].text && item.author === unsent[i].author);
       }
+      if (!redeliver && !queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
+        queue.unshift({ text: RESUME_PROMPT, author: 'system' });
+      }
+      this.queues.set(session.id, queue);
+      this.persistQueue(session);
       resumed.push(session);
     }
     return resumed;
@@ -347,6 +359,7 @@ export class Turns {
     const turn: ActiveTurn = {
       turnId,
       startedAt: this.now(),
+      started: false,
       interrupted: false,
       interruptFns: [],
       aborter: new AbortController(),
@@ -358,7 +371,7 @@ export class Turns {
       .finally(() => {
         this.active.delete(session.id);
         const next = this.queues.get(session.id);
-        if (next?.length && this.accepting && session.status !== 'closed') this.startTurn(session);
+        if (turn.started && next?.length && this.accepting && session.status !== 'closed') this.startTurn(session);
         else this.upsert(session);
       });
     return turnId;
@@ -369,20 +382,13 @@ export class Turns {
     const inputs = (this.queues.get(session.id) ?? []).slice();
     const notices = session.kind === 'orchestrator' ? this.deps.peekNotices() : [];
     const at = this.now();
-    this.recordDurable(session, inputs, notices, at);
-    const queue = this.queues.get(session.id);
-    if (queue) queue.splice(0, inputs.length);
-    this.persistQueue(session);
-    if (notices.length) this.deps.commitNotices(notices.length);
+    this.commitStarted(session, inputs, notices, at);
+    turn.started = true;
 
     const prompt = [...(notices.length ? [noticePrompt(notices)] : []), ...inputs.map((i) => i.text)].join('\n\n');
     const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
     transcripts.append(session.id, record);
 
-    session.status = 'running';
-    session.turns += 1;
-    session.lastActiveAt = at;
-    this.deps.sessions.save();
     this.upsert(session);
     emit({ kind: 'turn.start', sessionId: session.id, turnId: turn.turnId });
     log.info('turn.start', {
@@ -526,21 +532,58 @@ export class Turns {
     }
   }
 
+  private commitStarted(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
+    this.recordDurable(session, inputs, notices, at);
+    const previous = {
+      status: session.status,
+      queue: session.queue.map((item) => ({ text: item.text, author: item.author })),
+      turns: session.turns,
+      lastActiveAt: session.lastActiveAt,
+    };
+    session.status = 'running';
+    session.turns += 1;
+    session.lastActiveAt = at;
+    session.queue = [];
+    try {
+      this.deps.sessions.commit();
+      if (notices.length) this.deps.commitNotices(notices.length);
+    } catch (err) {
+      session.status = previous.status;
+      session.queue = previous.queue;
+      session.turns = previous.turns;
+      session.lastActiveAt = previous.lastActiveAt;
+      try {
+        this.deps.sessions.commit();
+      } catch (revertErr) {
+        this.deps.log.error('turn.start-failed', revertErr, { sessionId: session.id });
+      }
+      throw err;
+    }
+    const live = this.queues.get(session.id);
+    if (live) live.splice(0, inputs.length);
+  }
+
   private recordDurable(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
     if (inputs.length === 0 && notices.length === 0) return;
     const { transcripts, emit } = this.deps;
     const log = transcripts.get(session.id).log;
     if (!recordedTail(log, inputs, notices)) {
-      if (notices.length) {
-        const entry = { kind: 'notice' as const, ts: at, notices };
-        log.push(entry);
-        emit({ kind: 'turn.notice', sessionId: session.id, entry });
+      const start = log.length;
+      const added: TranscriptEntry[] = [];
+      if (notices.length) added.push({ kind: 'notice', ts: at, notices });
+      for (const input of inputs) added.push({ kind: 'user', text: input.text, author: input.author, ts: at });
+      log.push(...added);
+      try {
+        transcripts.commit(session.id);
+      } catch (err) {
+        log.splice(start);
+        throw err;
       }
-      for (const input of inputs) {
-        const entry = { kind: 'user' as const, text: input.text, author: input.author, ts: at };
-        log.push(entry);
-        emit({ kind: 'turn.user', sessionId: session.id, entry });
+      for (const entry of added) {
+        if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
+        else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
       }
+      return;
     }
     transcripts.commit(session.id);
   }
@@ -574,10 +617,38 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function sawProvider(events: TurnEntry['events']): boolean {
+  return events.some(
+    (e) => e.kind === 'text-delta' || e.kind === 'thinking' || e.kind === 'tool-start' || e.kind === 'tool-end' || e.kind === 'ask',
+  );
+}
+
+function openTurnIndex(log: TranscriptEntry[]): number {
+  const last = log[log.length - 1];
+  if (last?.kind === 'turn' && !sawProvider(last.events)) return log.length - 1;
+  return -1;
+}
+
+function unsentUserInputs(log: TranscriptEntry[]): QueuedInput[] {
+  const last = log[log.length - 1];
+  if (last?.kind === 'turn' && sawProvider(last.events)) return [];
+  const end = openTurnIndex(log);
+  const body = end === -1 ? log : log.slice(0, end);
+  const inputs: QueuedInput[] = [];
+  for (let i = body.length - 1; i >= 0; i--) {
+    const entry = body[i];
+    if (entry.kind !== 'user') break;
+    inputs.unshift({ text: entry.text, author: entry.author });
+  }
+  return inputs;
+}
+
 function recordedTail(log: TranscriptEntry[], inputs: QueuedInput[], notices: Notice[]): boolean {
+  const end = openTurnIndex(log);
+  const body = end === -1 ? log : log.slice(0, end);
   const count = inputs.length + (notices.length > 0 ? 1 : 0);
-  if (log.length < count) return false;
-  const tail = log.slice(log.length - count);
+  if (body.length < count) return false;
+  const tail = body.slice(body.length - count);
   let index = 0;
   if (notices.length) {
     const entry = tail[index++];
