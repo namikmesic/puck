@@ -1,20 +1,28 @@
 /**
  * PUCK_FAKE_ADAPTER: a scripted harness for the Docker suite, compiled
- * into test bundles only (never into the shipped daemon). It streams an
- * echo of the prompt, reports a stable resume id, and understands a few
- * directives so the suite can exercise the real plumbing:
+ * into test bundles only (never into the shipped daemon). It reports a
+ * stable resume id, runs the directive lines of the prompt in order, and
+ * echoes the prompt's last line unless that line is a directive:
  *
- *   !exec <command>   run `sh -c <command>` exactly the way the Claude CLI
- *                     is launched (as the puck user, allowlisted env) and
- *                     return its output in a tool card
- *   !ask              ask one question and echo the answer
- *   !sleep <ms>       wait (interruptible)
+ *   !exec <command>        run `sh -c <command>` exactly the way the Claude
+ *                          CLI is launched (as the puck user, allowlisted
+ *                          env, the session's cwd) and return its output in
+ *                          a tool card
+ *   !ask                   ask one question and echo the answer
+ *   !sleep <ms>            wait (interruptible)
+ *   !tool <name> <json>    call an orchestrator tool in process (orchestrator
+ *                          sessions only), the way the SDK's MCP server does
+ *   !fail <message>        report a turn error
+ *
+ * With PUCK_TEST_REAL_CLAUDE=1 in the daemon's environment, claude-code
+ * keeps its real adapter (the Docker suite's opt-in check of the real CLI
+ * against a stand-in Messages API).
  */
 
 import { claudeSpawner } from './spawn';
 import { harnessDescriptors } from '../../harness/providers';
 import type { Logger } from '../log';
-import type { AdapterContext, AdapterRequest, HarnessAdapter } from './types';
+import { invokeTool, type AdapterContext, type AdapterRequest, type HarnessAdapter, type OrchestratorTool } from './types';
 
 export const FAKE_ADAPTER_MARKER = 'PUCK_FAKE_ADAPTER';
 
@@ -41,29 +49,57 @@ function execAsPuck(log: Logger, req: AdapterRequest, command: string): Promise<
   });
 }
 
-async function runFake(log: Logger, req: AdapterRequest, ctx: AdapterContext): Promise<void> {
+const DIRECTIVE = /^!(exec|ask|sleep|tool|fail)\b/;
+
+async function runFake(log: Logger, tools: () => OrchestratorTool[], req: AdapterRequest, ctx: AdapterContext): Promise<void> {
   const started = Date.now();
   ctx.reportSession(req.resumeId ?? `fake-${req.sessionId}`);
   ctx.emit({ kind: 'thinking', active: true });
   const prompt = req.prompt.trim();
-  const lastLine = prompt.split('\n').pop() ?? '';
-  if (lastLine.startsWith('!exec ')) {
-    const command = lastLine.slice(6);
-    ctx.emit({ kind: 'thinking', active: false });
-    ctx.emit({ kind: 'tool-start', toolId: `${req.turnId}-exec`, tool: 'Bash', summary: command, input: command });
-    const output = await execAsPuck(log, req, command);
-    ctx.emit({ kind: 'tool-end', toolId: `${req.turnId}-exec`, ok: true, output });
-  } else if (lastLine === '!ask') {
-    const answers = await ctx.askUser([
-      { question: 'Continue?', header: 'Fake', multiSelect: false, options: [{ label: 'Yes', description: '' }] },
-    ]);
-    ctx.emit({ kind: 'thinking', active: false });
-    ctx.emit({ kind: 'text-delta', text: `answer: ${answers ? JSON.stringify(answers) : 'dismissed'}` });
-  } else if (lastLine.startsWith('!sleep ')) {
-    await delay(Number(lastLine.slice(7)) || 0, ctx.signal);
-    ctx.emit({ kind: 'thinking', active: false });
-  } else {
-    ctx.emit({ kind: 'thinking', active: false });
+  const lines = prompt.split('\n');
+  const lastLine = lines[lines.length - 1] ?? '';
+  let n = 0;
+  for (const line of lines) {
+    if (ctx.signal.aborted) break;
+    if (!DIRECTIVE.test(line)) continue;
+    const id = `${req.turnId}-${++n}`;
+    if (line.startsWith('!exec ')) {
+      const command = line.slice(6);
+      ctx.emit({ kind: 'thinking', active: false });
+      ctx.emit({ kind: 'tool-start', toolId: id, tool: 'Bash', summary: command, input: command });
+      const output = await execAsPuck(log, req, command);
+      ctx.emit({ kind: 'tool-end', toolId: id, ok: true, output });
+    } else if (line === '!ask') {
+      const answers = await ctx.askUser([
+        { question: 'Continue?', header: 'Fake', multiSelect: false, options: [{ label: 'Yes', description: '' }] },
+      ]);
+      ctx.emit({ kind: 'thinking', active: false });
+      ctx.emit({ kind: 'text-delta', text: `answer: ${answers ? JSON.stringify(answers) : 'dismissed'}` });
+    } else if (line.startsWith('!sleep ')) {
+      await delay(Number(line.slice(7)) || 0, ctx.signal);
+      ctx.emit({ kind: 'thinking', active: false });
+    } else if (line.startsWith('!tool ')) {
+      const [, name, json] = /^!tool (\S+)\s*(.*)$/.exec(line) ?? [];
+      const tool = req.tools === 'orchestrator' ? tools().find((t) => t.name === name) : undefined;
+      ctx.emit({ kind: 'tool-start', toolId: id, tool: `mcp__puck__${name}`, summary: json ?? '', input: json ?? '' });
+      let args: unknown = {};
+      try {
+        args = json ? JSON.parse(json) : {};
+      } catch {
+        args = null;
+      }
+      const result = !tool
+        ? { content: [{ type: 'text' as const, text: `No such tool: ${name}` }], isError: true }
+        : args === null
+          ? { content: [{ type: 'text' as const, text: 'Arguments are not JSON.' }], isError: true }
+          : await invokeTool(tool, args, (tool, ok) => log.info('tool.call', { tool, ok, uid: process.getuid?.() ?? null }));
+      ctx.emit({ kind: 'tool-end', toolId: id, ok: result.isError !== true, output: result.content.map((c) => c.text).join('\n') });
+    } else if (line.startsWith('!fail')) {
+      ctx.emit({ kind: 'error', message: line.slice(5).trim() || 'fake failure' });
+    }
+  }
+  ctx.emit({ kind: 'thinking', active: false });
+  if (!DIRECTIVE.test(lastLine)) {
     const words = `Echo (${req.resumeId ? 'resumed' : 'fresh'}): ${lastLine}`.split(/(?<= )/);
     for (const word of words) {
       if (ctx.signal.aborted) break;
@@ -77,5 +113,14 @@ async function runFake(log: Logger, req: AdapterRequest, ctx: AdapterContext): P
   });
 }
 
-export const testAdapters = (log: Logger): Record<string, HarnessAdapter> =>
-  Object.fromEntries(harnessDescriptors.map((d) => [d.id, { id: d.id, run: (req, ctx) => runFake(log, req, ctx) }]));
+export const testAdapters = (
+  log: Logger,
+  tools: () => OrchestratorTool[] = () => [],
+  real?: () => Record<string, HarnessAdapter>,
+): Record<string, HarnessAdapter> => {
+  const fakes: Record<string, HarnessAdapter> = Object.fromEntries(
+    harnessDescriptors.map((d) => [d.id, { id: d.id, run: (req: AdapterRequest, ctx: AdapterContext) => runFake(log, tools, req, ctx) }]),
+  );
+  if (real && process.env.PUCK_TEST_REAL_CLAUDE === '1') fakes['claude-code'] = real()['claude-code'];
+  return fakes;
+};

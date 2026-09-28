@@ -23,7 +23,15 @@ import type {
   McpSdkServerConfigWithInstance,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { HarnessEvent } from '../../harness/types';
-import { type AdapterContext, type AdapterRequest, type HarnessAdapter, applyOverrides, turnHelpers } from './types';
+import {
+  type AdapterContext,
+  type AdapterRequest,
+  type HarnessAdapter,
+  type OrchestratorTool,
+  applyOverrides,
+  invokeTool,
+  turnHelpers,
+} from './types';
 
 /** The slice of the Claude Agent SDK the adapter uses (tests pass a scripted fake). */
 export interface ClaudeSdk {
@@ -38,10 +46,24 @@ export interface ClaudeSdk {
 
 export interface ClaudeAdapterDeps {
   loadSdk(): Promise<ClaudeSdk>;
+  /** zod, loaded beside the SDK (tool input shapes must use the SDK's zod). */
+  loadZod(): Promise<unknown>;
   spawner: (options: SpawnOptions) => SpawnedProcess;
-  /** The orchestrator's in-process tools (SDK tool definitions); empty = no server. */
-  orchestratorTools(): unknown[];
+  /** The orchestrator's in-process tools; empty = no server. */
+  orchestratorTools(): OrchestratorTool[];
+  /** Called after every tool call (the daemon logs it). */
+  onToolCall?(name: string, ok: boolean): void;
   daemonVersion: string;
+}
+
+/** SDK tool definitions for the orchestrator's `puck` server. Handlers run in this process. */
+export function sdkTools(tools: OrchestratorTool[], z: unknown, onCall?: (name: string, ok: boolean) => void): unknown[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.shape(z),
+    handler: (args: unknown) => invokeTool(tool, args, onCall),
+  }));
 }
 
 type Json = Record<string, unknown>;
@@ -105,6 +127,7 @@ type LooseMessage = {
   type?: string;
   subtype?: string;
   session_id?: string;
+  mcp_servers?: Array<{ name?: string; status?: unknown }>;
   parent_tool_use_id?: unknown;
   message?: { content?: Block[] };
   event?: {
@@ -125,7 +148,7 @@ export async function runClaude(
   req: AdapterRequest,
   sdk: ClaudeSdk,
   ctx: AdapterContext,
-  deps: Pick<ClaudeAdapterDeps, 'spawner' | 'orchestratorTools' | 'daemonVersion'>,
+  deps: Pick<ClaudeAdapterDeps, 'spawner' | 'orchestratorTools' | 'daemonVersion' | 'onToolCall'> & { zod?: unknown },
 ): Promise<void> {
   const started = Date.now();
   const h = turnHelpers(ctx, req.resumeId);
@@ -167,11 +190,16 @@ export async function runClaude(
   if (req.agent.effort && req.agent.effort !== 'auto') {
     options.effort = req.agent.effort as Options['effort'];
   }
-  if (req.tools === 'orchestrator' && sdk.createSdkMcpServer) {
+  if (req.tools === 'orchestrator' && sdk.createSdkMcpServer && deps.zod) {
     const tools = deps.orchestratorTools();
     if (tools.length) {
       options.mcpServers = {
-        puck: sdk.createSdkMcpServer({ name: 'puck', version: deps.daemonVersion, tools, alwaysLoad: true }),
+        puck: sdk.createSdkMcpServer({
+          name: 'puck',
+          version: deps.daemonVersion,
+          tools: sdkTools(tools, deps.zod, deps.onToolCall),
+          alwaysLoad: true,
+        }),
       };
     }
   }
@@ -231,6 +259,10 @@ export async function runClaude(
     }
     if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
       h.session(msg.session_id);
+      const puck = options.mcpServers ? msg.mcp_servers?.find((s) => s.name === 'puck') : undefined;
+      if (puck && puck.status !== 'connected') {
+        ctx.emit({ kind: 'error', message: `The orchestrator's Puck tools are unavailable (${String(puck.status)}).` });
+      }
     } else if (msg.type === 'stream_event' && msg.event) {
       const ev = msg.event;
       const startedThinking =
@@ -311,6 +343,7 @@ export async function runClaude(
 
 export function createClaudeAdapter(deps: ClaudeAdapterDeps): HarnessAdapter {
   let sdk: Promise<ClaudeSdk> | null = null;
+  let zod: Promise<unknown> | null = null;
   return {
     id: 'claude-code',
     async run(req, ctx) {
@@ -319,7 +352,15 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps): HarnessAdapter {
         sdk = null; // a failed import is retried on the next turn
         throw err;
       });
-      await runClaude(req, loaded, ctx, deps);
+      let z: unknown;
+      if (req.tools === 'orchestrator') {
+        zod ??= deps.loadZod();
+        z = await zod.catch((err: unknown) => {
+          zod = null;
+          throw err;
+        });
+      }
+      await runClaude(req, loaded, ctx, { ...deps, zod: z });
     },
   };
 }

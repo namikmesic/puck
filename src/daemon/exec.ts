@@ -8,6 +8,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
 
 export interface RunOptions {
   /** Drop to this uid/gid (the puck user); absent = root. */
@@ -18,6 +19,12 @@ export interface RunOptions {
   env?: Record<string, string>;
   input?: string;
   timeoutMs?: number;
+  /**
+   * Write stdout (bytes, uncapped) to this file instead of capturing it.
+   * The daemon opens it (mode 0600) as itself, so a child running as the
+   * puck user never chooses or opens a root-owned path.
+   */
+  stdoutTo?: string;
 }
 
 export interface RunResult {
@@ -39,7 +46,9 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
     let stderr = '';
     let timedOut = false;
     let child;
+    let sink: fs.WriteStream | null = null;
     try {
+      if (opts.stdoutTo) sink = fs.createWriteStream(opts.stdoutTo, { mode: 0o600, flags: 'w' });
       child = spawn(cmd, args, {
         cwd: opts.cwd,
         env: opts.env ?? { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin' },
@@ -49,9 +58,17 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
         detached: true,
       });
     } catch (err) {
+      sink?.destroy();
       resolve({ code: null, stdout: '', stderr: (err as Error).message, timedOut: false });
       return;
     }
+    const sinkDone = sink
+      ? new Promise<string | null>((done) => {
+          const s = sink as fs.WriteStream;
+          s.on('error', (err) => done(err.message));
+          s.on('close', () => done(null));
+        })
+      : Promise.resolve(null);
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
@@ -65,9 +82,12 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
           }
         }, opts.timeoutMs)
       : null;
-    child.stdout.on('data', (d: Buffer) => {
-      if (stdout.length < MAX_CAPTURE) stdout += d.toString('utf8');
-    });
+    if (sink) child.stdout.pipe(sink);
+    else {
+      child.stdout.on('data', (d: Buffer) => {
+        if (stdout.length < MAX_CAPTURE) stdout += d.toString('utf8');
+      });
+    }
     child.stderr.on('data', (d: Buffer) => {
       if (stderr.length < MAX_CAPTURE) stderr += d.toString('utf8');
     });
@@ -76,7 +96,10 @@ export const runCommand: CommandRunner = (argv, opts = {}) =>
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
+      void sinkDone.then((sinkError) => {
+        if (sinkError) resolve({ code: code === 0 ? 1 : code, stdout, stderr: stderr + sinkError, timedOut });
+        else resolve({ code, stdout, stderr, timedOut });
+      });
     });
     child.stdin.on('error', () => undefined);
     child.stdin.end(opts.input ?? '');

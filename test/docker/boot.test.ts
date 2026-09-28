@@ -10,7 +10,7 @@ let client: Awaited<ReturnType<typeof waitReady>>;
 
 beforeAll(async () => {
   env = await startEnv({
-    'github.json': { accessToken: 'ghu_testtokenvalue', refreshToken: 'ghr_testtokenvalue', expiresAt: 4102444800000, login: 'octo' },
+    'github.json': { grants: [{ owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_testtokenvalue', expiresAt: 4102444800000 }] },
     'secrets.json': { values: { NPM_TOKEN: 'npm-secret' } },
     'harness-claude-code.json': JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } }),
   });
@@ -26,13 +26,13 @@ describe('Docker scenario 1: boot', () => {
     const snap = await client.cmd<Snapshot>('snapshot.get');
     expect(snap.envId).toBe(env.envId);
     expect(snap.instance.status).toBe('ready');
-    expect(snap.github).toEqual({ state: 'ok', login: 'octo' });
+    expect(snap.github).toEqual({ state: 'ok' });
     expect(snap.sessions.map((s) => [s.kind, s.agent, s.cwd])).toEqual([['orchestrator', 'lead', '/workspace']]);
     const logs = await client.cmd<{ text: string }>('logs.tail', { lines: 200 });
     for (const stage of ['checking-runtime', 'creating-user', 'configuring-git', 'syncing-repos', 'writing-credentials']) {
       expect(logs.text).toContain(`"stage":"${stage}"`);
     }
-    expect(logs.text).not.toContain('ghu_testtokenvalue');
+    expect(logs.text).not.toContain('ghs_testtokenvalue');
     expect(logs.text).not.toContain('npm-secret');
   });
 

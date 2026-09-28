@@ -12,7 +12,7 @@ let client: Awaited<ReturnType<typeof waitReady>>;
 
 beforeAll(async () => {
   env = await startEnv({
-    'github.json': { accessToken: 'ghu_isolationtoken', refreshToken: 'ghr_isolationtoken', expiresAt: 4102444800000, login: 'octo' },
+    'github.json': { grants: [{ owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_isolationtoken', expiresAt: 4102444800000 }] },
     'secrets.json': { values: { NPM_TOKEN: 'npm-visible-by-design' } },
   });
   client = await waitReady(env.container);
@@ -38,7 +38,7 @@ describe('Docker scenario 6: isolation', () => {
   it('cannot read the GitHub credential or list the daemon state', async () => {
     const out = await asAgent('cat /puck/state/secrets/github.json; ls /puck/state');
     expect(out).toContain('Permission denied');
-    expect(out).not.toContain('ghu_isolationtoken');
+    expect(out).not.toContain('ghs_isolationtoken');
   });
 
   it('cannot connect to the control socket', async () => {
@@ -53,7 +53,7 @@ describe('Docker scenario 6: isolation', () => {
     expect(out).toContain('NPM_TOKEN=npm-visible-by-design');
     expect(out).toContain('NODE_ENV=test');
     expect(out).not.toMatch(/PUCK_/);
-    expect(out).not.toContain('ghu_isolationtoken');
+    expect(out).not.toContain('ghs_isolationtoken');
   });
 
   it('cannot escalate: no sudo, no setuid way back to root', async () => {

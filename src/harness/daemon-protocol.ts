@@ -3,9 +3,9 @@
  * puckd imports it. The desktop app does not import it yet and still talks
  * to the container runner.
  *
- * Transport: one NDJSON stream per attach (`docker exec -i <container> node
- * /opt/puck/puckd.js attach`, which pipes stdio to the daemon's unix
- * socket). The client sends `hello`, then commands; the daemon answers
+ * Transport: one NDJSON stream per attach (the runner runs `docker exec -i
+ * <container> node /opt/puck/puckd.js attach`, which pipes stdio to the
+ * daemon's unix socket). The client sends `hello`, then commands; the daemon answers
  * `welcome`, replays the events the client missed, then streams live ones.
  * Every state change the UI renders is an event with a strictly increasing
  * `seq` that survives daemon restarts.
@@ -92,13 +92,20 @@ export interface InstanceState {
 
 export type GithubAuthState = 'ok' | 'expiring' | 'revoked' | 'missing';
 
-/** An environment's GitHub credential: always a device-flow token pair (epoch-ms expiries). */
-export interface GithubTokenPair {
-  accessToken: string;
-  refreshToken: string;
+/**
+ * One GitHub installation token for the repositories of one owner, minted by
+ * the Puck server and pushed by the runner before the previous one expires.
+ * The daemon never refreshes a token itself.
+ */
+export interface GithubGrant {
+  /** The account that owns `repos` (the installation's account login). */
+  owner: string;
+  installationId: number;
+  /** `owner/name` of every repository this token reaches. */
+  repos: string[];
+  token: string;
+  /** Epoch ms. */
   expiresAt: number;
-  refreshExpiresAt?: number | null;
-  login?: string | null;
 }
 
 export type SessionKind = 'orchestrator' | 'worker';
@@ -236,7 +243,7 @@ export interface OpMap {
   'definition.apply': { args: { definition: unknown; pin: Pin }; result: { classes: string[] } };
   'credentials.put': { args: { harness: { id: string; content: string }[] }; result: Record<string, never> };
   'credentials.get': { args: Record<string, never>; result: { harness: { id: string; content: string }[] } };
-  'github.put': { args: { token: GithubTokenPair }; result: Record<string, never> };
+  'github.put': { args: { grants: GithubGrant[] }; result: Record<string, never> };
   'secrets.put': { args: { values: Record<string, string> }; result: Record<string, never> };
   'scheduler.pause': { args: Record<string, never>; result: Record<string, never> };
   'scheduler.resume': { args: Record<string, never>; result: Record<string, never> };

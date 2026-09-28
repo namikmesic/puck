@@ -5,7 +5,9 @@
  * a scripted fake that needs no account and no network.
  */
 
-import type { HarnessAdapter } from './types';
+import type { HarnessAdapter, OrchestratorTool } from './types';
 import type { Logger } from '../log';
 
-export const testAdapters: ((log: Logger) => Record<string, HarnessAdapter>) | null = null;
+export const testAdapters:
+  | ((log: Logger, tools: () => OrchestratorTool[], real: () => Record<string, HarnessAdapter>) => Record<string, HarnessAdapter>)
+  | null = null;

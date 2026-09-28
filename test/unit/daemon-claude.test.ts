@@ -6,10 +6,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AskQuestion, HarnessEvent } from '../../src/harness/types';
 import { runClaude, type ClaudeSdk } from '../../src/daemon/harness/claude';
 import { claudeSpawner, harnessEnv } from '../../src/daemon/harness/spawn';
-import type { AdapterContext, AdapterRequest } from '../../src/daemon/harness/types';
+import * as z from 'zod';
+import type { AdapterContext, AdapterRequest, OrchestratorTool, ToolResult } from '../../src/daemon/harness/types';
 import { nullLogger } from '../../src/daemon/log';
 import { claudeHarness } from '../../src/harness/providers';
 import fixture from '../fixtures/claude-events.json';
+
+type SdkTool = { inputSchema: unknown; handler(args: unknown, extra: unknown): Promise<ToolResult> };
 
 // The Claude adapter is a port of the container runner's runClaude. The
 // port is checked two ways: directly against a scripted SDK stream, and
@@ -85,7 +88,17 @@ async function drive(script: Script, over: Partial<AdapterRequest> = {}, answers
     signal: new AbortController().signal,
   };
   const s = scriptedSdk(script);
-  const tools = [{ name: 'backlog_list' }];
+  const tools: OrchestratorTool[] = [
+    {
+      name: 'backlog_list',
+      description: 'List the backlog.',
+      shape: (zod) => ({ limit: (zod as typeof z).number().int().max(100).optional() }),
+      run: (args) => {
+        if (args.limit === 0) throw new Error('limit must be positive\nsecond line');
+        return { items: [], uid: process.getuid?.() ?? null };
+      },
+    },
+  ];
   const spawner = (): never => {
     throw new Error('not spawned in tests');
   };
@@ -93,6 +106,7 @@ async function drive(script: Script, over: Partial<AdapterRequest> = {}, answers
     spawner,
     orchestratorTools: () => tools,
     daemonVersion: '0.0.1+abc',
+    zod: z,
   });
   return { events, sessions, asked, spawner, ...s };
 }
@@ -258,10 +272,25 @@ describe('daemon Claude adapter', () => {
     expect(sdk.createSdkMcpServer).toHaveBeenCalledWith({
       name: 'puck',
       version: '0.0.1+abc',
-      tools: [{ name: 'backlog_list' }],
+      tools: [{ name: 'backlog_list', description: 'List the backlog.', inputSchema: expect.any(Object), handler: expect.any(Function) }],
       alwaysLoad: true,
     });
     expect(Object.keys(calls[0].options.mcpServers as object)).toEqual(['puck']);
+    const [tool] = (vi.mocked(sdk.createSdkMcpServer).mock.calls[0][0] as { tools: SdkTool[] }).tools;
+    // A zod raw shape: the SDK's MCP server validates arguments with it.
+    expect(z.object(tool.inputSchema as z.ZodRawShape).safeParse({ limit: 500 }).success).toBe(false);
+    // The handler runs here, in the daemon's own process.
+    const ok = await tool.handler({ limit: 5 }, {});
+    expect(ok.isError).toBeUndefined();
+    expect(JSON.parse(ok.content[0].text)).toEqual({ items: [], uid: process.getuid?.() ?? null });
+    // A failure is one line, flagged as an error.
+    expect(await tool.handler({ limit: 0 }, {})).toEqual({ content: [{ type: 'text', text: 'limit must be positive' }], isError: true });
+  });
+
+  it('gives workers no tool server', async () => {
+    const { calls, sdk } = await drive(script, { tools: null });
+    expect(sdk.createSdkMcpServer).not.toHaveBeenCalled();
+    expect(calls[0].options.mcpServers).toBeUndefined();
   });
 
   it('reports an early end with the result text', async () => {
