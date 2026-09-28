@@ -115,10 +115,12 @@ function targetRow(
 function addHostForm(ctx: EnvProvidersContext): HTMLElement {
   const form = el('form', 'pv-add-host config-form');
   const label = el('input', '');
+  label.dataset.keep = 'ssh-label';
   label.placeholder = 'Label (optional)';
   label.maxLength = 64;
   label.setAttribute('aria-label', 'Host label');
   const host = el('input', '');
+  host.dataset.keep = 'ssh-host';
   host.placeholder = 'ssh://user@host or a Host alias';
   host.setAttribute('aria-label', 'SSH host');
   host.spellcheck = false;

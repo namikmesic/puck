@@ -61,6 +61,7 @@ function codeBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo, code: 
 
 function patForm(ctx: GitHubCardContext, info: IntegrationProviderInfo, open: boolean): HTMLElement {
   const details = el('details', 'pv-pat');
+  details.dataset.keep = 'pat';
   details.open = open;
   details.appendChild(el('summary', '', 'Use a personal access token instead'));
   details.appendChild(
@@ -74,6 +75,7 @@ function patForm(ctx: GitHubCardContext, info: IntegrationProviderInfo, open: bo
   create.addEventListener('click', () => void ctx.bridge.openExternal(info.github.patUrl));
   const form = el('form', 'pv-pat-form config-form');
   const input = el('input', '');
+  input.dataset.keep = 'pat';
   input.type = 'password';
   input.placeholder = 'github_pat_…';
   input.autocomplete = 'off';

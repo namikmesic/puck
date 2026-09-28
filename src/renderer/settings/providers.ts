@@ -32,11 +32,16 @@ export interface ProvidersContext {
 }
 
 export interface ProvidersView {
+  /** Rebuild every card (a save or sign-in change: forms start empty). */
   render(infos?: ProviderInfo[]): Promise<void>;
   /** Stop polling a pending sign-in (leaving Settings abandons it). */
   stopPolling(): void;
-  /** The window regained focus: re-check (installations may have changed on GitHub). */
-  refresh(): void;
+  /**
+   * The window regained focus: re-check (installations may have changed on
+   * GitHub), keeping what the user was typing - they often switch away to
+   * try ssh in Terminal or to create a token, and come back to finish.
+   */
+  refresh(): Promise<void>;
 }
 
 export function initProvidersView(ctx: ProvidersContext): ProvidersView {
@@ -113,46 +118,84 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     return card;
   }
 
+  const containers = [els.harnessCards, els.envCards, els.integrationCards];
+
+  /** In-progress form state, keyed by the `data-keep` tags the cards set. */
+  interface FormState {
+    values: Map<string, string>;
+    open: Set<string>;
+  }
+
+  function snapshotForms(): FormState {
+    const state: FormState = { values: new Map(), open: new Set() };
+    for (const c of containers) {
+      c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
+        if (i.value) state.values.set(i.dataset.keep as string, i.value);
+      });
+      c.querySelectorAll<HTMLDetailsElement>('details[data-keep]').forEach((d) => {
+        if (d.open) state.open.add(d.dataset.keep as string);
+      });
+    }
+    return state;
+  }
+
+  function restoreForms(state: FormState): void {
+    for (const c of containers) {
+      c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
+        const value = state.values.get(i.dataset.keep as string);
+        if (value !== undefined) i.value = value;
+      });
+      c.querySelectorAll<HTMLDetailsElement>('details[data-keep]').forEach((d) => {
+        if (state.open.has(d.dataset.keep as string)) d.open = true;
+      });
+    }
+  }
+
+  async function draw(given: ProviderInfo[] | undefined, keepForms: boolean): Promise<void> {
+    if (!bridge) return;
+    const token = grid.next();
+    if (!given && !keepForms) for (const c of containers) loadingInto(c);
+    const infos = given ?? (await bridge.providers().catch((err: unknown) => {
+      say(errText(err));
+      return [] as ProviderInfo[];
+    }));
+    if (!grid.isCurrent(token)) return;
+    rendered = true;
+    ctx.onProviders?.(infos);
+    const shared = {
+      bridge,
+      say,
+      copy: ctx.copy,
+      onChange: (next?: ProviderInfo[]) => void view.render(next),
+      onSignInStarted: (id: string) => pollUntilSettled(id),
+    };
+    // Taken as late as possible, so typing during the fetch is kept too.
+    const kept = keepForms ? snapshotForms() : null;
+    for (const c of containers) {
+      c.removeAttribute('aria-busy');
+      c.textContent = '';
+    }
+    for (const info of infos) {
+      if (info.kind === 'harness') {
+        els.harnessCards.appendChild(harnessCard(info));
+      } else if (info.kind === 'environment') {
+        els.envCards.appendChild(envProviderCard(shared, info));
+      } else {
+        els.integrationCards.appendChild(githubCard(shared, info));
+      }
+      // Settings reopened mid-sign-in: resume watching it.
+      if (!poll && info.kind !== 'environment' && info.auth.pending && !info.auth.connected) {
+        pollUntilSettled(info.id);
+      }
+    }
+    if (kept) restoreForms(kept);
+  }
+
   const view: ProvidersView = {
-    async render(given) {
-      if (!bridge) return;
-      const token = grid.next();
-      if (!given) for (const c of [els.harnessCards, els.envCards, els.integrationCards]) loadingInto(c);
-      const infos = given ?? (await bridge.providers().catch((err: unknown) => {
-        say(errText(err));
-        return [] as ProviderInfo[];
-      }));
-      if (!grid.isCurrent(token)) return;
-      rendered = true;
-      ctx.onProviders?.(infos);
-      const shared = {
-        bridge,
-        say,
-        copy: ctx.copy,
-        onChange: (next?: ProviderInfo[]) => void view.render(next),
-        onSignInStarted: (id: string) => pollUntilSettled(id),
-      };
-      for (const c of [els.harnessCards, els.envCards, els.integrationCards]) {
-        c.removeAttribute('aria-busy');
-        c.textContent = '';
-      }
-      for (const info of infos) {
-        if (info.kind === 'harness') {
-          els.harnessCards.appendChild(harnessCard(info));
-        } else if (info.kind === 'environment') {
-          els.envCards.appendChild(envProviderCard(shared, info));
-        } else {
-          els.integrationCards.appendChild(githubCard(shared, info));
-        }
-        // Settings reopened mid-sign-in: resume watching it.
-        if (!poll && info.kind !== 'environment' && info.auth.pending && !info.auth.connected) {
-          pollUntilSettled(info.id);
-        }
-      }
-    },
+    render: (given) => draw(given, false),
     stopPolling,
-    refresh() {
-      if (rendered && !poll) void view.render();
+    async refresh() {
+      if (rendered && !poll) await draw(undefined, true);
     },
   };
   return view;

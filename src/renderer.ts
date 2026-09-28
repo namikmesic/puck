@@ -362,7 +362,7 @@ const providersView = initProvidersView({
 
 // Back from github.com (installing the app, approving a sign-in): re-check.
 window.addEventListener('focus', () => {
-  if (navState.view === 'settings' && navState.lastSection === 'providers') providersView.refresh();
+  if (navState.view === 'settings' && navState.lastSection === 'providers') void providersView.refresh();
 });
 
 /* ---------- Agents (settings section + detail page) ---------- */

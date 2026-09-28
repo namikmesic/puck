@@ -293,3 +293,43 @@ describe('GitHub card', () => {
     expect(bridge.providerAuthLogout).toHaveBeenCalledWith('github');
   });
 });
+
+describe('focus refresh', () => {
+  it('keeps what the user was typing in the Add host and token forms', async () => {
+    const githubInstallations = vi.fn(async () => []);
+    const { els, view } = mount([ssh(), gh({ login: 'me' }, { connected: true })], { githubInstallations });
+    await view.render();
+    const [label, host] = [...els.envCards.querySelectorAll<HTMLInputElement>('form.pv-add-host input')];
+    label.value = 'Build box';
+    host.value = 'ssh://me@box';
+    const pat = card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement;
+    pat.open = true;
+    (pat.querySelector('input') as HTMLInputElement).value = 'github_pat_half';
+
+    // The user switched to Terminal or the browser and came back.
+    await view.refresh();
+
+    const [label2, host2] = [...els.envCards.querySelectorAll<HTMLInputElement>('form.pv-add-host input')];
+    expect(label2).not.toBe(label); // the cards were rebuilt (a fresh re-check)...
+    expect(label2.value).toBe('Build box'); // ...but the typing survived
+    expect(host2.value).toBe('ssh://me@box');
+    const pat2 = card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement;
+    expect(pat2.open).toBe(true);
+    expect((pat2.querySelector('input') as HTMLInputElement).value).toBe('github_pat_half');
+    expect(githubInstallations).toHaveBeenCalledTimes(2); // installations were re-checked
+
+    // An explicit re-render (after a save) starts the forms empty again.
+    await view.render();
+    const [label3, host3] = [...els.envCards.querySelectorAll<HTMLInputElement>('form.pv-add-host input')];
+    expect(label3.value).toBe('');
+    expect(host3.value).toBe('');
+    expect((card(els.integrationCards, 'github').querySelector('details.pv-pat') as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it('does nothing before the section has rendered once', async () => {
+    const { view, bridge } = mount([ssh()]);
+    await view.refresh();
+    expect(bridge.providers).not.toHaveBeenCalled();
+  });
+});
+
