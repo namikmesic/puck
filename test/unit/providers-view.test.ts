@@ -21,6 +21,7 @@ const harness = (over: Partial<HarnessProviderInfo> = {}): HarnessProviderInfo =
   systemPromptHint: '',
   configOptions: [],
   capabilities: { supportsAsk: true, subAgents: true, subAgentTranscript: true, streamsTokens: true, reportsCost: true },
+  status: { state: 'disconnected', detail: 'Not connected' },
   auth: { connected: false, pending: false, detail: 'Not connected' },
   ...over,
 });
@@ -29,22 +30,23 @@ const local: EnvironmentProviderInfo = {
   kind: 'environment',
   id: 'docker-local',
   label: 'Local Docker',
+  status: { state: 'connected', detail: 'docker CLI at /opt/homebrew/bin/docker' },
   targets: [{ id: 'local', label: 'This Mac', host: null }],
-  detail: 'docker CLI at /opt/homebrew/bin/docker',
 };
 
 const ssh = (hosts: Array<{ id: string; label: string; host: string }> = []): EnvironmentProviderInfo => ({
   kind: 'environment',
   id: 'docker-ssh',
   label: 'Docker over SSH',
+  status: { state: hosts.length ? 'connected' : 'disconnected', detail: `${hosts.length} hosts` },
   targets: hosts,
-  detail: `${hosts.length} hosts`,
 });
 
 const gh = (over: Partial<IntegrationProviderInfo['github']> = {}, auth: Partial<IntegrationProviderInfo['auth']> = {}): IntegrationProviderInfo => ({
   kind: 'integration',
   id: 'github',
   label: 'GitHub',
+  status: { state: 'disconnected', detail: 'Not connected — sign in with GitHub' },
   auth: { connected: false, pending: false, detail: 'Not connected — sign in with GitHub', ...auth },
   github: {
     login: null,
@@ -64,7 +66,7 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
     providerAuthStart: vi.fn(async () => ({ url: 'https://claude.ai/oauth' })),
     providerAuthCancel: vi.fn(async () => undefined),
     providerAuthLogout: vi.fn(async () => undefined),
-    targetHealth: vi.fn(async () => ({ ok: true, version: '27.3.1', problem: null, message: 'Docker 27.3.1', checkedAt: 1 })),
+    targetHealth: vi.fn(async () => ({ ok: true, detail: 'Docker 27.3.1', serverVersion: '27.3.1', problem: null })),
     sshHostAdd: vi.fn(async () => infos),
     sshHostRemove: vi.fn(async () => infos),
     githubInstallations: vi.fn(async () => []),
@@ -124,10 +126,8 @@ describe('environment providers', () => {
   it('Check shows the health dot and message for a target', async () => {
     const targetHealth = vi.fn(async () => ({
       ok: false,
-      version: null,
+      detail: 'SSH sign-in to box failed.',
       problem: 'ssh-auth' as const,
-      message: 'SSH sign-in to box failed.',
-      checkedAt: 1,
     }));
     const { els, view } = mount([ssh([{ id: 'h1', label: 'Box', host: 'ssh://me@box' }])], { targetHealth });
     await view.render();

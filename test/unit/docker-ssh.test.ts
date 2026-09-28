@@ -31,25 +31,25 @@ describe('SSH host health classification', () => {
 
   for (const [problem, stderr, extra] of cases) {
     it(`${problem}: ${stderr.slice(-60)}`, () => {
-      const h = classifyHealth(fail(stderr, extra), 'ssh://me@box', 42);
-      expect(h).toMatchObject({ ok: false, version: null, problem, checkedAt: 42 });
-      expect(h.message.length).toBeGreaterThan(20);
-      expect(h.message).toContain('ssh://me@box');
+      const h = classifyHealth(fail(stderr, extra), 'ssh://me@box');
+      expect(h).toMatchObject({ ok: false, problem });
+      expect(h.serverVersion).toBeUndefined();
+      expect(h.detail.length).toBeGreaterThan(20);
+      expect(h.detail).toContain('ssh://me@box');
     });
   }
 
   it('each problem has its own message', () => {
-    const messages = new Set(cases.map(([, stderr, extra]) => classifyHealth(fail(stderr, extra), 'box').message.split(':')[0]));
+    const messages = new Set(cases.map(([, stderr, extra]) => classifyHealth(fail(stderr, extra), 'box').detail.split(':')[0]));
     expect(messages.size).toBeGreaterThanOrEqual(8);
   });
 
   it('a healthy host reports the server version', () => {
-    expect(classifyHealth({ code: 0, stdout: '27.3.1\n', stderr: '' }, 'box', 7)).toEqual({
+    expect(classifyHealth({ code: 0, stdout: '27.3.1\n', stderr: '' }, 'box')).toEqual({
       ok: true,
-      version: '27.3.1',
+      detail: 'Docker 27.3.1',
+      serverVersion: '27.3.1',
       problem: null,
-      message: 'Docker 27.3.1',
-      checkedAt: 7,
     });
   });
 
@@ -57,7 +57,7 @@ describe('SSH host health classification', () => {
     expect(classifyHealth(fail('Permission denied (publickey).'), null).problem).toBe('unknown');
     expect(classifyHealth(fail('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'), null)).toMatchObject({
       problem: 'daemon-down',
-      message: 'Docker is not responding — is Docker running?',
+      detail: 'Docker is not responding — is Docker running?',
     });
     expect(
       classifyHealth({ code: -1, stdout: '', stderr: 'Docker CLI not found. Searched: /usr/local/bin/docker.' }, null).problem,
@@ -88,10 +88,12 @@ describe('docker -H for remote targets', () => {
   });
 
   it('the SSH provider binds its runner and health check to the host', async () => {
+    expect(dockerSshProvider.status()).toEqual({ state: 'disconnected', detail: 'No hosts yet' });
     const host = addSshHost({ label: 'Build box', host: 'ssh://me@box' });
+    expect(dockerSshProvider.status()).toEqual({ state: 'connected', detail: '1 host' });
     expect(dockerSshProvider.targets()).toEqual([{ id: host.id, label: 'Build box', host: 'ssh://me@box' }]);
     const health = await dockerSshProvider.health(host.id);
-    expect(health).toMatchObject({ ok: true, version: '27.3.1' });
+    expect(health).toMatchObject({ ok: true, serverVersion: '27.3.1' });
     expect(calls[0].args).toEqual(['-H', 'ssh://me@box', 'version', '--format', '{{.Server.Version}}']);
     expect(calls[0].opts).toEqual({ timeoutMs: HEALTH_TIMEOUT_MS });
     await dockerSshProvider.runner(host.id)(['inspect', 'x']);

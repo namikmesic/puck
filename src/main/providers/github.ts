@@ -16,8 +16,8 @@
  */
 
 import type {
-  GitHubInstallation,
-  GitHubRepo,
+  GithubInstallation,
+  GithubRepo,
   GitHubStatus,
   ProviderAuthInfo,
 } from '../../harness/bridge';
@@ -34,7 +34,7 @@ import {
 import { log } from '../log';
 import { githubClientId, githubInstallUrl, GITHUB_PAT_URL } from './github-app';
 import { createDeviceSignIn } from './github-device';
-import { createOAuthAccount, type LogoutFence } from './oauth';
+import { createOAuthAccount, signInStatus, type LogoutFence } from './oauth';
 import { githubSettings, updateGithubSettings } from './providers-store';
 import type { IntegrationProvider } from './types';
 
@@ -132,6 +132,7 @@ export const githubProvider: IntegrationProvider = {
   kind: 'integration',
   id: 'github',
   label: 'GitHub',
+  status: () => signInStatus(account, authStatus()),
   auth: {
     status: authStatus,
     async start() {
@@ -186,11 +187,11 @@ export async function setPersonalToken(token: string): Promise<void> {
   }
 }
 
-function toRepo(r: GhRepo): GitHubRepo {
+function toRepo(r: GhRepo): GithubRepo {
   return { fullName: r.full_name, private: r.private, defaultBranch: r.default_branch, htmlUrl: r.html_url };
 }
 
-export async function installations(): Promise<GitHubInstallation[]> {
+export async function installations(): Promise<GithubInstallation[]> {
   if (!account.load() || githubSettings().mode === 'pat') return [];
   const list = await githubClient().installations();
   return list.map((i) => ({
@@ -203,7 +204,7 @@ export async function installations(): Promise<GitHubInstallation[]> {
 }
 
 /** Repositories the sign-in reaches: installation repos (app) or /user/repos (token). */
-export async function repositories(): Promise<GitHubRepo[]> {
+export async function repositories(): Promise<GithubRepo[]> {
   if (!account.load()) throw new Error('Sign in to GitHub first.');
   const client = githubClient();
   let repos: GhRepo[];

@@ -92,10 +92,10 @@ function problemMessage(problem: TargetProblem, where: string | null, stderr: st
  * Classify one `docker version` result. `host` is the remote host for SSH
  * targets, null for the local engine (ssh-only problems never match there).
  */
-export function classifyHealth(r: DockerResult, host: string | null, now = Date.now()): TargetHealth {
-  const version = r.stdout.trim();
-  if (r.code === 0 && version) {
-    return { ok: true, version, problem: null, message: `Docker ${version}`, checkedAt: now };
+export function classifyHealth(r: DockerResult, host: string | null): TargetHealth {
+  const serverVersion = r.stdout.trim();
+  if (r.code === 0 && serverVersion) {
+    return { ok: true, detail: `Docker ${serverVersion}`, serverVersion, problem: null };
   }
   let problem: TargetProblem = 'unknown';
   if (r.timedOut) {
@@ -105,5 +105,5 @@ export function classifyHealth(r: DockerResult, host: string | null, now = Date.
     const rule = RULES.find((x) => (x.remote === null || x.remote === remote) && x.re.test(r.stderr));
     if (rule) problem = rule.problem;
   }
-  return { ok: false, version: null, problem, message: problemMessage(problem, host, r.stderr), checkedAt: now };
+  return { ok: false, detail: problemMessage(problem, host, r.stderr), problem };
 }

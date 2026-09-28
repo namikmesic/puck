@@ -18,7 +18,9 @@ export type {
   HarnessProvider,
   IntegrationProvider,
   Provider,
+  ProviderBase,
   ProviderKind,
+  ProviderStatus,
 } from './types';
 
 /** Registration order matters within a kind: the first harness is the default. */
@@ -60,7 +62,7 @@ export function defaultHarness(): HarnessProvider {
   return byKind('harness')[0];
 }
 
-export async function toInfo(provider: Provider): Promise<ProviderInfo> {
+export function toInfo(provider: Provider): ProviderInfo {
   switch (provider.kind) {
     case 'harness':
       return {
@@ -72,6 +74,7 @@ export async function toInfo(provider: Provider): Promise<ProviderInfo> {
         systemPromptHint: provider.systemPromptHint,
         configOptions: [...provider.configOptions],
         capabilities: provider.capabilities,
+        status: provider.status(),
         auth: provider.auth.status(),
       };
     case 'environment':
@@ -79,22 +82,23 @@ export async function toInfo(provider: Provider): Promise<ProviderInfo> {
         kind: 'environment',
         id: provider.id,
         label: provider.label,
+        status: provider.status(),
         targets: provider.targets(),
-        detail: await provider.detail(),
       };
     case 'integration':
       return {
         kind: 'integration',
         id: provider.id,
         label: provider.label,
+        status: provider.status(),
         auth: provider.auth.status(),
         github: provider.state(),
       };
   }
 }
 
-export function providerInfos(): Promise<ProviderInfo[]> {
-  return Promise.all(providers.map(toInfo));
+export async function providerInfos(): Promise<ProviderInfo[]> {
+  return providers.map(toInfo);
 }
 
 /** Fan a login callback out to every harness provider's auth implementation. */

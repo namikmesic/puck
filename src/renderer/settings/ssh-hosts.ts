@@ -7,7 +7,7 @@
  * Context in, elements built here, no DOM lookups.
  */
 
-import type { EnvironmentProviderInfo, EnvTargetInfo, ProviderInfo, PuckBridge, TargetHealth } from '../../harness/bridge';
+import type { EnvironmentProviderInfo, EnvTarget, ProviderInfo, PuckBridge, TargetHealth } from '../../harness/bridge';
 import { armDelete, el } from '../dom';
 import { button, errText } from '../util';
 import { cardShell } from './cards';
@@ -58,7 +58,7 @@ function healthDot(health: TargetHealth | undefined, checking: boolean): HTMLEle
 function targetRow(
   ctx: EnvProvidersContext,
   provider: EnvironmentProviderInfo,
-  target: EnvTargetInfo,
+  target: EnvTarget,
   removable: boolean,
 ): HTMLElement {
   const row = el('div', 'pv-target');
@@ -70,7 +70,7 @@ function targetRow(
   head.appendChild(dot);
   row.appendChild(head);
   if (target.host) row.appendChild(el('div', 'card-sub', target.host));
-  const message = el('div', 'pv-health-msg', lastHealth.get(key)?.message ?? '');
+  const message = el('div', 'pv-health-msg', lastHealth.get(key)?.detail ?? '');
   row.appendChild(message);
 
   const actions = el('div', 'card-foot');
@@ -83,7 +83,7 @@ function targetRow(
     try {
       const health = await ctx.bridge.targetHealth(provider.id, target.id);
       lastHealth.set(key, health);
-      message.textContent = health.message;
+      message.textContent = health.detail;
     } catch (err) {
       lastHealth.delete(key);
       message.textContent = errText(err);
@@ -173,7 +173,7 @@ export function envProviderCard(ctx: EnvProvidersContext, provider: EnvironmentP
   const card = cardShell({ title: provider.label, headRight: ssh ? 'SSH' : 'local' });
   card.classList.add('pv-card');
   card.dataset.provider = provider.id;
-  card.appendChild(el('div', 'card-sub', provider.detail));
+  card.appendChild(el('div', 'card-sub', provider.status.detail));
   for (const target of provider.targets) card.appendChild(targetRow(ctx, provider, target, ssh));
   if (ssh) {
     card.appendChild(addHostForm(ctx));

@@ -6,7 +6,7 @@
 
 import { codexHarness } from '../../harness/providers';
 import type { HarnessProvider } from './types';
-import { providerAuth, providerCredential } from './oauth';
+import { providerAuth, providerCredential, signInStatus } from './oauth';
 import * as oauth from './codex-oauth';
 
 export const codexProvider: HarnessProvider = {
@@ -25,6 +25,10 @@ export const codexProvider: HarnessProvider = {
     signInHint: 'Not connected — sign in with your ChatGPT account',
     connectedDetail: (tokens) => `Connected — last refreshed ${tokens.lastRefresh.slice(0, 16)}`,
   }),
+
+  status() {
+    return signInStatus(oauth.account, this.auth.status());
+  },
 
   credential: providerCredential(oauth.account, {
     containerPath: '/root/.codex/auth.json',
