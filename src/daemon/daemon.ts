@@ -211,6 +211,7 @@ export class Daemon {
           this.scheduler.request();
         },
         requestTick: () => this.scheduler.request(),
+        reprovisioning: () => this.reprovisioning,
         log,
         now: this.now,
       });
@@ -368,6 +369,7 @@ export class Daemon {
     const { log } = this.opts;
     try {
       await this.turns.idle();
+      await this.work.idlePrepares();
       const record = this.instance.get();
       const def = this.definition;
       if (this.phase !== 'serving' || !record || !def) return;
@@ -387,6 +389,7 @@ export class Daemon {
       }
     } finally {
       this.reprovisioning = false;
+      if (this.phase === 'serving') this.turns.startRestored();
       this.emitCapacity();
       this.scheduler.request();
       this.orchestrator.schedule();

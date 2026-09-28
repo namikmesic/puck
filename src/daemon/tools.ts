@@ -173,14 +173,14 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
       name: 'work_accept',
       description: 'Accept a work item in review: it moves to done.',
       shape: (z) => ({ item: itemRef(zod(z)), note: zod(z).string().max(2000).optional() }),
-      run: (a: Args) => compact(work.accept(str(a.item))),
+      run: (a: Args) => compact(work.accept(str(a.item), typeof a.note === 'string' ? a.note : undefined)),
     },
     {
       name: 'work_request_changes',
       description: "Send a work item's worker a follow-up; the item is queued again and continues in its branch and conversation.",
       shape: (z) => ({ item: itemRef(zod(z)), message: zod(z).string().min(1).max(100 * 1024) }),
-      run: (a: Args) => {
-        work.followUp(str(a.item), str(a.message), 'orchestrator');
+      run: async (a: Args) => {
+        await work.followUp(str(a.item), str(a.message), 'orchestrator');
         return compact(work.item(str(a.item)));
       },
     },

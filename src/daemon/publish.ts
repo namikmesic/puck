@@ -113,27 +113,29 @@ export class Publisher {
     const repo = this.repoOf(item);
     const grant = this.grant(repo);
 
-    const state = await git.serial(repo.dir, () => git.capture(worktree, base.sha));
-    if (state.uncommitted.length) {
-      throw new PublishError(
-        `${itemLabel(item)} has uncommitted changes (${state.uncommitted.length} file${state.uncommitted.length === 1 ? '' : 's'}); ask its worker to commit or discard them first.`,
-      );
-    }
-    if (state.commits.length === 0) throw new PublishError(`${itemLabel(item)} has no commits beyond ${base.branch}; there is nothing to publish.`);
-
     fs.mkdirSync(this.deps.tmpDir, { recursive: true, mode: 0o700 });
     const bundle = path.join(this.deps.tmpDir, `W-${item.number}.bundle`);
+    const lease = item.pushedSha ?? item.pr?.lastPushedSha ?? null;
+    let head: string;
     try {
-      await git.serial(repo.dir, async () => {
+      head = await git.serial(repo.dir, async () => {
+        const state = await git.capture(worktree, base.sha);
+        if (state.uncommitted.length) {
+          throw new PublishError(
+            `${itemLabel(item)} has uncommitted changes (${state.uncommitted.length} file${state.uncommitted.length === 1 ? '' : 's'}); ask its worker to commit or discard them first.`,
+          );
+        }
+        if (state.commits.length === 0) throw new PublishError(`${itemLabel(item)} has no commits beyond ${base.branch}; there is nothing to publish.`);
         await git.bundle(worktree, base.sha, branch, bundle);
         await git.fetchBundle(repo.dir, repo.github, bundle, branch);
-        await git.push(repo.dir, repo.github, branch, item.pushedSha ?? item.pr?.lastPushedSha ?? null);
+        await git.push(repo.dir, repo.github, branch, lease);
+        return state.head;
       });
     } finally {
       fs.rmSync(bundle, { force: true });
     }
-    onPushed(state.head);
-    log.info('publish.pushed', { itemId: item.id, branch, head: state.head });
+    onPushed(head);
+    log.info('publish.pushed', { itemId: item.id, branch, head });
 
     const [owner, name] = repo.github.split('/');
     const client = createGitHubClient({
@@ -160,7 +162,7 @@ export class Publisher {
     }
     log.info('publish.pull-request', { itemId: item.id, number: pull.number, created });
     return {
-      pr: { number: pull.number, url: pull.html_url, draft: pull.draft ?? (created ? draft : false), lastPushedSha: state.head },
+      pr: { number: pull.number, url: pull.html_url, draft: pull.draft ?? (created ? draft : false), lastPushedSha: head },
       created,
     };
   }

@@ -167,6 +167,10 @@ export interface WorkItem {
   result: ItemResult | null;
   pr: { number: number; url: string; draft: boolean; lastPushedSha: string } | null;
   lastError: string | null;
+  /** Why the item was cancelled, when the canceller gave one. */
+  cancelReason: string | null;
+  /** Note recorded when the item was accepted. */
+  acceptNote: string | null;
   pendingAsk: { askId: string; routedTo: 'orchestrator' | 'user' } | null;
 }
 

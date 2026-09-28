@@ -53,6 +53,8 @@ function normalizeItem(id: string, raw: Partial<ItemRecord>): ItemRecord | null 
     result: raw.result ?? null,
     pr: raw.pr ?? null,
     lastError: raw.lastError ?? null,
+    cancelReason: typeof raw.cancelReason === 'string' ? raw.cancelReason : null,
+    acceptNote: typeof raw.acceptNote === 'string' ? raw.acceptNote : null,
     pendingAsk: raw.pendingAsk ?? null,
     requeue: raw.requeue && REQUEUE.includes(raw.requeue) ? raw.requeue : null,
     pushedSha: typeof raw.pushedSha === 'string' ? raw.pushedSha : null,

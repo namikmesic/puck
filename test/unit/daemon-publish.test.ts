@@ -27,6 +27,7 @@ let calls: RecordedCommand[];
 let head: string;
 let dirty: string;
 let commits: string;
+let bundledHead: string;
 let grant: GithubGrant | null;
 let requests: Array<{ method: string; url: string; body: unknown; auth: string | null }>;
 let pulls: Array<{ number: number; html_url: string; draft: boolean; head: { ref: string } }>;
@@ -37,7 +38,7 @@ const def = (() => {
   return r.value;
 })();
 
-function publisher(now = 1_000) {
+function publisher(now = 1_000, alter?: (git: Git) => void) {
   const fake = fakeRunner((argv) => {
     const sub = argv[0] === 'git' && argv[1] === '-C' ? argv[3] : '';
     if (sub === 'log') return { stdout: commits };
@@ -45,10 +46,12 @@ function publisher(now = 1_000) {
     if (sub === 'diff') return { stdout: ' a.txt | 8 ++++\n b.txt | 5 +++--\n 2 files changed\n' };
     if (sub === 'status') return { stdout: dirty };
     if (sub === 'rev-parse') return { stdout: `${head}\n` };
+    if (argv.includes('bundle')) bundledHead = head;
     return undefined;
   });
   calls = fake.calls;
   const git = new Git({ paths: root.paths, run: fake.run, asPuck: PUCK });
+  alter?.(git);
   const fetchFn: typeof fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
@@ -102,6 +105,8 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
     },
     pr: null,
     lastError: null,
+    cancelReason: null,
+    acceptNote: null,
     pendingAsk: null,
     requeue: null,
     pushedSha: null,
@@ -112,6 +117,7 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
 beforeEach(() => {
   root = tempRoot('pd-pub-');
   head = HEAD1;
+  bundledHead = '';
   dirty = '';
   commits = `${HEAD1}\tFix the redirect\n`;
   grant = { owner: 'octo', installationId: 9, repos: ['octo/app'], token: 'ghs_octotoken', expiresAt: 10_000_000 };
@@ -166,6 +172,24 @@ describe('publishing', () => {
     ]);
     // The temporary bundle is gone again.
     expect(fs.existsSync(path.join(root.paths.state, 'tmp', 'W-4.bundle'))).toBe(false);
+  });
+
+  it('leases the head from the same git section that bundles and pushes', async () => {
+    const pub = publisher(1_000, (git) => {
+      const serial = git.serial.bind(git);
+      git.serial = (dir, fn) =>
+        serial(dir, async () => {
+          const value = await fn();
+          head = HEAD2;
+          return value;
+        });
+    });
+    let pushed = '';
+    await pub.publish(reviewItem(), {}, (sha) => {
+      pushed = sha;
+    });
+    expect(pushed).toBe(bundledHead);
+    expect(pushed).toBe(HEAD1);
   });
 
   it('opens a draft pull request the first time and updates it after a follow-up, leased on the last push', async () => {

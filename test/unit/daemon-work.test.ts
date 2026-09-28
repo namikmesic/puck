@@ -34,6 +34,8 @@ let workerCalls: AdapterRequest[];
 let orchestratorCalls: AdapterRequest[];
 let workerSteps: Step[];
 let commits: string;
+let onGit: ((argv: string[]) => Promise<void>) | null;
+let trace: string[];
 
 const end = (ctx: AdapterContext): void => ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
 const say = (text: string): Step => (req, ctx) => {
@@ -53,6 +55,7 @@ const adapter: HarnessAdapter = {
       return;
     }
     workerCalls.push(req);
+    trace.push('worker');
     const step = workerSteps.shift() ?? say('Done.');
     await step(req, ctx);
   },
@@ -90,6 +93,11 @@ async function launch(): Promise<void> {
     return undefined;
   });
   calls = fake.calls;
+  const run: typeof fake.run = async (argv, opts) => {
+    if (argv.join(' ').includes('user.name Someone Else')) trace.push('provision');
+    if (onGit) await onGit(argv);
+    return fake.run(argv, opts);
+  };
   daemon = new Daemon({
     paths: root.paths,
     log: createLogger({ dir: root.paths.logs }),
@@ -97,7 +105,7 @@ async function launch(): Promise<void> {
     env: {},
     privileged: false,
     exit: vi.fn(),
-    run: fake.run,
+    run,
     shutdownGraceMs: 2_000,
     adapters: { 'claude-code': adapter, codex: { ...adapter, id: 'codex' } },
   });
@@ -175,6 +183,8 @@ beforeEach(async () => {
   orchestratorCalls = [];
   workerSteps = [];
   commits = `${HEAD}\tAdd a.txt\n`;
+  onGit = null;
+  trace = [];
   deliver();
   await launch();
 });
@@ -341,6 +351,128 @@ describe('work items through the daemon', () => {
     await c.cmd('item.delete', { itemId: cancelled.id });
     expect(calls.some((x) => x.argv.includes('worktree') && x.argv.includes('remove'))).toBe(true);
   });
+
+  it('runs a follow-up that was queued during the turn after the user interrupts', async () => {
+    const c = client();
+    workerSteps = [
+      async (req, ctx) => {
+        await new Promise<void>((r) => ctx.onInterrupt(r));
+        end(ctx);
+      },
+      say('Applied the follow-up.'),
+    ];
+    await c.cmd('item.create', { title: 'Long', agent: 'implementer' });
+    const running = await until(c, 1, 'running');
+    await vi.waitFor(() => expect(workerCalls).toHaveLength(1));
+    const sent = await c.cmd<{ queued: boolean }>('chat.send', { sessionId: running.sessionId, text: 'Also handle the edge.' });
+    expect(sent.queued).toBe(true);
+    await c.cmd('session.interrupt', { sessionId: running.sessionId });
+    const done = await until(c, 1, 'review');
+    expect(done.attempts).toBe(1);
+    expect(done.sessionId).toBe(running.sessionId);
+    expect(workerCalls).toHaveLength(2);
+    expect(workerCalls[1]).toMatchObject({ sessionId: running.sessionId, prompt: 'Also handle the edge.' });
+  });
+
+  it('holds publish across a follow-up so the pushed sha is the bundled head', async () => {
+    const c = client();
+    await c.cmd('item.create', { title: 'Publish me', agent: 'implementer' });
+    const reviewed = await until(c, 1, 'review');
+    await c.cmd('github.put', {
+      grants: [{ owner: 'octo', installationId: 9, repos: ['octo/app'], token: 'ghs_octotoken', expiresAt: Date.now() + 60_000 }],
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') return new Response('[]', { status: 200 });
+      const body = init?.body ? (JSON.parse(String(init.body)) as { draft?: boolean }) : {};
+      return new Response(JSON.stringify({ number: 7, html_url: 'https://github.com/octo/app/pull/7', draft: body.draft ?? true }), { status: 201 });
+    });
+    let releaseBundle!: () => void;
+    const bundleGate = new Promise<void>((resolve) => {
+      releaseBundle = resolve;
+    });
+    let bundleWaiting = false;
+    onGit = async (argv) => {
+      if (!argv.includes('bundle')) return;
+      bundleWaiting = true;
+      await bundleGate;
+    };
+    try {
+      const publishing = c.cmd<{ prUrl: string }>('item.publish', { itemId: reviewed.id });
+      await vi.waitFor(() => expect(bundleWaiting).toBe(true));
+      let followDone = false;
+      const follow = c.cmd<{ queued: boolean }>('chat.send', { sessionId: reviewed.sessionId, text: 'One more fix.' }).then((result) => {
+        followDone = true;
+        return result;
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      expect(followDone).toBe(false);
+      expect(workerCalls).toHaveLength(1);
+      expect((await item(c, 1)).status).toBe('review');
+      releaseBundle();
+      const published = await publishing;
+      expect(published.prUrl).toBe('https://github.com/octo/app/pull/7');
+      expect((await follow).queued).toBe(true);
+      const again = await until(c, 1, 'review');
+      expect(again.pr?.lastPushedSha).toBe(HEAD);
+      expect(workerCalls).toHaveLength(2);
+      expect(workerCalls[1].prompt).toBe('One more fix.');
+    } finally {
+      releaseBundle();
+      onGit = null;
+      fetchMock.mockRestore();
+    }
+  });
+});
+
+describe('tool notes', () => {
+  it('stores cancel reasons and accept notes on the item and the escalate note on the question, never in the log', async () => {
+    const reason = 'drop this approach entirely';
+    const accept = 'shipped with the redirect fix';
+    const escalate = 'the user should pick the database';
+    const c = client();
+    const tools = (daemon as unknown as { tools: Array<{ name: string; run(a: Record<string, unknown>): unknown }> }).tools;
+    const tool = (name: string) => defined(tools.find((t) => t.name === name));
+    workerSteps = [
+      say('Done.'),
+      async (req, ctx) => {
+        await ctx.askUser([{ question: 'Which DB?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: '' }] }]);
+        end(ctx);
+      },
+    ];
+    await c.cmd('item.create', { title: 'Accept me', agent: 'implementer' });
+    const reviewed = await until(c, 1, 'review');
+    await tool('work_accept').run({ item: 'W-1', note: accept });
+    expect((await item(c, 1)).acceptNote).toBe(accept);
+    expect(c.events()).toContainEqual(
+      expect.objectContaining({ kind: 'item.upsert', item: expect.objectContaining({ id: reviewed.id, status: 'done', acceptNote: accept }) }),
+    );
+
+    await tool('backlog_create').run({ title: 'Later', body: 'not now' });
+    await tool('backlog_cancel').run({ item: 'W-2', reason });
+    expect((await item(c, 2)).cancelReason).toBe(reason);
+    expect(c.events()).toContainEqual(
+      expect.objectContaining({ kind: 'item.upsert', item: expect.objectContaining({ number: 2, status: 'cancelled', cancelReason: reason }) }),
+    );
+
+    await c.cmd('item.create', { title: 'Ask me', agent: 'implementer' });
+    const waiting = await until(c, 3, 'needs-input');
+    const sessionId = defined(waiting.sessionId);
+    await tool('escalate_to_user').run({ item: 'W-3', note: escalate });
+    const snap = await c.cmd<Snapshot>('snapshot.get');
+    const ask = defined(snap.asks.find((a) => a.sessionId === sessionId));
+    expect(ask.routedTo).toBe('user');
+    expect(ask.questions[0]?.question).toContain(escalate);
+    const recorded = (await history(c, sessionId))
+      .flatMap((entry) => (entry.kind === 'turn' ? entry.events : []))
+      .find((event) => event.kind === 'ask');
+    expect(recorded && recorded.kind === 'ask' ? recorded.questions[0]?.question : '').toContain(escalate);
+
+    const log = await c.cmd<{ text: string }>('logs.tail', { lines: 400 });
+    expect(log.text).not.toContain(reason);
+    expect(log.text).not.toContain(accept);
+    expect(log.text).not.toContain(escalate);
+  });
 });
 
 describe('worker questions', () => {
@@ -505,6 +637,38 @@ describe('definition.apply', () => {
     await vi.waitFor(() => expect(orchestratorCalls).toHaveLength(1));
     await c.cmd('item.create', { title: 'Keeps going', agent: 'implementer' });
     await until(c, 1, 'review');
+  });
+
+  it('waits for an in-flight prepare and starts the worker only after provisioning', async () => {
+    let releasePrepare!: () => void;
+    const prepareGate = new Promise<void>((resolve) => {
+      releasePrepare = resolve;
+    });
+    let prepareWaiting = false;
+    onGit = async (argv) => {
+      if (!argv.includes('worktree') || !argv.includes('add')) return;
+      prepareWaiting = true;
+      await prepareGate;
+    };
+    const c = client();
+    try {
+      const creating = c.cmd('item.create', { title: 'Overlap', agent: 'implementer' });
+      await vi.waitFor(() => expect(prepareWaiting).toBe(true));
+      expect(trace).not.toContain('worker');
+      const pin = { kind: 'tag' as const, name: 'v2', sha: 'fed9876' };
+      const reprovision = quiet({ git: { userName: 'Someone Else', userEmail: 'else@example.com' } });
+      expect(await c.cmd('definition.apply', { definition: reprovision, pin })).toEqual({ classes: ['reprovision'] });
+      await new Promise((r) => setTimeout(r, 40));
+      expect(trace).not.toContain('provision');
+      expect(trace).not.toContain('worker');
+      releasePrepare();
+      await creating;
+      await vi.waitFor(() => expect(trace).toEqual(['provision', 'worker']));
+      await until(c, 1, 'review');
+    } finally {
+      releasePrepare();
+      onGit = null;
+    }
   });
 });
 

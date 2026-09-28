@@ -52,6 +52,8 @@ export interface WorkDeps {
   slotsChanged(): void;
   /** New or changed queued work: let the scheduler look. */
   requestTick(): void;
+  /** True while a definition reprovision is pending or running. */
+  reprovisioning(): boolean;
   log: Logger;
   now?: () => number;
 }
@@ -82,9 +84,48 @@ function oneLine(text: string, max: number): string {
 
 export class Work {
   private readonly now: () => number;
+  private readonly gates = new Map<string, Promise<unknown>>();
+  private readonly holds = new Map<string, number>();
+  private readonly prepares = new Set<Promise<void>>();
 
   constructor(private readonly deps: WorkDeps) {
     this.now = deps.now ?? Date.now;
+  }
+
+  /** Resolves once every in-flight worktree prepare has finished. */
+  async idlePrepares(): Promise<void> {
+    while (this.prepares.size) await Promise.allSettled([...this.prepares]);
+  }
+
+  private busy(itemId: string): boolean {
+    return this.holds.has(itemId);
+  }
+
+  private exclusive<T>(itemId: string, fn: () => Promise<T> | T): Promise<T> {
+    this.holds.set(itemId, (this.holds.get(itemId) ?? 0) + 1);
+    const prev = this.gates.get(itemId) ?? Promise.resolve();
+    const run = prev.then(() => fn());
+    const release = (): void => {
+      const left = (this.holds.get(itemId) ?? 1) - 1;
+      if (left <= 0) this.holds.delete(itemId);
+      else this.holds.set(itemId, left);
+      this.deps.requestTick();
+    };
+    this.gates.set(
+      itemId,
+      run.then(
+        () => release(),
+        () => release(),
+      ),
+    );
+    return run;
+  }
+
+  private trackPrepare(work: Promise<void>): Promise<void> {
+    this.prepares.add(work);
+    return work.finally(() => {
+      this.prepares.delete(work);
+    });
   }
 
   /* ---------- Lookups ---------- */
@@ -208,13 +249,16 @@ export class Work {
   cancel(ref: string, actor: Actor, reason?: string): ItemRecord {
     const item = this.item(ref);
     const held = holdsSlot(item.status);
-    this.guard(() => this.deps.backlog.transition(item, 'cancel', { pendingAsk: null, requeue: null }));
+    const cancelReason = reason?.trim() ? reason.trim() : null;
+    this.guard(() =>
+      this.deps.backlog.transition(item, 'cancel', { pendingAsk: null, requeue: null, ...(cancelReason ? { cancelReason } : {}) }),
+    );
     if (item.sessionId) {
       this.deps.turns.clearQueue(item.sessionId);
       this.deps.turns.interrupt(item.sessionId, 'user');
     }
     if (actor === 'user') this.deps.notify('item.updated', `The user cancelled ${this.label(item)}.`, item.id);
-    this.deps.log.info('item.cancel', { itemId: item.id, actor, reason: reason ? oneLine(reason, 200) : undefined });
+    this.deps.log.info('item.cancel', { itemId: item.id, actor });
     if (held) this.deps.slotsChanged();
     return item;
   }
@@ -226,9 +270,10 @@ export class Work {
     return item;
   }
 
-  accept(ref: string): ItemRecord {
+  accept(ref: string, note?: string): ItemRecord {
     const item = this.item(ref);
-    return this.guard(() => this.deps.backlog.transition(item, 'accept', { lastError: null }));
+    const acceptNote = note?.trim() ? note.trim() : null;
+    return this.guard(() => this.deps.backlog.transition(item, 'accept', { lastError: null, ...(acceptNote ? { acceptNote } : {}) }));
   }
 
   /**
@@ -236,40 +281,44 @@ export class Work {
    * (the text waits in the worker's session until a slot is free); while it
    * waits or runs the text joins the session's queue.
    */
-  followUp(ref: string, text: string, author: Actor): { queued: boolean; turnId?: string } {
+  followUp(ref: string, text: string, author: Actor): Promise<{ queued: boolean; turnId?: string }> {
     const item = this.item(ref);
-    if (!item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has not started yet.`);
-    if (item.status === 'review') {
-      // The text is stored first; it waits in the session until a slot is free.
-      const sent = this.deps.turns.send(item.sessionId, text, author);
-      this.guard(() => this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' }));
-      this.deps.requestTick();
-      return sent;
-    }
-    if (item.status === 'queued' || holdsSlot(item.status)) return this.deps.turns.send(item.sessionId, text, author);
-    throw new WorkError('invalid-state', `${itemLabel(item)} is ${item.status}; retry it or create a new item instead.`);
+    return this.exclusive(item.id, () => {
+      if (!item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has not started yet.`);
+      if (item.status === 'review') {
+        // The text is stored first; it waits in the session until a slot is free.
+        const sent = this.deps.turns.send(item.sessionId, text, author);
+        this.guard(() => this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' }));
+        this.deps.requestTick();
+        return sent;
+      }
+      if (item.status === 'queued' || holdsSlot(item.status)) return this.deps.turns.send(item.sessionId, text, author);
+      throw new WorkError('invalid-state', `${itemLabel(item)} is ${item.status}; retry it or create a new item instead.`);
+    });
   }
 
   /** Push the item's branch and open or update its pull request. Status does not change. */
   async publish(ref: string, req: PublishRequest, actor: Actor): Promise<{ prUrl: string }> {
     const item = this.item(ref);
-    if (actor === 'orchestrator' && this.def().policies.publish !== 'orchestrator') {
-      throw new WorkError('invalid-state', 'Publishing is manual in this environment: the user publishes from the work view.');
-    }
-    let published;
-    try {
-      published = await this.deps.publisher.publish(item, req, (sha) => this.deps.backlog.patch(item, { pushedSha: sha }));
-    } catch (err) {
-      if (err instanceof PublishError || err instanceof GitError) throw new WorkError('invalid-state', err.message);
-      throw err;
-    }
-    this.deps.backlog.patch(item, { pr: published.pr });
-    this.deps.notify(
-      'pr.published',
-      `${this.label(item)} was published: ${published.created ? 'opened' : 'updated'} ${published.pr.draft ? 'draft ' : ''}pull request ${published.pr.url}`,
-      item.id,
-    );
-    return { prUrl: published.pr.url };
+    return this.exclusive(item.id, async () => {
+      if (actor === 'orchestrator' && this.def().policies.publish !== 'orchestrator') {
+        throw new WorkError('invalid-state', 'Publishing is manual in this environment: the user publishes from the work view.');
+      }
+      let published;
+      try {
+        published = await this.deps.publisher.publish(item, req, (sha) => this.deps.backlog.patch(item, { pushedSha: sha }));
+      } catch (err) {
+        if (err instanceof PublishError || err instanceof GitError) throw new WorkError('invalid-state', err.message);
+        throw err;
+      }
+      this.deps.backlog.patch(item, { pr: published.pr });
+      this.deps.notify(
+        'pr.published',
+        `${this.label(item)} was published: ${published.created ? 'opened' : 'updated'} ${published.pr.draft ? 'draft ' : ''}pull request ${published.pr.url}`,
+        item.id,
+      );
+      return { prUrl: published.pr.url };
+    });
   }
 
   /** Delete an item. Its worktree goes; its branch stays. */
@@ -298,13 +347,15 @@ export class Work {
    */
   dispatch(itemId: string): void {
     const item = this.deps.backlog.get(itemId);
-    if (!item) return;
+    if (!item || item.status !== 'queued') return;
+    if (this.busy(item.id)) return;
     const reason = item.requeue;
     const attempts = reason === 'restart' ? item.attempts : reason === 'follow-up' || reason === 'retry' ? 1 : item.attempts + 1;
     this.deps.backlog.transition(item, 'dispatch', { attempts, requeue: null, pendingAsk: null });
     this.deps.log.info('item.dispatch', { itemId: item.id, agent: item.agent, attempts, reason });
     this.deps.slotsChanged();
-    void this.prepare(item, reason).catch((err: unknown) => this.dispatchFailed(item, err));
+    const job = this.exclusive(item.id, () => this.prepare(item, reason));
+    void this.trackPrepare(job).catch((err: unknown) => this.dispatchFailed(item, err));
   }
 
   private async prepare(item: ItemRecord, reason: ItemRecord['requeue']): Promise<void> {
@@ -383,9 +434,10 @@ export class Work {
 
   /* ---------- Turn ends ---------- */
 
-  /** Worker sessions start only while their item holds a slot. */
+  /** Worker sessions start only while their item holds a slot and no reprovision is in progress. */
   canStart(session: SessionRecord): boolean {
     if (session.kind !== 'worker') return true;
+    if (this.deps.reprovisioning()) return false;
     const item = session.itemId ? this.deps.backlog.get(session.itemId) : null;
     return !!item && holdsSlot(item.status) && item.sessionId === session.id;
   }
@@ -400,7 +452,15 @@ export class Work {
     if (!holdsSlot(item.status)) return;
     if (outcome.interrupted === 'user') {
       this.deps.backlog.transition(item, 'interrupt', { result: { ...result, interrupted: true }, pendingAsk: null });
-      this.deps.notify('item.review', `${this.label(item)} (${item.agent ?? ''}) was interrupted by the user and is ready for review: ${describeChanges(item)}.`, item.id);
+      if (this.deps.turns.queueLength(session.id) > 0) {
+        this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
+      } else {
+        this.deps.notify(
+          'item.review',
+          `${this.label(item)} (${item.agent ?? ''}) was interrupted by the user and is ready for review: ${describeChanges(item)}.`,
+          item.id,
+        );
+      }
     } else if (outcome.error) {
       this.deps.backlog.patch(item, { result });
       this.failAttempt(item, outcome.error);
@@ -502,8 +562,9 @@ export class Work {
     const item = this.item(ref);
     const ask = item.pendingAsk;
     if (item.status !== 'needs-input' || !ask) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
+    this.deps.turns.annotateAsk(ask.askId, note);
     this.routeToUser(item);
-    this.deps.log.info('item.escalated', { itemId: item.id, note: note ? oneLine(note, 200) : undefined });
+    this.deps.log.info('item.escalated', { itemId: item.id });
   }
 
   private routeToUser(item: ItemRecord): void {

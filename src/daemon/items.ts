@@ -182,6 +182,8 @@ export class Backlog {
       result: null,
       pr: null,
       lastError: null,
+      cancelReason: null,
+      acceptNote: null,
       pendingAsk: null,
       requeue: null,
       pushedSha: null,

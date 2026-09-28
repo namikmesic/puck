@@ -427,6 +427,17 @@ export class Turns {
     return true;
   }
 
+  /** Append a note to an open question, where the user reads it. */
+  annotateAsk(askId: string, note: string): void {
+    const ask = this.asks.get(askId);
+    const text = note.trim();
+    if (!ask || !text || ask.questions.length === 0) return;
+    const question = ask.questions[0];
+    if (question.question.endsWith(`\n\n${text}`)) return;
+    question.question = `${question.question}\n\n${text}`;
+    this.deps.transcripts.saveSoon(ask.sessionId);
+  }
+
   /** Hand an open question to someone else (the orchestrator escalating to the user). */
   routeAsk(askId: string, to: 'user' | 'orchestrator'): boolean {
     const ask = this.asks.get(askId);
