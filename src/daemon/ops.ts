@@ -16,7 +16,7 @@ import {
   type OpResult,
   type Pin,
 } from '../harness/daemon-protocol';
-import { validPin } from './credentials';
+import { MAX_GRANTS, validPin } from './credentials';
 
 export class OpError extends Error {
   constructor(
@@ -178,7 +178,9 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   'credentials.get': none,
   'github.put': (args) => {
     const o = obj(args);
-    if (!Array.isArray(o.grants) || o.grants.length === 0) bad('grants must be a non-empty list.');
+    if (!Array.isArray(o.grants) || o.grants.length === 0 || o.grants.length > MAX_GRANTS) {
+      bad(`grants must be a list of 1 to ${MAX_GRANTS} installation token grants.`);
+    }
     return { grants: o.grants as GithubGrant[] };
   },
   'secrets.put': (args) => {

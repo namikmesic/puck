@@ -10,7 +10,7 @@ let client: Awaited<ReturnType<typeof waitReady>>;
 
 beforeAll(async () => {
   env = await startEnv({
-    'github.json': { grants: [{ owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_testtokenvalue', expiresAt: 4102444800000 }] },
+    'github.json': { grants: [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_testtokenvalue', expiresAt: 4102444800000 }] },
     'secrets.json': { values: { NPM_TOKEN: 'npm-secret' } },
     'harness-claude-code.json': JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: 1 } }),
   });
@@ -26,7 +26,7 @@ describe('Docker scenario 1: boot', () => {
     const snap = await client.cmd<Snapshot>('snapshot.get');
     expect(snap.envId).toBe(env.envId);
     expect(snap.instance.status).toBe('ready');
-    expect(snap.github).toEqual({ state: 'ok' });
+    expect(snap.github).toEqual({ state: 'ok', expiresAt: 4102444800000 });
     expect(snap.sessions.map((s) => [s.kind, s.agent, s.cwd])).toEqual([['orchestrator', 'lead', '/workspace']]);
     const logs = await client.cmd<{ text: string }>('logs.tail', { lines: 200 });
     for (const stage of ['checking-runtime', 'creating-user', 'configuring-git', 'syncing-repos', 'writing-credentials']) {

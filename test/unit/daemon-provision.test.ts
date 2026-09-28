@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -5,7 +6,7 @@ import { Credentials } from '../../src/daemon/credentials';
 import { readDefinition, type DaemonDefinition } from '../../src/daemon/definition';
 import { nullLogger } from '../../src/daemon/log';
 import type { DaemonPaths } from '../../src/daemon/paths';
-import { provision, ProvisionError, RUNTIME_MESSAGE, type ProvisionDeps } from '../../src/daemon/provision';
+import { askpassScript, provision, ProvisionError, RUNTIME_MESSAGE, type ProvisionDeps } from '../../src/daemon/provision';
 import { exampleDefinition, fakeRunner, tempRoot, type RecordedCommand } from './daemon-fakes';
 
 let root: ReturnType<typeof tempRoot>;
@@ -91,7 +92,7 @@ describe('provisioning', () => {
     expect(argv).toContain(`git -c core.hooksPath=/dev/null clone --mirror -- https://github.com/octo/app.git ${mirror}`);
     expect(argv).toContain(`git clone --branch main -- file://${mirror} ${path.join(paths.workspace, 'app')}`);
     const clone = calls.find((c) => c.argv[1] === '-c' && c.argv.includes('--mirror'));
-    expect(clone?.opts.env).toMatchObject({ GIT_ASKPASS: path.join(paths.bin, 'git-askpass'), GIT_TERMINAL_PROMPT: '0' });
+    expect(clone?.opts.env).toMatchObject({ GIT_ASKPASS: path.join(paths.bin, 'git-askpass'), GIT_TERMINAL_PROMPT: '0', PUCK_GIT_OWNER: 'octo' });
     expect(fs.readFileSync(path.join(paths.bin, 'codex-as-puck'), 'utf8')).toContain(
       'exec setpriv --reuid=10001 --regid=10001 --init-groups -- "$(command -v codex)" "$@"',
     );
@@ -176,5 +177,19 @@ describe('provisioning', () => {
     await provision(deps(run, { privileged: false }));
     expect(calls.map((c) => c.argv.join(' '))).toContain(`git -c core.hooksPath=/dev/null -C ${path.join(paths.mirrors, 'app.git')} fetch --prune origin`);
     expect(calls.some((c) => c.argv[1] === 'clone')).toBe(false);
+  });
+
+  it('answers git with the installation token of the repository owner', () => {
+    fs.mkdirSync(paths.secrets, { recursive: true });
+    const grant = (owner: string, token: string) => ({ owner, installationId: 1, repos: [`${owner}/app`], token, expiresAt: 4102444800000 });
+    fs.writeFileSync(path.join(paths.secrets, 'github.json'), JSON.stringify({ grants: [grant('octo', 'ghs_octotoken'), grant('Acme', 'ghs_acmetoken')] }));
+    const script = path.join(root.root, 'askpass');
+    fs.writeFileSync(script, askpassScript(paths), { mode: 0o755 });
+    const ask = (prompt: string, owner: string) =>
+      execFileSync('sh', [script, prompt], { env: { PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, PUCK_GIT_OWNER: owner } }).toString();
+    expect(ask("Username for 'https://github.com': ", 'octo')).toBe('x-access-token\n');
+    expect(ask("Password for 'https://x-access-token@github.com': ", 'octo')).toBe('ghs_octotoken');
+    expect(ask("Password for 'https://x-access-token@github.com': ", 'acme')).toBe('ghs_acmetoken');
+    expect(ask("Password for 'https://x-access-token@github.com': ", 'nobody')).toBe('');
   });
 });

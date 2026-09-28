@@ -143,7 +143,7 @@ describe('puckd server (in process)', () => {
   beforeEach(async () => {
     deliver({
       'instance.json': { envId: ENV_ID, name: 'Example', pin: { kind: 'tag', name: 'v1', sha: 'abc1234' }, definition: exampleDefinition() },
-      'github.json': { grants: [{ owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_abcdefghijk', expiresAt: 4102444800000 }] },
+      'github.json': { grants: [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_abcdefghijk', expiresAt: 4102444800000 }] },
     });
     await boot();
   });
@@ -157,7 +157,7 @@ describe('puckd server (in process)', () => {
     expect(welcome).toMatchObject({ protocol: 1, envId: ENV_ID, replay: 'resync', daemon: { version: '0.0.1+test' } });
     const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
     expect(snap.result.instance).toMatchObject({ status: 'ready', pin: { name: 'v1' }, sha: 'abc1234' });
-    expect(snap.result.github).toEqual({ state: 'ok' });
+    expect(snap.result.github).toEqual({ state: 'ok', expiresAt: 4102444800000 });
     expect(snap.result.sessions).toHaveLength(1);
     expect(snap.result.sessions[0]).toMatchObject({ kind: 'orchestrator', agent: 'lead', cwd: root.paths.workspace, status: 'idle' });
     expect(snap.result.orchestratorSessionId).toBe(snap.result.sessions[0].id);
@@ -238,15 +238,20 @@ describe('puckd server (in process)', () => {
     await c.until(isWelcome);
     expect(await c.cmd('secrets.put', { values: { NPM_TOKEN: 'x' } })).toMatchObject({ ok: true });
     expect(await c.cmd('secrets.put', { values: { PUCK_X: 'x' } })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
-    // Only per-owner installation grants are accepted; a bare personal token is not.
+    // Only installation token grants are accepted; a bare token or a user-token pair is not.
     expect(await c.cmd('github.put', { token: 'ghp_abcdefghij' })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
     expect(await c.cmd('github.put', { grants: [{ owner: 'octo', token: 'ghp_abcdefghij' }] })).toMatchObject({
       ok: false,
       error: { code: 'invalid-args' },
     });
-    const grant = { owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_rotatedtoken', expiresAt: 4102444800000 };
-    expect(await c.cmd('github.put', { grants: [grant] })).toMatchObject({ ok: true });
-    await c.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'github.auth');
+    const pair = { accessToken: 'ghu_rotatedtoken', refreshToken: 'ghr_rotatedtoken', expiresAt: 4102444800000 };
+    expect(await c.cmd('github.put', { grants: [pair] })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    const grants = [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_rotatedtoken', expiresAt: 4102444900000 }];
+    expect(await c.cmd('github.put', { grants })).toMatchObject({ ok: true });
+    const auth = await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'github.auth' && f.ev.expiresAt === 4102444900000,
+    );
+    expect(auth.ev).toMatchObject({ state: 'ok' });
     expect(await c.cmd('credentials.put', { harness: [{ id: 'claude-code', content: 'nope' }] })).toMatchObject({
       ok: false,
       error: { code: 'invalid-args' },
