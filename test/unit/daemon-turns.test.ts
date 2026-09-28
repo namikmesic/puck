@@ -360,36 +360,6 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(turns.get(replacement.id)?.status).toBe('idle');
   });
 
-  it('does not resume accepting while a turn is still active', async () => {
-    const s = orchestrator();
-    attempts = [() => new Promise<void>(() => undefined)];
-    turns.send(s.id, 'first');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
-    turns.stopAccepting();
-    expect(turns.resumeAccepting()).toBe(false);
-    expect(turns.isAccepting()).toBe(false);
-    expect(calls.map((c) => c.prompt)).toEqual(['first']);
-    expect(turns.get(s.id)?.queue).toEqual([{ text: 'second', author: 'user' }]);
-  });
-
-  it('starts a held queue when accepting resumes and nothing is running', async () => {
-    const s = orchestrator();
-    let finish: () => void = () => undefined;
-    attempts = [() => new Promise<void>((resolve) => (finish = resolve)), (_req, ctx) => ctx.emit(END)];
-    turns.send(s.id, 'first');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(turns.send(s.id, 'second')).toEqual({ queued: true });
-    turns.stopAccepting();
-    finish();
-    await turns.idle();
-    expect(calls.map((c) => c.prompt)).toEqual(['first']);
-    expect(turns.resumeAccepting()).toBe(true);
-    await turns.idle();
-    expect(calls.map((c) => c.prompt)).toEqual(['first', 'second']);
-    expect(turns.isAccepting()).toBe(true);
-  });
-
   it('refuses input once it stops accepting, and for closed sessions', () => {
     const s = orchestrator();
     turns.close(s.id);

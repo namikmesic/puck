@@ -51,7 +51,7 @@ import type { DaemonIdentity } from './version';
 /** How long SIGTERM waits for interrupted turns before persisting anyway. */
 const SHUTDOWN_GRACE_MS = 20_000;
 
-type DaemonPhase = 'serving' | 'upgrading' | 'recovering' | 'shutting-down';
+type DaemonPhase = 'serving' | 'upgrading' | 'shutting-down';
 
 export interface DaemonOptions {
   paths: DaemonPaths;
@@ -71,7 +71,7 @@ export interface DaemonOptions {
 /** Ops a failed daemon still answers. */
 const FAILED_OPS: ReadonlySet<Op> = new Set<Op>(['snapshot.get', 'logs.tail']);
 /** Ops that need a ready environment. */
-const READY_OPS: ReadonlySet<Op> = new Set<Op>(['chat.send', 'credentials.get']);
+const READY_OPS: ReadonlySet<Op> = new Set<Op>(['chat.send', 'credentials.get', 'daemon.upgrade']);
 
 export class Daemon {
   private state: InstanceState = { status: 'provisioning' };
@@ -86,7 +86,7 @@ export class Daemon {
   private schedulerPaused = false;
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
-  private pendingShutdown = false;
+  private exited = false;
   private readonly run: CommandRunner;
   private readonly now: () => number;
   private readonly shutdownGraceMs: number;
@@ -278,7 +278,7 @@ export class Daemon {
     if (this.state.status === 'failed' && !FAILED_OPS.has(op)) {
       return Promise.reject(new OpError('not-ready', `The environment failed: ${this.state.error ?? 'unknown error'}`));
     }
-    if (this.phase !== 'serving' && op !== 'snapshot.get' && op !== 'logs.tail' && op !== 'daemon.upgrade') {
+    if (this.phase !== 'serving' && op !== 'snapshot.get' && op !== 'logs.tail') {
       return Promise.reject(new OpError('not-ready', 'The environment daemon is stopping.'));
     }
     if (READY_OPS.has(op) && this.state.status !== 'ready') {
@@ -387,15 +387,18 @@ export class Daemon {
   /* ---------- Upgrade and shutdown ---------- */
 
   /**
-   * Swap in the bundle the app staged at puckd.next.js: stop taking input,
-   * let running turns finish (drain) or interrupt them and wait out the
-   * shutdown grace (now), persist, rename the new bundle into place and
-   * exit 75, so the container's restart policy starts it. The response
-   * goes out before the exit. A failed swap resumes once any turn that
-   * ignored the interrupt has finished, unless a signal is already held.
+   * Swap in the bundle staged at puckd.next.js. Refused unless the daemon
+   * is ready and serving. Stops taking input, waits for running turns
+   * (drain) or interrupts them within the shutdown grace (now), then
+   * persists, renames the bundle into place, and exits 75. The response
+   * goes out before that work. If the grace runs out, or persist or the
+   * rename fails, the cause is logged and the process exits nonzero: the
+   * container restarts on the current bundle, and restart recovery keeps
+   * queued input. The staged bundle is used only when the rename completed.
    */
   private upgrade(mode: 'drain' | 'now'): Record<string, never> {
     if (this.phase !== 'serving') throw new OpError('invalid-state', 'An upgrade or shutdown is already in progress.');
+    if (this.state.status !== 'ready') throw new OpError('not-ready', 'The environment is still starting.');
     const { paths, log } = this.opts;
     let st: fs.Stats;
     try {
@@ -405,68 +408,99 @@ export class Daemon {
     }
     if (!st.isFile() || st.size === 0) throw new OpError('invalid-state', 'The staged daemon bundle is not a file.');
     this.phase = 'upgrading';
-    const before = { ...this.state };
-    this.emit({ kind: 'daemon.upgrading', mode });
-    log.info('daemon.upgrade', { mode });
-    this.turns?.stopAccepting();
+    try {
+      this.emit({ kind: 'daemon.upgrading', mode });
+      log.info('daemon.upgrade', { mode });
+      this.turns?.stopAccepting();
+    } catch (err) {
+      log.error('daemon.upgrade-failed', err);
+      void this.finishExit(1);
+      throw err;
+    }
     setImmediate(() => {
-      void (async () => {
-        try {
-          if (mode === 'now') await this.interruptWithinGrace();
-          else await this.turns?.idle();
-          this.setState({ status: 'stopping', detail: 'upgrading' });
-          await this.persist();
-          fs.renameSync(paths.nextBundle, paths.bundle);
-          log.info('daemon.exit', { code: UPGRADE_EXIT });
-          this.opts.exit(UPGRADE_EXIT);
-        } catch (err) {
-          log.error('daemon.upgrade-failed', err);
-          if (this.pendingShutdown) await this.beginShutdown();
-          else await this.settleFailedUpgrade(before);
-        }
-      })();
+      void this.completeUpgrade(mode);
     });
     return {};
   }
 
-  private async settleFailedUpgrade(before: InstanceState): Promise<void> {
-    this.phase = 'recovering';
-    await this.turns?.idle();
-    if (this.phase !== 'recovering') return;
-    this.setState(before);
-    this.turns?.resumeAccepting();
-    this.phase = 'serving';
+  private async completeUpgrade(mode: 'drain' | 'now'): Promise<void> {
+    const { paths, log } = this.opts;
+    let code = 1;
+    try {
+      if (mode === 'now') {
+        if (!(await this.interruptWithinGrace())) {
+          throw new Error('A running turn did not finish before the upgrade grace deadline.');
+        }
+      } else {
+        await this.turns?.idle();
+      }
+      this.setState({ status: 'stopping', detail: 'upgrading' });
+      await this.persist();
+      fs.renameSync(paths.nextBundle, paths.bundle);
+      code = UPGRADE_EXIT;
+    } catch (err) {
+      log.error('daemon.upgrade-failed', err);
+      try {
+        await this.persist();
+      } catch (persistErr) {
+        log.error('daemon.upgrade-failed', persistErr);
+      }
+    }
+    await this.finishExit(code);
   }
 
   /**
-   * SIGTERM or SIGINT. Serving and recovering shut down now. An upgrade
-   * holds the signal: the swap still exits 75 if it succeeds, and shuts
-   * down instead of recovering if it fails. A second signal is ignored.
+   * SIGTERM or SIGINT. An upgrade already in progress owns the exit.
+   * A repeat signal is ignored once shutdown has started; persist failure
+   * still exits, with a nonzero code.
    */
   async shutdown(): Promise<void> {
-    if (this.phase === 'shutting-down') return;
-    if (this.phase === 'upgrading') {
-      this.pendingShutdown = true;
-      return;
-    }
+    if (this.exited || this.phase === 'shutting-down' || this.phase === 'upgrading') return;
     await this.beginShutdown();
   }
 
   private async beginShutdown(): Promise<void> {
+    if (this.exited || this.phase === 'shutting-down') return;
     this.phase = 'shutting-down';
     this.server?.stopAccepting();
     this.turns?.stopAccepting();
-    this.setState({ status: 'stopping' });
     this.opts.log.info('daemon.shutdown');
-    await this.interruptWithinGrace();
-    await this.persist();
-    await this.server?.close();
-    this.opts.exit(0);
+    let code = 0;
+    try {
+      this.setState({ status: 'stopping' });
+      await this.interruptWithinGrace();
+      await this.persist();
+    } catch (err) {
+      this.opts.log.error('daemon.shutdown-failed', err);
+      code = 1;
+    }
+    await this.finishExit(code);
   }
 
-  private interruptWithinGrace(): Promise<unknown> {
+  /** True when every interrupted turn finished before the grace elapsed. */
+  private interruptWithinGrace(): Promise<boolean> {
     const pending = this.turns?.interruptAll() ?? Promise.resolve();
-    return Promise.race([pending, new Promise((resolve) => setTimeout(resolve, this.shutdownGraceMs).unref())]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.shutdownGraceMs);
+      timer.unref?.();
+    });
+    return Promise.race([pending.then(() => true), timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  private async finishExit(code: number): Promise<void> {
+    if (this.exited) return;
+    try {
+      await this.server?.close();
+    } catch (err) {
+      this.opts.log.error('daemon.shutdown-failed', err);
+    }
+    if (this.exited) return;
+    this.exited = true;
+    this.opts.log.info('daemon.exit', { code });
+    this.opts.exit(code);
   }
 
   private async persist(): Promise<void> {

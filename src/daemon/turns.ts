@@ -218,18 +218,6 @@ export class Turns {
     this.accepting = false;
   }
 
-  /** Take input again after a failed upgrade. False when a turn is still running. */
-  resumeAccepting(): boolean {
-    if (this.active.size > 0) return false;
-    this.accepting = true;
-    this.startRestored();
-    return true;
-  }
-
-  isAccepting(): boolean {
-    return this.accepting;
-  }
-
   /**
    * Queue an input. Starts a turn right away when the session is idle;
    * otherwise the input waits for the running turn to end.

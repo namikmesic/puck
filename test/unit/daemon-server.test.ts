@@ -44,14 +44,17 @@ function deliver(files: Record<string, unknown>): void {
   }
 }
 
-async function boot(over: { adapters?: Record<string, HarnessAdapter>; shutdownGraceMs?: number; onCommand?: () => void } = {}): Promise<void> {
+function launch(
+  over: { adapters?: Record<string, HarnessAdapter>; shutdownGraceMs?: number; onCommand?: () => void; hold?: () => Promise<void> } = {},
+): Promise<void> {
   const { run: recorded } = fakeRunner((argv) => {
     if (argv[0] === 'id' || argv[0] === 'getent') return { code: 1 };
     if (argv[0] === 'sh' && argv[1] === '-lc' && argv[2].includes('echo "')) return { stdout: installed };
     return undefined;
   });
-  const run: typeof recorded = (argv, opts) => {
+  const run: typeof recorded = async (argv, opts) => {
     over.onCommand?.();
+    await over.hold?.();
     return recorded(argv, opts);
   };
   exit = vi.fn();
@@ -66,7 +69,15 @@ async function boot(over: { adapters?: Record<string, HarnessAdapter>; shutdownG
     shutdownGraceMs: over.shutdownGraceMs,
     adapters: over.adapters ?? { 'claude-code': echo, codex: { ...echo, id: 'codex' } },
   });
-  await daemon.start();
+  return daemon.start();
+}
+
+async function boot(over: Parameters<typeof launch>[0] = {}): Promise<void> {
+  await launch(over);
+}
+
+async function waitForExit(): Promise<void> {
+  for (let i = 0; i < 50 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 20));
 }
 
 /** A raw protocol client over the unix socket. */
@@ -264,7 +275,7 @@ describe('puckd server (in process)', () => {
     expect(c.events().some((e) => e.ev.kind === 'daemon.upgrading')).toBe(true);
   });
 
-  it('a failed upgrade keeps the daemon running and taking input', async () => {
+  it('a failed upgrade exits instead of keeping the daemon up', async () => {
     const c = client();
     c.hello(null);
     await c.until(isWelcome);
@@ -273,12 +284,24 @@ describe('puckd server (in process)', () => {
     // A non-empty directory where the bundle goes makes the swap fail.
     fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'ready',
-    );
-    expect(exit).not.toHaveBeenCalled();
-    expect(await c.cmd('chat.send', { text: 'still here' })).toMatchObject({ ok: true });
+    await waitForExit();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(root.paths.nextBundle, 'utf8')).toBe('// new daemon');
+    expect(fs.statSync(root.paths.bundle).isDirectory()).toBe(true);
+  });
+
+  it('exits nonzero when shutdown cannot persist', async () => {
+    const segment = fs.readdirSync(root.paths.events).find((name) => name.endsWith('.ndjson'));
+    if (!segment) throw new Error('expected an event segment');
+    const file = path.join(root.paths.events, segment);
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -336,16 +359,20 @@ describe('inbox instance durability', () => {
   });
 });
 
-describe('upgrade now is bounded when a turn ignores interrupt', () => {
-  it('does not resume accepting when the grace elapses and the swap fails', async () => {
-    deliver({
-      'instance.json': {
-        envId: ENV_ID,
-        name: 'Example',
-        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
-        definition: exampleDefinition(),
-      },
-    });
+function exampleInbox(): Record<string, unknown> {
+  return {
+    'instance.json': {
+      envId: ENV_ID,
+      name: 'Example',
+      pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+      definition: exampleDefinition(),
+    },
+  };
+}
+
+describe('upgrade failure restarts instead of rolling back', () => {
+  it('exits nonzero without swapping when a turn ignores the interrupt', async () => {
+    deliver(exampleInbox());
     const prompts: string[] = [];
     const hang: HarnessAdapter = {
       id: 'claude-code',
@@ -362,39 +389,32 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     c.hello(null);
     await c.until(isWelcome);
     expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
-    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
     fs.mkdirSync(root.paths.opt, { recursive: true });
     fs.writeFileSync(root.paths.nextBundle, '// new daemon');
-    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
-    );
-    await new Promise((r) => setTimeout(r, 80));
-    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
-    expect(snap.result.instance.status).toBe('stopping');
-    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
-    expect(exit).not.toHaveBeenCalled();
-    expect(prompts).toEqual(['hang']);
-    await daemon.shutdown();
-    expect(exit).toHaveBeenCalledWith(0);
+    await waitForExit();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(root.paths.nextBundle, 'utf8')).toBe('// new daemon');
+    expect(fs.existsSync(root.paths.bundle)).toBe(false);
     expect(prompts).toEqual(['hang']);
   });
 
-  it('exits 75 after the shutdown grace', async () => {
-    deliver({
-      'instance.json': {
-        envId: ENV_ID,
-        name: 'Example',
-        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
-        definition: exampleDefinition(),
+  it('exits 75 when the interrupted turn finishes within the grace', async () => {
+    deliver(exampleInbox());
+    const finishing: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (_req, ctx) => {
+        await new Promise<void>((resolve) => {
+          if (ctx.signal.aborted) return resolve();
+          ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
       },
-    });
-    const hang: HarnessAdapter = { id: 'claude-code', run: () => new Promise<void>(() => undefined) };
+    };
     await boot({
       shutdownGraceMs: 40,
-      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+      adapters: { 'claude-code': finishing, codex: { id: 'codex', run: () => Promise.resolve() } },
     });
     const c = client();
     c.hello(null);
@@ -403,34 +423,17 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     fs.mkdirSync(root.paths.opt, { recursive: true });
     fs.writeFileSync(root.paths.nextBundle, '// new daemon');
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
-    for (let i = 0; i < 40 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 25));
+    await waitForExit();
     expect(exit).toHaveBeenCalledWith(75);
     expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+    expect(fs.existsSync(root.paths.nextBundle)).toBe(false);
   });
 
-  it('resumes the held follow-up after a failed upgrade once the ignored turn settles', async () => {
-    deliver({
-      'instance.json': {
-        envId: ENV_ID,
-        name: 'Example',
-        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
-        definition: exampleDefinition(),
-      },
-    });
-    const prompts: string[] = [];
-    let release: (() => void) | null = null;
+  it('a restarted daemon delivers a queued follow-up and reconciles the interrupted turn', async () => {
+    deliver(exampleInbox());
     const hang: HarnessAdapter = {
       id: 'claude-code',
-      run: async (req, ctx) => {
-        prompts.push(req.prompt);
-        if (prompts.length === 1) {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
-          return;
-        }
-        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
-      },
+      run: () => new Promise<void>(() => undefined),
     };
     await boot({
       shutdownGraceMs: 40,
@@ -443,88 +446,76 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
     fs.mkdirSync(root.paths.opt, { recursive: true });
     fs.writeFileSync(root.paths.nextBundle, '// new daemon');
-    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
-    );
-    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
-    expect(prompts).toEqual(['hang']);
-    if (!release) throw new Error('the running turn never started');
-    release();
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'turn.user' && f.ev.entry.text === 'later',
-    );
-    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
-    expect(snap.result.instance.status).toBe('ready');
-    expect(prompts).toContain('later');
-    expect(await c.cmd('chat.send', { text: 'after' })).toMatchObject({ ok: true });
-    await daemon.shutdown();
-    expect(exit).toHaveBeenCalledWith(0);
-  });
+    await waitForExit();
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(fs.existsSync(root.paths.bundle)).toBe(false);
+    const sessions = JSON.parse(fs.readFileSync(path.join(root.paths.state, 'sessions.json'), 'utf8')) as Record<
+      string,
+      { status: string; queue: { text: string; author: string }[] }
+    >;
+    const saved = Object.values(sessions).find((s) => s.status === 'running');
+    expect(saved?.queue).toEqual([{ text: 'later', author: 'user' }]);
 
-  it('refuses another upgrade while a failed one is recovering, then becomes ready', async () => {
-    deliver({
-      'instance.json': {
-        envId: ENV_ID,
-        name: 'Example',
-        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
-        definition: exampleDefinition(),
-      },
-    });
     const prompts: string[] = [];
-    let release: (() => void) | null = null;
-    const hang: HarnessAdapter = {
+    const completing: HarnessAdapter = {
       id: 'claude-code',
       run: async (req, ctx) => {
         prompts.push(req.prompt);
-        if (prompts.length === 1) {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
-          return;
-        }
         ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
       },
     };
     await boot({
       shutdownGraceMs: 40,
-      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+      adapters: { 'claude-code': completing, codex: { id: 'codex', run: () => Promise.resolve() } },
     });
+    const again = client();
+    again.hello(0);
+    const notice = await again.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'turn.notice',
+    );
+    expect(notice.ev).toMatchObject({
+      kind: 'turn.notice',
+      entry: {
+        notices: [expect.objectContaining({ kind: 'environment.restarted' })],
+      },
+    });
+    expect(prompts.some((p) => p.includes('later'))).toBe(true);
+    const sessionId = notice.ev.kind === 'turn.notice' ? notice.ev.sessionId : '';
+    const transcript = fs.readFileSync(path.join(root.paths.transcripts, `${sessionId}.json`), 'utf8');
+    expect(transcript).toContain('The environment restarted during this turn.');
+  });
+
+  it('refuses an upgrade while boot provisioning is still running', async () => {
+    deliver(exampleInbox());
+    let releaseProvision: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseProvision = resolve;
+    });
+    let held = false;
+    const started = launch({
+      hold: () => {
+        if (held) return Promise.resolve();
+        held = true;
+        return gate;
+      },
+    });
+    for (let i = 0; i < 50 && !fs.existsSync(root.paths.socket); i++) await new Promise((r) => setTimeout(r, 20));
     const c = client();
     c.hello(null);
     await c.until(isWelcome);
-    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
-    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
     fs.mkdirSync(root.paths.opt, { recursive: true });
     fs.writeFileSync(root.paths.nextBundle, '// new daemon');
-    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
-    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
-    );
-    await new Promise((r) => setTimeout(r, 80));
-    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
-    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
     const mid = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
-    expect(mid.result.instance.status).toBe('stopping');
+    expect(mid.result.instance.status).toBe('provisioning');
+    releaseProvision();
+    await started;
+    const ready = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(ready.result.instance.status).toBe('ready');
+    expect(await c.cmd('chat.send', { text: 'after boot' })).toMatchObject({ ok: true });
     expect(exit).not.toHaveBeenCalled();
-    if (!release) throw new Error('the running turn never started');
-    release();
-    await c.until(
-      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
-        f.t === 'event' && f.ev.kind === 'turn.user' && f.ev.entry.text === 'later',
-    );
-    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
-    expect(snap.result.instance.status).toBe('ready');
-    expect(prompts).toContain('later');
-    expect(await c.cmd('chat.send', { text: 'after' })).toMatchObject({ ok: true });
-    await daemon.shutdown();
-    expect(exit).toHaveBeenCalledTimes(1);
-    expect(exit).toHaveBeenCalledWith(0);
+    expect(fs.readFileSync(root.paths.nextBundle, 'utf8')).toBe('// new daemon');
   });
 
   it('shuts down once when signaled during a failing upgrade', async () => {
@@ -558,18 +549,14 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
     await daemon.shutdown();
-    for (let i = 0; i < 50 && exit.mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    await waitForExit();
     expect(exit).toHaveBeenCalledTimes(1);
-    expect(exit).toHaveBeenCalledWith(0);
+    expect(exit).toHaveBeenCalledWith(1);
     await daemon.shutdown();
     expect(exit).toHaveBeenCalledTimes(1);
     expect(prompts).toEqual(['hang']);
-    const statuses = c
-      .events()
-      .map((e) => e.ev)
-      .filter((ev): ev is Extract<DaemonEvent, { kind: 'instance.status' }> => ev.kind === 'instance.status')
-      .map((ev) => ev.status);
-    expect(statuses.at(-1)).toBe('stopping');
+    expect(fs.readFileSync(root.paths.nextBundle, 'utf8')).toBe('// new daemon');
+    expect(fs.statSync(root.paths.bundle).isDirectory()).toBe(true);
   });
 
   it('exits 75 once when signaled during a successful upgrade', async () => {
@@ -589,7 +576,7 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     fs.writeFileSync(root.paths.nextBundle, '// new daemon');
     expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
     await daemon.shutdown();
-    for (let i = 0; i < 50 && exit.mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    await waitForExit();
     expect(exit).toHaveBeenCalledTimes(1);
     expect(exit).toHaveBeenCalledWith(75);
     await daemon.shutdown();
@@ -728,6 +715,36 @@ describe('daemon wire frame limit', () => {
       c.socket.write('x'.repeat(WIRE_LIMITS.maxFrameBytes + 1));
       const err = await c.until((f): f is Extract<DaemonFrame, { t: 'error' }> => f.t === 'error');
       expect(err).toMatchObject({ code: 'bad-frame', message: 'A frame is larger than 1 MiB.' });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('refuses every command, including upgrade, once it stops accepting', async () => {
+    const seen: string[] = [];
+    fs.mkdirSync(root.paths.run, { recursive: true });
+    const server = new DaemonServer({
+      socketPath: root.paths.socket,
+      log: nullLogger,
+      events: new EventLog(root.paths.events),
+      identity: () => ({ envId: ENV_ID, version: '0', build: 'b' }),
+      dispatch: async (op) => {
+        seen.push(op);
+        return {};
+      },
+    });
+    await server.listen();
+    try {
+      const c = client();
+      c.hello(null);
+      await c.until(isWelcome);
+      server.stopAccepting();
+      expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({
+        ok: false,
+        error: { code: 'not-ready', message: 'The daemon is shutting down.' },
+      });
+      expect(await c.cmd('snapshot.get')).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+      expect(seen).toEqual([]);
     } finally {
       await server.close();
     }
