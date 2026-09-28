@@ -11,7 +11,8 @@ import { JsonStore } from './store';
 /**
  * Why a queued item that already has a worker session waits, which decides
  * what its next dispatch sends and whether it counts as an attempt:
- * error (counts, continue input), restart (does not count, continue input),
+ * error (counts, continue input), restart (does not count; work.ts sends
+ * a continue, or the full worker prompt if that session never received one),
  * follow-up (a new request: input already queued), retry (a fresh count).
  */
 export type RequeueReason = 'error' | 'restart' | 'follow-up' | 'retry';
