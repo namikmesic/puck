@@ -5,7 +5,7 @@
 
 import { claudeHarness } from '../../harness/providers';
 import type { HarnessProvider } from './types';
-import { providerAuth, providerCredential } from './oauth';
+import { providerAuth, providerCredential, signInStatus } from './oauth';
 import * as oauth from './claude-oauth';
 
 export const claudeProvider: HarnessProvider = {
@@ -20,6 +20,10 @@ export const claudeProvider: HarnessProvider = {
     connectedDetail: (tokens) =>
       `Connected — token refreshes automatically (expires ${new Date(tokens.expiresAt).toLocaleString()})`,
   }),
+
+  status() {
+    return signInStatus(oauth.account, this.auth.status());
+  },
 
   credential: providerCredential(oauth.account, {
     containerPath: '/root/.claude/.credentials.json',

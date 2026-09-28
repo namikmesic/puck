@@ -9,8 +9,8 @@ import type { EnvironmentProvider } from './types';
 
 export const LOCAL_TARGET = 'local';
 
-function requireLocal(targetId: string): void {
-  if (targetId !== LOCAL_TARGET) throw new Error(`Unknown Local Docker target: ${targetId}`);
+function requireLocal(target: string): void {
+  if (target !== LOCAL_TARGET) throw new Error(`Unknown Local Docker target: ${target}`);
 }
 
 export const dockerLocalProvider: EnvironmentProvider = {
@@ -18,21 +18,22 @@ export const dockerLocalProvider: EnvironmentProvider = {
   id: 'docker-local',
   label: 'Local Docker',
   targets: () => [{ id: LOCAL_TARGET, label: 'This Mac', host: null }],
-  async detail() {
+  status() {
     const known = dockerLocationKnown();
-    if (known.path) return `docker CLI at ${known.path}`;
-    return known.error ?? 'Locating the docker CLI… (Check runs the search)';
+    if (known.path) return { state: 'connected', detail: `docker CLI at ${known.path}` };
+    if (known.error) return { state: 'error', detail: known.error };
+    return { state: 'pending', detail: 'Locating the docker CLI… (Check runs the search)' };
   },
-  async health(targetId) {
-    requireLocal(targetId);
+  async health(target) {
+    requireLocal(target);
     return classifyHealth(await docker(HEALTH_ARGS, { timeoutMs: HEALTH_TIMEOUT_MS }), null);
   },
-  runner(targetId) {
-    requireLocal(targetId);
+  runner(target) {
+    requireLocal(target);
     return docker;
   },
-  spawn(targetId, args) {
-    requireLocal(targetId);
+  spawn(target, args) {
+    requireLocal(target);
     return dockerProcess(args);
   },
 };

@@ -17,23 +17,26 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   DeviceCodePrompt,
-  EnvTargetInfo,
+  EnvTarget,
   GitHubStatus,
   ProviderAuthInfo,
   ProviderKind,
+  ProviderStatus,
   TargetHealth,
 } from '../../harness/bridge';
 import type { HarnessDescriptor } from '../../harness/providers';
 import type { DockerRunner } from '../docker-client';
 
-export type { ProviderKind } from '../../harness/bridge';
+export type { ProviderKind, ProviderStatus } from '../../harness/bridge';
 export type { HarnessDescriptor, PinnedPackage } from '../../harness/providers';
 
-interface ProviderBase {
+export interface ProviderBase {
   readonly kind: ProviderKind;
   /** Persisted (agent records, stores, runner dispatch) - NEVER change. */
   readonly id: string;
   readonly label: string;
+  /** Current state without I/O: sign-in state, or what is configured. */
+  status(): ProviderStatus;
 }
 
 /** Login + token lifecycle for one harness provider account. */
@@ -100,15 +103,14 @@ export interface HarnessProvider extends ProviderBase, HarnessDescriptor {
  */
 export interface EnvironmentProvider extends ProviderBase {
   readonly kind: 'environment';
-  targets(): EnvTargetInfo[];
-  /** One line about the provider itself (e.g. where the docker CLI was found). */
-  detail(): Promise<string>;
+  /** docker-local: the one target `local`; docker-ssh: one per configured host. */
+  targets(): EnvTarget[];
   /** `docker version` against the target, with the failure classified. */
-  health(targetId: string): Promise<TargetHealth>;
+  health(target: string): Promise<TargetHealth>;
   /** Argv docker runner bound to the target. Throws for an unknown target. */
-  runner(targetId: string): DockerRunner;
+  runner(target: string): DockerRunner;
   /** Raw stdio docker process bound to the target (for long-lived exec bridges). */
-  spawn(targetId: string, args: string[]): ChildProcessWithoutNullStreams;
+  spawn(target: string, args: string[]): ChildProcessWithoutNullStreams;
 }
 
 /** Sign-in lifecycle of an integration: GitHub's device flow. */

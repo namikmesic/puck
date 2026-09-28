@@ -80,14 +80,34 @@ describe('provider registry', () => {
     expect(requireHarness('codex').thinkingLevels).toContain('xhigh');
   });
 
-  it('toInfo never leaks auth methods, credentials or container internals', async () => {
-    const keys = async (id: string): Promise<string[]> => Object.keys(await toInfo(requireProvider(id))).sort();
-    expect(await keys('claude-code')).toEqual(
-      ['auth', 'capabilities', 'configOptions', 'id', 'kind', 'label', 'models', 'systemPromptHint', 'thinkingLevels'].sort(),
+  it('every provider reports a status without I/O, and its info carries it', () => {
+    for (const p of providers) {
+      const status = p.status();
+      expect(['connected', 'disconnected', 'pending', 'error']).toContain(status.state);
+      expect(typeof status.detail).toBe('string');
+      expect(toInfo(p).status).toEqual(status);
+    }
+  });
+
+  it('toInfo never leaks auth methods, credentials or container internals', () => {
+    const keys = (id: string): string[] => Object.keys(toInfo(requireProvider(id))).sort();
+    expect(keys('claude-code')).toEqual(
+      [
+        'auth',
+        'capabilities',
+        'configOptions',
+        'id',
+        'kind',
+        'label',
+        'models',
+        'status',
+        'systemPromptHint',
+        'thinkingLevels',
+      ].sort(),
     );
-    expect(await keys('docker-local')).toEqual(['detail', 'id', 'kind', 'label', 'targets']);
-    expect(await keys('github')).toEqual(['auth', 'github', 'id', 'kind', 'label']);
-    const gh = (await toInfo(requireProvider('github'))) as Extract<ProviderInfo, { kind: 'integration' }>;
+    expect(keys('docker-local')).toEqual(['id', 'kind', 'label', 'status', 'targets']);
+    expect(keys('github')).toEqual(['auth', 'github', 'id', 'kind', 'label', 'status']);
+    const gh = toInfo(requireProvider('github')) as Extract<ProviderInfo, { kind: 'integration' }>;
     expect(Object.keys(gh.github).sort()).toEqual(
       ['appConfigured', 'configRepo', 'installUrl', 'login', 'mode', 'patUrl', 'pendingCode'].sort(),
     );

@@ -13,7 +13,8 @@
 import * as crypto from 'node:crypto';
 import { log } from '../log';
 import { deleteSecret, loadSecret, saveSecret } from '../secrets';
-import type { ProviderAuth, ProviderCredential } from './types';
+import type { ProviderAuthInfo } from '../../harness/bridge';
+import type { ProviderAuth, ProviderCredential, ProviderStatus } from './types';
 
 /** PKCE verifier + S256 challenge. Verifier size differs per provider. */
 export function pkce(verifierBytes: number): { verifier: string; challenge: string } {
@@ -269,6 +270,21 @@ export function providerAuth<T>(
     setOnLogin: (cb) => account.setOnLogin(cb),
     setOnLogout: (cb) => account.setOnLogout(cb),
   };
+}
+
+/**
+ * A sign-in provider's `status()`: signed in wins, then a login in
+ * progress, then the last failed sign-in; otherwise signed out.
+ */
+export function signInStatus(account: { lastError(): string | null }, auth: ProviderAuthInfo): ProviderStatus {
+  const state = auth.connected
+    ? 'connected'
+    : auth.pending
+      ? 'pending'
+      : account.lastError()
+        ? 'error'
+        : 'disconnected';
+  return { state, detail: auth.detail };
 }
 
 /** The Provider `container.credential` surface: the CLI file mirrored from

@@ -10,8 +10,8 @@
 
 import type {
   DeviceCodePrompt,
-  GitHubInstallation,
-  GitHubRepo,
+  GithubInstallation,
+  GithubRepo,
   IntegrationProviderInfo,
   ProviderInfo,
   PuckBridge,
@@ -122,7 +122,7 @@ function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInf
 
   void ctx.bridge
     .githubInstallations()
-    .then((installs: GitHubInstallation[]) => {
+    .then((installs: GithubInstallation[]) => {
       list.textContent = '';
       if (!installs.length) {
         list.appendChild(
@@ -169,7 +169,7 @@ function configRepoBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo):
 
   void ctx.bridge
     .githubRepos()
-    .then((repos: GitHubRepo[]) => {
+    .then((repos: GithubRepo[]) => {
       select.textContent = '';
       if (!current) {
         const none = el('option', '', repos.length ? 'Choose a repository…' : 'No repositories reachable');
