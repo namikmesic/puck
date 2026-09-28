@@ -1143,6 +1143,63 @@ describe('daemon turns: crash windows and storage failures', () => {
     expect(turns.get(s.id)?.status).toBe('idle');
   });
 
+  it('retries a failed turn-end transcript write before publishing turn.end, then starts the queue', async () => {
+    let failing = true;
+    turns = build({ endRetryMs: 5 });
+    failFinishedCommit(() => failing);
+    const s = orchestrator();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        await gate;
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(END);
+      },
+      (_req, ctx) => ctx.emit(END),
+    ];
+    turns.send(s.id, 'hello');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'next')).toEqual({ queued: true });
+    release();
+    await turns.idle();
+    expect(events.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    expect(calls.map((c) => c.prompt)).toEqual(['hello']);
+    expect(turns.get(s.id)?.status).toBe('running');
+    expect(turns.get(s.id)?.handoff).toMatchObject({ handedOff: true });
+    expect(lastTurnKinds(diskLog(s.id))).not.toContain('turn-end');
+
+    expect(turns.send(s.id, 'later')).toEqual({ queued: true });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events.filter((e) => e.kind === 'turn.end')).toEqual([]);
+    expect(calls.map((c) => c.prompt)).toEqual(['hello']);
+    expect(turns.get(s.id)?.status).toBe('running');
+
+    failing = false;
+    await new Promise((r) => setTimeout(r, 40));
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['hello', 'next\n\nlater']);
+    const starts = events.flatMap((e) => (e.kind === 'turn.start' ? [e.turnId] : []));
+    const ends = events.flatMap((e) => (e.kind === 'turn.end' ? [e.turnId] : []));
+    expect(ends).toEqual(starts);
+    expect(events.filter((e) => e.kind === 'turn.end')[0]).toMatchObject({
+      stats: { inputTokens: 1, outputTokens: 2, durationMs: 0 },
+    });
+    const order = events.flatMap((e) => (e.kind === 'turn.start' || e.kind === 'turn.end' ? [e.kind] : []));
+    expect(order).toEqual(['turn.start', 'turn.end', 'turn.start', 'turn.end']);
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'transcripts', `${s.id}.json`), 'utf8')) as {
+      log: Array<{ kind: string; events?: Array<{ kind: string; text?: string }> }>;
+    };
+    const first = saved.log.find((e) => e.kind === 'turn');
+    expect(first?.events?.map((e) => e.kind)).toEqual(['text-delta', 'turn-end']);
+    expect(first?.events?.some((e) => e.text === 'the reply')).toBe(true);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+    const sessions = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { status: string; handoff?: unknown }>;
+    expect(sessions[s.id].status).toBe('idle');
+    expect(sessions[s.id].handoff).toBeUndefined();
+  });
+
   it('writes the reply before the session is marked idle once the transcript write succeeds', async () => {
     const sessions = sessionsStore(dir);
     const idleWithoutReply: string[] = [];
