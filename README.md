@@ -216,12 +216,15 @@ npm test            # vitest unit suites
 npm run test:e2e    # boots the real app isolated and smoke-checks the UI
 npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
 npm run build:server  # the Puck server as one file, .webpack/server/puck-server.js
+npm run build:daemon
+npm run test:docker # real containers; needs a Docker engine
 npm run make        # the release ZIP and its checksum, see RELEASE.md
 ```
 
 The container runner lives in `src/main/runner/runner.js`.
 It is plain CommonJS, bundled as a raw string and docker-cp'd into environments on start.
 Runner changes take effect on the next environment restart.
+The environment daemon, puckd, is built beside that runner (`npm run build:daemon` writes `.webpack/daemon/puckd.js`) and is not what environment start launches.
 
 `RELEASE.md` covers versioning, the build target, signing and notarization, and the release checklist.
 

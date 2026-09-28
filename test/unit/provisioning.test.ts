@@ -9,7 +9,7 @@ import {
   verifyPins,
   verifyScript,
   type ExpectedPackage,
-} from '../../src/main/provisioning';
+} from '../../src/harness/provisioning';
 import { harnessDescriptors as providers, type HarnessDescriptor } from '../../src/harness/providers';
 
 function providerStub(packages: HarnessDescriptor['packages']): HarnessDescriptor {

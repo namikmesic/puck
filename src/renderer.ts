@@ -868,7 +868,8 @@ async function submit(text: string): Promise<void> {
       if (event.kind !== 'thinking') {
         event.ts = Date.now(); // wall-clock stamp survives into replays
         // Merge consecutive text deltas — token-level entries would bloat the
-        // log and make replay quadratic again.
+        // log and make replay quadratic again. Same rule as `recordEvent`
+        // in src/harness/transcript.ts.
         const prev = record.events[record.events.length - 1];
         if (
           event.kind === 'text-delta' &&

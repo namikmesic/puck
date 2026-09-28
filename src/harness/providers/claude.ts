@@ -23,11 +23,13 @@ const CLAUDE_TOOLS: ReadonlyArray<{ name: string; description: string }> = [
   { name: 'Agent', description: 'Delegate work to parallel subagents' },
 ];
 
-// Verified against @anthropic-ai/claude-agent-sdk 0.3.233 typings (Options,
-// PermissionMode, ThinkingConfig). Excluded on purpose: cwd (fixed /workspace
-// mount), includePartialMessages (Puck streaming requires it), resume/session
-// fields (backend-managed), canUseTool (runner-owned Ask bridge), env
-// (environment-level config exists), mcpServers/agents/hooks/skills (future).
+// Verified against @anthropic-ai/claude-agent-sdk 0.3.280 typings (Options,
+// PermissionMode, ThinkingConfig). Excluded on purpose: includePartialMessages
+// (Puck streaming requires it), resume/session fields (backend-managed),
+// canUseTool (runner-owned Ask bridge), env (environment-level config
+// exists), spawnClaudeCodeProcess (the daemon runs the CLI as its own user),
+// agents/hooks/skills (future). cwd and mcpServers are set per session by
+// the environment daemon.
 const CLAUDE_OPTIONS: readonly ProviderOption[] = [
   {
     kind: 'enum',
@@ -189,10 +191,18 @@ export const claudeHarness: HarnessDescriptor = {
     cliBin: 'claude',
     // Pinned: verified by provisioning after install (see provisioning.ts).
     cli: [{ name: '@anthropic-ai/claude-code', version: '2.1.280' }],
-    sdk: [{ name: '@anthropic-ai/claude-agent-sdk', version: '0.3.280' }],
+    // zod and the MCP SDK are the Agent SDK's peers; the daemon's in-process
+    // orchestrator tools use both, so they are pinned with it.
+    sdk: [
+      { name: '@anthropic-ai/claude-agent-sdk', version: '0.3.280' },
+      { name: 'zod', version: '4.6.5' },
+      { name: '@modelcontextprotocol/sdk', version: '1.30.1' },
+    ],
   },
   // Claude Code refuses --dangerously-skip-permissions as root unless it
-  // can tell it's sandboxed; the container is exactly that sandbox.
+  // can tell it's sandboxed; the container is exactly that sandbox. The
+  // container runner runs the CLI as root and needs this; the environment
+  // daemon runs it as an unprivileged user, where it is not needed.
   containerEnv: { IS_SANDBOX: '1' },
   credentialPath: '/puck/home/.claude/.credentials.json',
 };

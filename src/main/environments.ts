@@ -47,7 +47,7 @@ import {
   parseInstalledVersions,
   verifyPins,
   verifyScript,
-} from './provisioning';
+} from '../harness/provisioning';
 import { byKind, type HarnessProvider } from './providers';
 import { deleteSecret, loadSecret, saveSecret } from './secrets';
 import { defineStore } from './store';

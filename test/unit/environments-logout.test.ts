@@ -6,7 +6,7 @@ import { useDockerRunner, type DockerResult } from '../../src/main/docker-client
 import * as environments from '../../src/main/environments';
 import { byKind, requireHarness } from '../../src/main/providers';
 import { account as claudeAccount } from '../../src/main/providers/claude-oauth';
-import { expectedPackages } from '../../src/main/provisioning';
+import { expectedPackages } from '../../src/harness/provisioning';
 
 // A start ends with the runner handshake; no real exec here.
 vi.mock('../../src/main/runner', () => ({

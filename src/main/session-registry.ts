@@ -2,18 +2,14 @@
  * Provider-native resume ids (Claude session ids / Codex thread ids), keyed
  * `agentId@envId` and persisted so long-lived conversations survive app
  * restarts. Scoped to the environment because a rebuilt container has no
- * transcripts — its ids must die with it. Also owns the policy for
+ * transcripts — its ids must die with it. Re-exports the shared policy for
  * recognizing "this resume id no longer resolves" provider errors.
  */
 
 import { defineStore } from './store';
 
-/** Provider errors that mean "this resume id no longer resolves". Claude
- *  reports a dead resume as an opaque `error_during_execution` before any
- *  content, so that counts too (callers must require a resumed, content-free
- *  attempt — a genuine mid-work failure never matches). */
-const STALE_RESUME_RE =
-  /no conversation found|no rollout found|resume failed|failed to resume|(session|thread|conversation).{0,40}not found|unknown (session|thread)|does not exist|error_during_execution/i;
+// The stale-resume policy is shared with the environment daemon.
+export { isStaleResumeError } from '../harness/resume';
 
 // Null-prototype records: agent ids are arbitrary slugs, and a key like
 // `constructor` must never resolve to something inherited from Object.
@@ -60,8 +56,4 @@ export function forgetEnvironment(envId: string): void {
     }
   }
   if (changed) store.persist();
-}
-
-export function isStaleResumeError(message: string): boolean {
-  return STALE_RESUME_RE.test(message);
 }

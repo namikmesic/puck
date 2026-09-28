@@ -7,6 +7,11 @@ export const rules: Required<ModuleOptions>['rules'] = [
     test: /runner[/\\]runner\.js$/,
     type: 'asset/source',
   },
+  // The environment daemon ships the same way (built by scripts/build-daemon.mjs).
+  {
+    test: /daemon[/\\]puckd\.js$/,
+    type: 'asset/source',
+  },
   // Add support for native node modules
   {
     // We're specifying native_modules in the test because the asset relocator loader generates a

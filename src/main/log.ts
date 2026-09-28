@@ -13,6 +13,7 @@
 import { app } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { redact } from '../harness/redact';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 
@@ -43,27 +44,8 @@ export interface Logger {
 
 /* ---------- Redaction ---------- */
 
-// `key: value` / `"key": "value"` / `key=value` where the key smells like a
-// credential. The value is replaced, the key stays so the line remains useful.
-const SECRET_KV =
-  /("?)([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|authorization|credential|cookie)[A-Za-z0-9_.-]*)("?\s*[:=]\s*)((?:Bearer\s+)?(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;}\]]+))/gi;
-
-const SECRET_SHAPES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]'],
-  // Anthropic / OpenAI style API keys (`sk-ant-...`, `sk-proj-...`, `sk-...`).
-  [/\bsk-[A-Za-z0-9_-]{16,}/g, '[redacted]'],
-  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]'],
-  // Any long opaque blob: OAuth access and refresh tokens have no fixed prefix.
-  // Docker ids (64 hex) fall under this too, which is an acceptable loss.
-  [/[A-Za-z0-9_+=-]{48,}/g, '[redacted-long]'],
-];
-
-/** Scrubs credential-looking material from a line of text. */
-export function redact(text: string): string {
-  let out = text.replace(SECRET_KV, '$1$2$3[redacted]');
-  for (const [shape, replacement] of SECRET_SHAPES) out = out.replace(shape, replacement);
-  return out;
-}
+// Shared with the environment daemon's log (src/harness/redact.ts).
+export { redact };
 
 /* ---------- Formatting ---------- */
 
