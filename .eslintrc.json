@@ -97,7 +97,9 @@
               {
                 "group": [
                   "**/channel/e2e",
-                  "**/channel/e2e.ts"
+                  "**/channel/e2e.ts",
+                  "**/channel/stream",
+                  "**/channel/stream.ts"
                 ],
                 "message": "The Puck server relays channels without holding keys; it must not import the channel encryption."
               },
@@ -105,9 +107,44 @@
                 "group": [
                   "electron",
                   "**/main/**",
-                  "**/renderer/**"
+                  "**/renderer/**",
+                  "**/puck-runner/**",
+                  "**/daemon/**"
                 ],
-                "message": "The Puck server runs outside the app; it may import only src/server, src/channel and src/harness."
+                "message": "The Puck server runs outside the app; it may import only src/server, src/channel (not its encryption) and src/harness."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/puck-runner/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "electron",
+                "message": "puck-runner runs on runner hosts: no electron."
+              }
+            ],
+            "patterns": [
+              {
+                "group": [
+                  "**/main",
+                  "**/main/**",
+                  "**/renderer",
+                  "**/renderer/**",
+                  "**/daemon",
+                  "**/daemon/**",
+                  "**/server",
+                  "**/server/**"
+                ],
+                "message": "puck-runner may import only src/puck-runner, src/channel and src/harness."
               }
             ]
           }
@@ -131,6 +168,13 @@
                   "**/daemon/**"
                 ],
                 "message": "The app talks to the daemon over its protocol; it never imports daemon code."
+              },
+              {
+                "group": [
+                  "**/puck-runner",
+                  "**/puck-runner/**"
+                ],
+                "message": "The app talks to runners over the control protocol; it never imports runner code."
               }
             ]
           }
