@@ -97,6 +97,39 @@ describe('POST /v1/instances', () => {
     expect(offline.body.error).toBe('runner-offline');
   });
 
+  it('refuses to record an environment when the runner is removed during the access check', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    const gate = h.github.pauseRepoReads(1);
+    const pending = create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    await gate.arrived;
+    expect((await call(h, 'DELETE', `/v1/runners/${r.runnerId}`, { token: s.accessToken })).status).toBe(204);
+    gate.release();
+    const res = await pending;
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not-found');
+    expect((await call(h, 'GET', '/v1/instances', { token: s.accessToken })).body.instances).toEqual([]);
+  });
+
+  it('does not insert an environment for a missing runner', async () => {
+    const { s } = await setup();
+    const placed = await h.server.ctx.store.createInstance(
+      {
+        id: 'env_missing',
+        userId: s.userId,
+        runnerId: 'rnr_missing',
+        definition: 'web',
+        status: 'active',
+        permissions: { contents: 'write' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      [],
+    );
+    expect(placed).toBe('gone');
+    expect(await h.server.ctx.store.getInstance('env_missing')).toBeNull();
+  });
+
   it('lets only one of two overlapping creates claim the last slot', async () => {
     const { s, r, sock } = await setup();
     h.github.addRepo('namik/web', { pushers: ['namik'] });
@@ -221,6 +254,22 @@ describe('installation tokens for a runner', () => {
     res = await mint(r.accessToken, envId);
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('no-repositories');
+  });
+
+  it('leaves the repository granted when re-verification hits a secondary rate limit', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    const inst = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    const envId = String(inst.body.envId);
+    h.clock.advance(10 * 60_000);
+    h.github.limitRepoReads(1);
+    const res = await mint(r.accessToken, envId);
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('github-unavailable');
+    const view = await call(h, 'GET', `/v1/instances/${envId}`, { token: s.accessToken });
+    expect((view.body.instance as { repos: unknown[] }).repos).toEqual([{ owner: 'namik', name: 'web', revoked: false }]);
+    const kinds = (await h.server.ctx.store.listAudit(s.userId, 50)).map((e) => e.kind);
+    expect(kinds).not.toContain('grant.repo-revoked');
   });
 
   it('reports owner-auth-lost when re-verification’s user token is rejected', async () => {

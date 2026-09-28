@@ -194,6 +194,7 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
       updatedAt: now,
     };
     const placed = await ctx.store.createInstance(instance, grant);
+    if (placed === 'gone') throw new HttpError(404, 'not-found', 'No such runner.');
     if (placed !== 'ok') {
       throw new HttpError(409, 'runner-full', `${runner.name} already hosts its maximum of ${placed.full} environments.`);
     }

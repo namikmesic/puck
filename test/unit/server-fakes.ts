@@ -51,6 +51,8 @@ export class FakeGitHub {
   refreshCount = 0;
   /** App JWT calls answer 401. User tokens are left alone. */
   rejectAppJwt = false;
+  /** Remaining user-token repository reads that answer with a secondary rate limit. */
+  private repoRateLimits = 0;
   private repoPause: { need: number; seen: number; arrive: () => void; gate: Promise<void> } | null = null;
   /** Access-token life GitHub hands out (8 h, like user-to-server tokens). */
   tokenLifeMs = 8 * 60 * 60_000;
@@ -89,6 +91,11 @@ export class FakeGitHub {
   /** GitHub rejects current user access tokens while the server still treats them as unexpired. */
   rejectUserAccess(): void {
     this.access.clear();
+  }
+
+  /** The next `n` user-token repository reads answer 403 with a long Retry-After. */
+  limitRepoReads(n = 1): void {
+    this.repoRateLimits = n;
   }
 
   /** Holds the next `need` repository reads until `release`. */
@@ -203,6 +210,13 @@ export class FakeGitHub {
         pause.seen += 1;
         if (pause.seen >= pause.need) pause.arrive();
         await pause.gate;
+      }
+      if (this.repoRateLimits > 0) {
+        this.repoRateLimits -= 1;
+        return new Response(JSON.stringify({ message: 'You have exceeded a secondary rate limit' }), {
+          status: 403,
+          headers: { 'content-type': 'application/json', 'retry-after': '60' },
+        });
       }
       const login = this.userFor(auth);
       if (!login) return json(401, { message: 'Bad credentials' });

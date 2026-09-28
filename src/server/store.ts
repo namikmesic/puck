@@ -198,10 +198,11 @@ export interface Store {
   sweep(now: number): Promise<void>;
 
   /**
-   * Inserts the instance and its grant, unless the runner already hosts
-   * `maxEnvironments` active instances. `full` is that cap.
+   * Inserts the instance and its grant. `gone` when that runner row is
+   * missing or already removed; `full` when it already hosts
+   * `maxEnvironments` active instances.
    */
-  createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | { full: number }>;
+  createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | 'gone' | { full: number }>;
   getInstance(id: string): Promise<Instance | null>;
   listInstances(userId: string): Promise<Instance[]>;
   instancesOnRunner(runnerId: string): Promise<Instance[]>;
@@ -721,10 +722,11 @@ export class SqliteStore implements Store {
     });
   }
 
-  async createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | { full: number }> {
+  async createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | 'gone' | { full: number }> {
     return this.tx(() => {
-      const runner = this.one('SELECT max_environments FROM runners WHERE id = ?', i.runnerId);
-      const cap = runner ? optNum(runner.max_environments) : null;
+      const runner = this.one('SELECT max_environments, removed_at FROM runners WHERE id = ?', i.runnerId);
+      if (!runner || optNum(runner.removed_at) !== null) return 'gone';
+      const cap = optNum(runner.max_environments);
       if (cap !== null) {
         const count = this.one("SELECT COUNT(*) AS n FROM instances WHERE runner_id = ? AND status = 'active'", i.runnerId) as Row;
         if (num(count.n) >= cap) return { full: cap };

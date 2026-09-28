@@ -22,6 +22,7 @@ import {
   createHttpClient,
   defaultDeps,
   GitHubApiError,
+  GitHubRateLimitError,
   RefreshRejectedError,
   tokensFrom,
   type HttpClient,
@@ -164,6 +165,7 @@ export class GitHubApp {
         push: d.permissions?.push === true,
       };
     } catch (err) {
+      if (err instanceof GitHubRateLimitError) throw err;
       if (err instanceof GitHubApiError && (err.status === 404 || err.status === 403)) return null;
       throw err;
     }
