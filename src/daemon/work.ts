@@ -14,6 +14,8 @@
  * attempt: the item goes back to `queued` without a count, and its next
  * dispatch resumes the SAME worker session (the harness's saved
  * conversation) with a short continue message, so nothing starts over.
+ * A worker session that never received its prompt (the restart came
+ * between creating it and queueing the prompt) gets the full worker prompt.
  */
 
 import type { AskQuestion } from '../harness/types';
@@ -395,7 +397,19 @@ export class Work {
     }
     // Later dispatches reuse the worktree and the session.
     if (item.status !== 'running') return;
-    if (this.deps.turns.queueLength(item.sessionId) === 0) {
+    const session = this.deps.turns.get(item.sessionId);
+    if (session && session.turns === 0 && this.deps.turns.queueLength(item.sessionId) === 0) {
+      // A session that started no turn and has nothing queued never saw the
+      // item, e.g. a shutdown or upgrade caught the first prepare between
+      // creating the session and queueing its prompt.
+      const repo = this.repoOf(def, item);
+      if (!item.worktree || !item.branch || !item.base) throw new Error(`${itemLabel(item)} has a worker session but no worktree.`);
+      this.deps.turns.send(
+        item.sessionId,
+        workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: item.worktree, branch: item.branch, base: item.base }),
+        'system',
+      );
+    } else if (this.deps.turns.queueLength(item.sessionId) === 0) {
       const why =
         reason === 'restart'
           ? RESTART_REASON

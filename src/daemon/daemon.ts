@@ -192,7 +192,7 @@ export class Daemon {
         onTurnEnd: (s, outcome) => this.turnEnded(s, outcome),
         routeAsk: (s, askId, questions) => this.work.routeAsk(s, askId, questions),
         onAskClosed: (s, askId) => this.work.askClosed(s, askId),
-        // A worker resumes when the scheduler dispatches it again, with its own continue input.
+        // A worker is not resumed here. Its next dispatch (work.ts) queues the input.
         resumeText: (s) => (s.kind === 'worker' ? null : RESUME_PROMPT),
         summaryExtra: (s) => (s.kind === 'orchestrator' ? { autoWakePaused: this.orchestrator.autoWakePaused() } : {}),
         now: this.now,
