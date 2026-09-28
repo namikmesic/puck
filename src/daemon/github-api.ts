@@ -3,11 +3,15 @@
  * their comments, pull requests with their reviews and review comments,
  * check runs, commit statuses, workflow runs, jobs and job logs.
  *
- * Every poll is a conditional request. The ETag of each URL's last 200
- * answer is kept with its body, so an unchanged resource costs a 304
- * (which GitHub does not count against the rate limit) and the caller
- * still gets the body it had. Polled URLs are stable per resource (a fixed
- * `since`, never the time of the last poll), or the ETags would never hit.
+ * Every poll is a conditional request on its first page. The ETag of that
+ * URL's last 200 answer is kept with the body, so an unchanged resource
+ * costs a 304 (which GitHub does not count against the rate limit) and the
+ * caller still gets the body it had. A list keeps every page: the first
+ * page is the conditional request, and Link rel="next" is followed for the
+ * rest, including after a 304 when a later page may have grown. Polled URLs
+ * are stable per resource (a fixed `since`, never the time of the last
+ * poll), or the ETags would never hit. A check or status list that is still
+ * short of the full set is incomplete and is never reported as success.
  *
  * Each request uses the installation token the runner supplied for the
  * repository's owner. Everything that comes back is untrusted input: it is
@@ -15,7 +19,7 @@
  * never logged.
  */
 
-import { createHttpClient, GitHubApiError, type GitHubDeps } from '../harness/github';
+import { createHttpClient, GitHubApiError, nextLink, type GitHubDeps, type HttpClient } from '../harness/github';
 import type { GithubGrant } from '../harness/daemon-protocol';
 
 export interface GhUserRef {
@@ -111,6 +115,8 @@ export interface GhJob {
 export interface Polled<T> {
   data: T;
   changed: boolean;
+  /** A list that stopped short of the full set. Callers must not treat it as complete. */
+  incomplete?: boolean;
 }
 
 /** A repository's installation token is missing, expired, or does not cover it. */
@@ -134,8 +140,25 @@ export interface GitHubApiDeps {
   now?: () => number;
 }
 
+interface CacheEntry {
+  etag: string;
+  data: unknown;
+  /** First page of a list, so a 304 can be combined with a fresh tail. */
+  head?: unknown;
+  next?: string | null;
+  total?: number | null;
+  incomplete?: boolean;
+}
+
+const asArray = <T>(page: unknown): T[] => (Array.isArray(page) ? (page as T[]) : []);
+const totalCount = (page: unknown): number | null => {
+  const n = (page as { total_count?: unknown } | null)?.total_count;
+  return typeof n === 'number' ? n : null;
+};
+const shortOf = (total: number | null | undefined, length: number): boolean => typeof total === 'number' && length < total;
+
 export class GitHubApi {
-  private readonly cache = new Map<string, { etag: string; data: unknown }>();
+  private readonly cache = new Map<string, CacheEntry>();
   private readonly now: () => number;
 
   constructor(private readonly deps: GitHubApiDeps) {
@@ -164,23 +187,75 @@ export class GitHubApi {
     });
   }
 
+  /** Most recently used last, so the oldest entries go first. */
+  private remember(path: string, entry: CacheEntry): void {
+    this.cache.delete(path);
+    this.cache.set(path, entry);
+    while (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value as string);
+  }
+
   /** A conditional GET (If-None-Match with the ETag of the last answer). */
   async poll<T>(repo: string, path: string): Promise<Polled<T>> {
     const cached = this.cache.get(path);
     const res = await this.client(repo).request<T>(path, { signal: deadline(), ...(cached ? { ifNoneMatch: cached.etag } : {}) });
     if (res.status === 304 && cached) {
-      // Most recently used last, so the oldest entries go first.
-      this.cache.delete(path);
-      this.cache.set(path, cached);
+      this.remember(path, cached);
       return { data: cached.data as T, changed: false };
     }
     const etag = res.headers.get('etag');
-    this.cache.delete(path);
-    if (etag) {
-      this.cache.set(path, { etag, data: res.data });
-      while (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value as string);
-    }
+    if (etag) this.remember(path, { etag, data: res.data });
+    else this.cache.delete(path);
     return { data: res.data, changed: true };
+  }
+
+  /**
+   * A list. The first page is a conditional GET; further pages follow Link.
+   * After a 304 the cached first page is kept and the tail is read again,
+   * because a new row past page one does not change page one's ETag.
+   */
+  private async pollList<T>(
+    repo: string,
+    path: string,
+    pick: (page: unknown) => T[] = asArray,
+    totalOf: (page: unknown) => number | null = () => null,
+  ): Promise<Polled<T[]>> {
+    const client = this.client(repo);
+    const signal = deadline();
+    const sep = path.includes('?') ? '&' : '?';
+    const firstPath = /[?&]per_page=/.test(path) ? path : `${path}${sep}per_page=100`;
+    const cached = this.cache.get(firstPath);
+    const res = await client.request<unknown>(firstPath, { signal, ...(cached ? { ifNoneMatch: cached.etag } : {}) });
+    if (res.status === 304 && cached) {
+      this.remember(firstPath, cached);
+      if (!cached.next) return { data: cached.data as T[], changed: false, incomplete: cached.incomplete };
+      const tail = await this.rest<T>(client, cached.next, pick, signal);
+      const items = [...(cached.head as T[]), ...tail.items];
+      const incomplete = tail.truncated || shortOf(cached.total, items.length);
+      cached.data = items;
+      cached.incomplete = incomplete;
+      return { data: items, changed: true, incomplete };
+    }
+    const head = pick(res.data);
+    const total = totalOf(res.data);
+    const next = nextLink(res.headers.get('link'));
+    const tail = next ? await this.rest<T>(client, next, pick, signal) : { items: [] as T[], truncated: false };
+    const items = [...head, ...tail.items];
+    const incomplete = tail.truncated || shortOf(total, items.length);
+    const etag = res.headers.get('etag');
+    if (etag) this.remember(firstPath, { etag, data: items, head, next, total, incomplete });
+    else this.cache.delete(firstPath);
+    return { data: items, changed: true, incomplete };
+  }
+
+  private async rest<T>(
+    client: HttpClient,
+    next: string,
+    pick: (page: unknown) => T[],
+    signal: AbortSignal,
+  ): Promise<{ items: T[]; truncated: boolean }> {
+    const truncated = { value: false };
+    const items = await client.paginate<T>(next, pick, { maxPages: 19, signal, truncated });
+    return { items, truncated: truncated.value };
   }
 
   async get<T>(repo: string, path: string, opts: { text?: boolean } = {}): Promise<T> {
@@ -198,7 +273,7 @@ export class GitHubApi {
   /* ---------- Endpoints ---------- */
 
   openIssuesLabelled(repo: string, label: string): Promise<Polled<GhIssue[]>> {
-    return this.poll(repo, `${repoPath(repo)}/issues?state=open&labels=${seg(label)}&sort=created&direction=asc&per_page=100`);
+    return this.pollList(repo, `${repoPath(repo)}/issues?state=open&labels=${seg(label)}&sort=created&direction=asc`);
   }
 
   issue(repo: string, number: number): Promise<Polled<GhIssue>> {
@@ -207,7 +282,7 @@ export class GitHubApi {
 
   /** Comments updated since `since` (fixed per item, so the URL and its ETag stay stable). */
   issueComments(repo: string, number: number, since: number): Promise<Polled<GhComment[]>> {
-    return this.poll(repo, `${repoPath(repo)}/issues/${number}/comments?since=${seg(new Date(since).toISOString())}&per_page=100`);
+    return this.pollList(repo, `${repoPath(repo)}/issues/${number}/comments?since=${seg(new Date(since).toISOString())}`);
   }
 
   createIssueComment(repo: string, number: number, body: string): Promise<GhComment> {
@@ -223,11 +298,11 @@ export class GitHubApi {
   }
 
   reviews(repo: string, number: number): Promise<Polled<GhReview[]>> {
-    return this.poll(repo, `${repoPath(repo)}/pulls/${number}/reviews?per_page=100`);
+    return this.pollList(repo, `${repoPath(repo)}/pulls/${number}/reviews`);
   }
 
   reviewComments(repo: string, number: number): Promise<Polled<GhReviewComment[]>> {
-    return this.poll(repo, `${repoPath(repo)}/pulls/${number}/comments?per_page=100`);
+    return this.pollList(repo, `${repoPath(repo)}/pulls/${number}/comments`);
   }
 
   /** Repository permission for `login`: `admin`, `maintain`, `write`, `triage`, `read` or `none`. */
@@ -235,22 +310,43 @@ export class GitHubApi {
     return this.get(repo, `${repoPath(repo)}/collaborators/${seg(login)}/permission`);
   }
 
-  checkRuns(repo: string, sha: string): Promise<Polled<{ check_runs: GhCheckRun[] }>> {
-    return this.poll(repo, `${repoPath(repo)}/commits/${seg(sha)}/check-runs?per_page=100`);
+  checkRuns(repo: string, sha: string): Promise<Polled<GhCheckRun[]>> {
+    return this.pollList(
+      repo,
+      `${repoPath(repo)}/commits/${seg(sha)}/check-runs`,
+      (page) => asArray<GhCheckRun>((page as { check_runs?: GhCheckRun[] } | null)?.check_runs),
+      totalCount,
+    );
   }
 
-  combinedStatus(repo: string, sha: string): Promise<Polled<GhCombinedStatus>> {
-    return this.poll(repo, `${repoPath(repo)}/commits/${seg(sha)}/status?per_page=100`);
+  async combinedStatus(repo: string, sha: string): Promise<Polled<GhCombinedStatus>> {
+    const polled = await this.pollList(
+      repo,
+      `${repoPath(repo)}/commits/${seg(sha)}/status`,
+      (page) => asArray<GhCombinedStatus['statuses'][number]>((page as GhCombinedStatus | null)?.statuses),
+      totalCount,
+    );
+    const statuses = polled.data;
+    const state = statuses.some((s) => s.state === 'failure' || s.state === 'error')
+      ? 'failure'
+      : statuses.some((s) => s.state === 'pending')
+        ? 'pending'
+        : statuses.length
+          ? 'success'
+          : 'pending';
+    return { ...polled, data: { state, total_count: statuses.length, statuses } };
   }
 
-  async runs(repo: string, sha: string): Promise<GhRun[]> {
-    const page = await this.get<{ workflow_runs?: GhRun[] }>(repo, `${repoPath(repo)}/actions/runs?head_sha=${seg(sha)}&per_page=100`);
-    return page?.workflow_runs ?? [];
+  runs(repo: string, sha: string): Promise<GhRun[]> {
+    return this.list(repo, `${repoPath(repo)}/actions/runs?head_sha=${seg(sha)}`, (page) =>
+      asArray<GhRun>((page as { workflow_runs?: GhRun[] } | null)?.workflow_runs),
+    );
   }
 
-  async jobs(repo: string, runId: number): Promise<GhJob[]> {
-    const page = await this.get<{ jobs?: GhJob[] }>(repo, `${repoPath(repo)}/actions/runs/${runId}/jobs?filter=latest&per_page=100`);
-    return page?.jobs ?? [];
+  jobs(repo: string, runId: number): Promise<GhJob[]> {
+    return this.list(repo, `${repoPath(repo)}/actions/runs/${runId}/jobs?filter=latest`, (page) =>
+      asArray<GhJob>((page as { jobs?: GhJob[] } | null)?.jobs),
+    );
   }
 
   /** A job's plain-text log (GitHub answers with a short-lived redirect to it). */
@@ -267,9 +363,12 @@ export class GitHubApi {
     return r.data?.default_branch ?? '';
   }
 
-  async searchIssues(repo: string, q: string): Promise<GhIssue[]> {
-    const page = await this.get<{ items?: GhIssue[] }>(repo, `/search/issues?q=${seg(q)}&per_page=20`);
-    return page?.items ?? [];
+  searchIssues(repo: string, q: string): Promise<GhIssue[]> {
+    return this.list(repo, `/search/issues?q=${seg(q)}`, (page) => asArray<GhIssue>((page as { items?: GhIssue[] } | null)?.items));
+  }
+
+  private list<T>(repo: string, path: string, pick: (page: unknown) => T[]): Promise<T[]> {
+    return this.client(repo).paginate(path, pick, { signal: deadline() });
   }
 }
 

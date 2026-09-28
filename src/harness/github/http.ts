@@ -110,11 +110,24 @@ export interface HttpClientOptions {
 export interface HttpClient {
   request<T>(path: string, opts?: RequestOptions): Promise<GitHubResponse<T>>;
   /** Every page of a list endpoint (per_page=100, following Link rel="next"). */
-  paginate<T>(path: string, pick?: (page: unknown) => T[], opts?: { maxPages?: number }): Promise<T[]>;
+  paginate<T>(path: string, pick?: (page: unknown) => T[], opts?: PaginateOptions): Promise<T[]>;
   rateLimit(): RateLimitState;
 }
 
 const JSON_MEDIA = 'application/vnd.github+json';
+const LIST_PAGE = 100;
+
+export interface PaginateOptions {
+  maxPages?: number;
+  signal?: AbortSignal;
+  /** Set when the page cap stops the walk while GitHub still offers another page. */
+  truncated?: { value: boolean };
+}
+
+function withPerPage(path: string): string {
+  if (/[?&]per_page=/.test(path)) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}per_page=${LIST_PAGE}`;
+}
 
 function headerNumber(headers: Headers, name: string): number | null {
   const raw = headers.get(name);
@@ -230,16 +243,18 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
   async function paginate<T>(
     path: string,
     pick: (page: unknown) => T[] = (page) => (Array.isArray(page) ? (page as T[]) : []),
-    po: { maxPages?: number } = {},
+    po: PaginateOptions = {},
   ): Promise<T[]> {
     const out: T[] = [];
-    const sep = path.includes('?') ? '&' : '?';
-    let next: string | null = `${path}${sep}per_page=100`;
-    for (let page = 0; next && page < (po.maxPages ?? 20); page++) {
-      const res: GitHubResponse<unknown> = await request<unknown>(next);
+    let next: string | null = withPerPage(path);
+    if (po.truncated) po.truncated.value = false;
+    const max = po.maxPages ?? 20;
+    for (let page = 0; next && page < max; page++) {
+      const res: GitHubResponse<unknown> = await request<unknown>(next, { signal: po.signal });
       out.push(...pick(res.data));
       next = nextLink(res.headers.get('link'));
     }
+    if (po.truncated && next) po.truncated.value = true;
     return out;
   }
 

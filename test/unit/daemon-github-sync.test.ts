@@ -8,6 +8,7 @@ import {
   agentFromLabels,
   evaluateChecks,
   GithubSync,
+  LIMITS,
   logTail,
   MAX_REVIEW_ROUNDS,
   statusMarker,
@@ -51,6 +52,8 @@ function fakeGitHub() {
     reviews: new Map<number, Json[]>(),
     reviewComments: new Map<number, Json[]>(),
     checkRuns: new Map<string, Json[]>(),
+    /** When set, check-runs `total_count` exceeds the runs returned, so the list is incomplete. */
+    checkTotal: new Map<string, number>(),
     statuses: new Map<string, Json[]>(),
     runs: new Map<string, Json[]>(),
     jobs: new Map<number, Json[]>(),
@@ -60,9 +63,23 @@ function fakeGitHub() {
     reruns: [] as number[],
     requests: [] as Req[],
     nextId: 9000,
+    /** When set, list routes return every row in one page (no Link header). */
+    unpaged: false,
+  };
+  const paged = (url: URL, all: unknown[]): { body: unknown[]; link?: string } => {
+    if (gh.unpaged) return { body: all };
+    const perPage = Math.max(1, Number(url.searchParams.get('per_page') ?? '100') || 100);
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? '1') || 1);
+    const start = (page - 1) * perPage;
+    const body = all.slice(start, start + perPage);
+    if (start + body.length >= all.length) return { body };
+    const next = new URL(url.href);
+    next.searchParams.set('page', String(page + 1));
+    next.searchParams.set('per_page', String(perPage));
+    return { body, link: `<${next.href}>; rel="next"` };
   };
   const etag = (body: string): string => `"${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`;
-  const route = (method: string, url: URL, body: Json | null): [number, unknown] => {
+  const route = (method: string, url: URL, body: Json | null): [number, unknown, Record<string, string>?] => {
     const p = url.pathname.replace(/^\/repos\/octo\/app/, '');
     let m: RegExpExecArray | null;
     if (method === 'GET' && p === '') return [200, { full_name: 'octo/app', default_branch: 'main' }];
@@ -71,7 +88,8 @@ function fakeGitHub() {
       const list = [...gh.issues.values()].filter(
         (i) => i.state === 'open' && (i.labels as Json[]).some((l) => String(l.name).toLowerCase() === label.toLowerCase()),
       );
-      return [200, list];
+      const page = paged(url, list);
+      return [200, page.body, page.link ? { link: page.link } : undefined];
     }
     if ((m = /^\/issues\/(\d+)$/.exec(p)) && method === 'GET') {
       const issue = gh.issues.get(Number(m[1]));
@@ -82,7 +100,8 @@ function fakeGitHub() {
       const list = gh.comments.get(n) ?? [];
       if (method === 'GET') {
         const since = Date.parse(url.searchParams.get('since') ?? '1970-01-01T00:00:00Z');
-        return [200, list.filter((c) => Date.parse(String(c.updated_at)) >= since)];
+        const page = paged(url, list.filter((c) => Date.parse(String(c.updated_at)) >= since));
+        return [200, page.body, page.link ? { link: page.link } : undefined];
       }
       const c = { id: gh.nextId++, body: body?.body, user: { login: 'puck-agents[bot]', type: 'Bot' }, author_association: 'NONE', created_at: iso(T0), updated_at: iso(T0), html_url: `https://github.com/octo/app/issues/${n}#c` };
       gh.comments.set(n, [...list, c]);
@@ -102,21 +121,38 @@ function fakeGitHub() {
       const pull = gh.pulls.get(Number(m[1]));
       return pull ? [200, pull] : [404, { message: 'Not Found' }];
     }
-    if ((m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return [200, gh.reviews.get(Number(m[1])) ?? []];
-    if ((m = /^\/pulls\/(\d+)\/comments$/.exec(p))) return [200, gh.reviewComments.get(Number(m[1])) ?? []];
+    if ((m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) {
+      const page = paged(url, gh.reviews.get(Number(m[1])) ?? []);
+      return [200, page.body, page.link ? { link: page.link } : undefined];
+    }
+    if ((m = /^\/pulls\/(\d+)\/comments$/.exec(p))) {
+      const page = paged(url, gh.reviewComments.get(Number(m[1])) ?? []);
+      return [200, page.body, page.link ? { link: page.link } : undefined];
+    }
     if ((m = /^\/collaborators\/([^/]+)\/permission$/.exec(p)) && method === 'GET') {
       const perm = gh.permissions.get(decodeURIComponent(m[1]).toLowerCase());
       if (perm === undefined) return [404, { message: 'Not Found' }];
       if (typeof perm === 'number') return [perm, { message: 'unavailable' }];
       return [200, { permission: perm, role_name: perm }];
     }
-    if ((m = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(p))) return [200, { total_count: 0, check_runs: gh.checkRuns.get(m[1]) ?? [] }];
-    if ((m = /^\/commits\/([0-9a-f]+)\/status$/.exec(p))) {
-      const statuses = gh.statuses.get(m[1]) ?? [];
-      return [200, { state: 'pending', total_count: statuses.length, statuses }];
+    if ((m = /^\/commits\/([0-9a-f]+)\/check-runs$/.exec(p))) {
+      const all = gh.checkRuns.get(m[1]) ?? [];
+      const page = paged(url, all);
+      return [200, { total_count: gh.checkTotal.get(m[1]) ?? all.length, check_runs: page.body }, page.link ? { link: page.link } : undefined];
     }
-    if (p === '/actions/runs') return [200, { workflow_runs: gh.runs.get(url.searchParams.get('head_sha') ?? '') ?? [] }];
-    if ((m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(p))) return [200, { jobs: gh.jobs.get(Number(m[1])) ?? [] }];
+    if ((m = /^\/commits\/([0-9a-f]+)\/status$/.exec(p))) {
+      const all = gh.statuses.get(m[1]) ?? [];
+      const page = paged(url, all);
+      return [200, { state: 'pending', total_count: all.length, statuses: page.body }, page.link ? { link: page.link } : undefined];
+    }
+    if (p === '/actions/runs') {
+      const page = paged(url, gh.runs.get(url.searchParams.get('head_sha') ?? '') ?? []);
+      return [200, { workflow_runs: page.body }, page.link ? { link: page.link } : undefined];
+    }
+    if ((m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(p))) {
+      const page = paged(url, gh.jobs.get(Number(m[1])) ?? []);
+      return [200, { jobs: page.body }, page.link ? { link: page.link } : undefined];
+    }
     if ((m = /^\/actions\/runs\/(\d+)\/rerun-failed-jobs$/.exec(p)) && method === 'POST') {
       gh.reruns.push(Number(m[1]));
       return [201, {}];
@@ -129,7 +165,7 @@ function fakeGitHub() {
     const method = init?.method ?? 'GET';
     const headers = new Headers(init?.headers);
     const body = init?.body ? (JSON.parse(String(init.body)) as Json) : null;
-    const [status, value] = route(method, url, body);
+    const [status, value, extra] = route(method, url, body);
     const text = typeof value === 'string' ? value : JSON.stringify(value);
     const tag = etag(text);
     const inm = headers.get('if-none-match');
@@ -139,7 +175,7 @@ function fakeGitHub() {
       req.status = 304;
       return new Response(null, { status: 304, headers: { etag: tag } });
     }
-    return new Response(text, { status, headers: method === 'GET' ? { etag: tag } : {} });
+    return new Response(text, { status, headers: method === 'GET' ? { etag: tag, ...extra } : {} });
   }) as typeof fetch;
   return { gh, fetch: fetchFn };
 }
@@ -176,6 +212,7 @@ function comment(id: number, login: string, association: string, body: string, o
 let root: ReturnType<typeof tempRoot>;
 let clock: number;
 let fake: ReturnType<typeof fakeGitHub>;
+let fetchImpl: typeof fetch;
 let backlog: Backlog;
 let notices: Array<{ kind: NoticeKind; text: string; itemId?: string }>;
 let followUps: Array<{ itemId: string; text: string; author: EntryAuthor }>;
@@ -215,7 +252,12 @@ const work: SyncWork = {
 
 function build(): GithubSync {
   return new GithubSync({
-    api: new GitHubApi({ grantFor: (owner) => (grant?.owner === owner ? grant : null), apiBase: API, fetch: fake.fetch, now: () => clock }),
+    api: new GitHubApi({
+      grantFor: (owner) => (grant?.owner === owner ? grant : null),
+      apiBase: API,
+      fetch: (input, init) => fetchImpl(input, init),
+      now: () => clock,
+    }),
     backlog,
     work,
     store: githubStore(root.paths.state),
@@ -233,6 +275,7 @@ beforeEach(() => {
   root = tempRoot('pd-gh-');
   clock = T0;
   fake = fakeGitHub();
+  fetchImpl = fake.fetch;
   backlog = new Backlog({ store: itemsStore(root.paths.state), emit: () => undefined, now: () => clock });
   notices = [];
   followUps = [];
@@ -411,6 +454,16 @@ describe('issue intake', () => {
     expect(Buffer.byteLength(item.body, 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
 
+  it('takes in labelled issues past the first page, including one that arrives later', async () => {
+    for (let n = 1; n <= 101; n++) fake.gh.issues.set(n, issue(n, ['puck']));
+    await sync.poll();
+    expect(backlog.list()).toHaveLength(101);
+    fake.gh.issues.set(102, issue(102, ['puck']));
+    await pollAll();
+    expect(backlog.list().map((i) => i.source?.number)).toContain(102);
+    expect(backlog.list()).toHaveLength(102);
+  });
+
   it('agentFromLabels picks the first assigned agent a label names', () => {
     expect(agentFromLabels(['bug', 'puck:ghost', 'puck:reviewer'], 'puck', ['implementer', 'reviewer'])).toEqual({ agent: 'reviewer', unknown: ['ghost'] });
     expect(agentFromLabels(['puckish:implementer'], 'puck', ['implementer'])).toEqual({ agent: null, unknown: [] });
@@ -544,6 +597,33 @@ describe('changes on a linked issue', () => {
     await pollAll();
     expect(permissionReads('carol')).toHaveLength(2);
     expect(noticesOf('issue.commented')).toHaveLength(2);
+  });
+
+  it('delivers an issue comment past the first page', async () => {
+    policies = { intake: 'off', statusComment: false };
+    linkedItem(1, 'running');
+    permit('carol', 'write');
+    fake.gh.comments.set(
+      1,
+      Array.from({ length: 101 }, (_, i) => comment(i + 1, 'carol', 'OWNER', i === 100 ? 'past the first page' : `c${i}`)),
+    );
+    await sync.poll();
+    expect(noticesOf('issue.commented')[0]?.text).toContain('past the first page');
+  });
+
+  it('does not deliver an issue comment again once the seen list is full', async () => {
+    policies = { intake: 'off' };
+    fake.gh.unpaged = true;
+    linkedItem(1, 'running');
+    permit('carol', 'write');
+    fake.gh.comments.set(
+      1,
+      Array.from({ length: LIMITS.seenKept }, (_, i) => comment(i + 1, 'carol', 'OWNER', `c${i}`)),
+    );
+    await sync.poll();
+    expect(noticesOf('issue.commented')).toHaveLength(1);
+    await pollAll();
+    expect(noticesOf('issue.commented')).toHaveLength(1);
   });
 
   it('comments older than the item are not news', async () => {
@@ -686,6 +766,67 @@ describe('pull request state', () => {
     expect(notices.filter((n) => n.kind === 'pr.merged' || n.kind === 'pr.closed')).toHaveLength(c.notice ? 1 : 0);
   });
 
+  it('finishes a queued follow-up when the merge closes the linked issue', async () => {
+    policies = { intake: 'off', statusComment: false };
+    const item = publishedItem('queued', 1);
+    expect(item.sessionId).toBeTruthy();
+    fake.gh.issues.set(1, issue(1, ['puck'], { state: 'closed' }));
+    Object.assign(fake.gh.pulls.get(7) as Json, { state: 'closed', merged: true, merged_at: iso(T0) });
+    await sync.poll();
+    const now = backlog.get(item.id) as ItemRecord;
+    expect(now.status).toBe('done');
+    expect(now.acceptNote).toContain('during a follow-up');
+    expect(noticesOf('issue.closed')).toHaveLength(1);
+    expect(noticesOf('pr.merged')).toHaveLength(1);
+  });
+
+  it('a pull read in flight during publish keeps CI on the new commit', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const sha2 = 'b'.repeat(40);
+    const orig = fetchImpl;
+    let raced = false;
+    fetchImpl = (async (input, init) => {
+      const url = new URL(String(input));
+      if (!raced && url.pathname === '/repos/octo/app/pulls/7') {
+        raced = true;
+        const current = backlog.get(item.id) as ItemRecord;
+        backlog.patch(current, { pr: { ...(current.pr as NonNullable<ItemRecord['pr']>), lastPushedSha: sha2 } });
+        await sync.published(item.id);
+      }
+      return orig(input, init);
+    }) as typeof fetch;
+    const run = (id: number, conclusion: string) => ({
+      id,
+      name: 'test',
+      status: 'completed',
+      conclusion,
+      html_url: `https://github.com/octo/app/runs/${id}`,
+      output: { title: `test ${conclusion}` },
+    });
+    fake.gh.checkRuns.set(SHA, [run(1, 'failure')]);
+    fake.gh.checkRuns.set(sha2, [run(2, 'success')]);
+    await sync.poll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(noticesOf('pr.checks')).toEqual([]);
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual(['W-1 PR #7: all 1 check passed.']);
+    expect(followUps).toEqual([]);
+  });
+
+  it('follows a newer head commit reported by the pull request', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const sha2 = 'c'.repeat(40);
+    const pull = fake.gh.pulls.get(7) as Json;
+    pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+  });
+
   it('stops polling a merged pull request', async () => {
     policies = { intake: 'off' };
     publishedItem('review');
@@ -740,6 +881,27 @@ describe('review feedback and the trust filter', () => {
       expect(followUps[0].text).toContain('--- @dana on src/a.ts:12:\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\nUse a guard here.');
     }
     if (c.type === 'Bot') expect(permissionReads()).toHaveLength(0);
+  });
+
+  it('does not address a review again after the seen list is full', async () => {
+    policies = { intake: 'off', reviews: 'address' };
+    fake.gh.unpaged = true;
+    publishedItem();
+    permit('dana', 'admin');
+    fake.gh.reviewComments.set(
+      7,
+      Array.from({ length: LIMITS.seenKept + 1 }, (_, i) => ({
+        ...comment(i + 1, 'dana', 'OWNER', `Point ${i}`),
+        path: 'a.ts',
+        line: 1,
+        diff_hunk: '@@',
+        pull_request_review_id: 1,
+      })),
+    );
+    await sync.poll();
+    expect(followUps).toHaveLength(1);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
   });
 
   it('notify leaves the decision to the orchestrator: a notice, no follow-up', async () => {
@@ -913,9 +1075,66 @@ describe('CI on the published head', () => {
     expect(followUps).toHaveLength(1);
   });
 
+  it('a failing check past the first page is a failure', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(
+      SHA,
+      Array.from({ length: 101 }, (_, i) => run(i + 1, `job-${i}`, i === 100 ? 'failure' : 'success')),
+    );
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    expect(noticesOf('pr.checks')[0].text).toContain('job-100');
+  });
+
+  it('does not report success when the check list is short of total_count', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'success')]);
+    fake.gh.checkTotal.set(SHA, 3);
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    expect(noticesOf('pr.checks')).toEqual([]);
+  });
+
+  it('reads a failed job and a failed run past the first page', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    fake.gh.runs.set(
+      SHA,
+      Array.from({ length: 101 }, (_, i) => ({
+        id: i + 1,
+        name: `CI-${i}`,
+        status: 'completed',
+        conclusion: i === 100 ? 'failure' : 'success',
+        head_sha: SHA,
+      })),
+    );
+    fake.gh.jobs.set(
+      101,
+      Array.from({ length: 101 }, (_, i) => ({
+        id: i + 1,
+        name: `job-${i}`,
+        status: 'completed',
+        conclusion: i === 100 ? 'failure' : 'success',
+        html_url: null,
+      })),
+    );
+    fake.gh.logs.set(101, 'late boom');
+    await pollAll();
+    const read = sync.ciRead(backlog.get(item.id) as ItemRecord) as { logs: Array<{ job: string; log: string }> };
+    expect(read.logs).toEqual([{ job: 'job-100', log: 'late boom' }]);
+  });
+
   it('evaluateChecks: pending wins, then failure, then success', () => {
     expect(evaluateChecks([], null).state).toBe('none');
     expect(evaluateChecks([run(1, 'a', 'skipped')], null)).toMatchObject({ state: 'success', passed: 1 });
+    expect(evaluateChecks([run(1, 'a', 'success')], null, true).state).toBe('pending');
+    expect(evaluateChecks([run(1, 'a', 'failure')], null, true).state).toBe('failure');
     expect(evaluateChecks([run(1, 'a', 'cancelled')], null).state).toBe('failure');
     expect(evaluateChecks([run(1, 'a', 'timed_out')], { state: 'pending', total_count: 1, statuses: [{ context: 'x', state: 'pending', target_url: null, description: null }] }).state).toBe('pending');
   });

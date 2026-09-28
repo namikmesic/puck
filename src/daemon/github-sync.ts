@@ -193,6 +193,7 @@ export function issueHash(issue: Pick<GhIssue, 'title' | 'body'>): string {
 export function evaluateChecks(
   runs: GhCheckRun[],
   status: GhCombinedStatus | null,
+  incomplete = false,
 ): { state: 'pending' | 'failure' | 'success' | 'none'; failing: PullChecks['failing']; passed: number } {
   let pending = 0;
   let passed = 0;
@@ -210,8 +211,23 @@ export function evaluateChecks(
       failing.push({ name: oneLine(st.context, 120), url: st.target_url ?? '', summary: oneLine(st.description || st.state, 300) });
     } else passed++;
   }
-  const state = pending ? 'pending' : failing.length ? 'failure' : passed ? 'success' : 'none';
+  let state: 'pending' | 'failure' | 'success' | 'none' = pending ? 'pending' : failing.length ? 'failure' : passed ? 'success' : 'none';
+  if (incomplete && state !== 'failure') state = 'pending';
   return { state, failing, passed };
+}
+
+function trimSeen<T>(keys: readonly T[], live: ReadonlySet<T>, cap: number): T[] {
+  const present: T[] = [];
+  const absent: T[] = [];
+  const have = new Set<T>();
+  for (const key of keys) {
+    if (have.has(key)) continue;
+    have.add(key);
+    if (live.has(key)) present.push(key);
+    else absent.push(key);
+  }
+  if (present.length >= cap) return present;
+  return [...absent.slice(-(cap - present.length)), ...present];
 }
 
 /** The last `lines` lines of a log, redacted and capped from the end. */
@@ -246,6 +262,7 @@ export class GithubSync {
   private readonly waitingForGrant = new Set<string>();
   /** `repo\0login` → write / no / unread, for the current poll only. */
   private readonly access = new Map<string, 'write' | 'no' | 'unread'>();
+  private readonly olderHeads = new Map<string, Set<string>>();
   private readonly now: () => number;
   private readonly timers: Timers;
 
@@ -402,6 +419,7 @@ export class GithubSync {
       if (this.deps.backlog.get(id)) continue;
       delete file.items[id];
       removed = true;
+      this.olderHeads.delete(id);
       for (const kind of ['issue', 'pull', 'checks']) this.last.delete(`${kind}:${id}`);
     }
     if (removed) this.deps.store.commit();
@@ -612,7 +630,8 @@ export class GithubSync {
     const { data: issue, changed } = await this.deps.api.issue(src.repo, src.number);
     if (changed && issue && typeof issue === 'object') {
       if (issue.state === 'closed') {
-        if (item.status === 'backlog' || item.status === 'queued') {
+        const notStarted = item.status === 'backlog' || (item.status === 'queued' && !item.sessionId);
+        if (notStarted) {
           this.deps.work.cancel(item.id, 'orchestrator', 'The issue was closed on GitHub.');
           this.deps.notify('issue.closed', `Issue ${ref} was closed on GitHub, so ${this.label(item)} was cancelled.`, item.id);
         } else if (!s.issueClosedNotified) {
@@ -650,9 +669,9 @@ export class GithubSync {
     if (!item || CLOSED.has(item.status)) return;
     const createdAt = item.createdAt;
     const { data: comments } = await this.deps.api.issueComments(src.repo, src.number, createdAt);
-    const fresh = (Array.isArray(comments) ? comments : []).filter(
-      (c) => !s.issueSeen.includes(c.id) && parseTime(c.created_at, 0) >= createdAt,
-    );
+    const list = Array.isArray(comments) ? comments : [];
+    const live = new Set(list.map((c) => c.id));
+    const fresh = list.filter((c) => !s.issueSeen.includes(c.id) && parseTime(c.created_at, 0) >= createdAt);
     if (!fresh.length) return;
     const decided: number[] = [];
     const passed: GhComment[] = [];
@@ -667,7 +686,7 @@ export class GithubSync {
       if (access === 'write') passed.push(c);
     }
     if (!decided.length) return;
-    s.issueSeen = [...s.issueSeen, ...decided].slice(-LIMITS.seenKept);
+    s.issueSeen = trimSeen([...s.issueSeen, ...decided], live, LIMITS.seenKept);
     if (passed.length) {
       const said = passed.map((c) => `@${c.user?.login ?? 'someone'} commented: "${oneLine(c.body ?? '', 300)}"`).join(' ');
       this.deps.notify('issue.commented', `Issue ${ref} (${this.label(item)}): ${said}`, item.id);
@@ -708,14 +727,17 @@ export class GithubSync {
     if (s.statusCommentId === null) {
       const marker = statusMarker(this.deps.envId(), item.id);
       const { data } = await this.deps.api.issueComments(src.repo, src.number, item.createdAt);
-      const existing = (Array.isArray(data) ? data : []).find((c) => (c.body ?? '').includes(marker));
+      const found = Array.isArray(data) ? data : [];
+      const existing = found.find((c) => (c.body ?? '').includes(marker));
       if (existing) {
         s.statusCommentId = existing.id;
         await this.deps.api.updateIssueComment(src.repo, existing.id, body);
       } else {
         s.statusCommentId = (await this.deps.api.createIssueComment(src.repo, src.number, body)).id;
       }
-      s.issueSeen = [...s.issueSeen, s.statusCommentId].slice(-LIMITS.seenKept);
+      const seenLive = new Set(found.map((c) => c.id));
+      if (s.statusCommentId !== null) seenLive.add(s.statusCommentId);
+      s.issueSeen = trimSeen([...s.issueSeen, s.statusCommentId].filter((id): id is number => id !== null), seenLive, LIMITS.seenKept);
     }
     s.statusText = text;
     this.save();
@@ -735,14 +757,24 @@ export class GithubSync {
       s.prNumber = pr.number;
       s.seen = [];
       s.feedback = [];
+      this.olderHeads.delete(item.id);
     }
     s.prState = 'open';
+    this.noteOlder(item.id, s.headSha, pr.lastPushedSha);
     s.headSha = pr.lastPushedSha;
     s.ci = this.watch(pr.lastPushedSha);
     this.last.set(`checks:${item.id}`, this.now());
     this.save();
     this.patchPr(item, { state: 'open', checks: { sha: pr.lastPushedSha, state: 'pending', failing: [] } });
     this.kick();
+  }
+
+  private noteOlder(itemId: string, prev: string | null, next: string): void {
+    if (!prev || prev === next) return;
+    const set = this.olderHeads.get(itemId) ?? new Set<string>();
+    set.delete(next);
+    set.add(prev);
+    this.olderHeads.set(itemId, set);
   }
 
   private watch(sha: string): CiWatch {
@@ -760,39 +792,48 @@ export class GithubSync {
       s.prState = null;
       s.seen = [];
       s.feedback = [];
+      this.olderHeads.delete(item.id);
     }
+    const recordedSha = s.headSha;
     const { data: pull } = await this.deps.api.pull(repo.github, pr.number);
     if (!pull || typeof pull !== 'object') return;
-    const state = pull.merged || pull.merged_at ? 'merged' : pull.state === 'closed' ? 'closed' : 'open';
     const head = pull.head?.sha;
-    if (head && head !== s.headSha) {
-      s.headSha = head;
-      if (s.ci?.sha !== head) s.ci = this.watch(head);
-    }
-    if (state !== s.prState) {
-      s.prState = state;
-      this.save();
-      this.patchPr(item, { state });
-      if (state === 'merged') {
-        const duringFollowUp = item.status === 'queued' || holdsSlot(item.status);
-        const moved = item.status === 'review' || duringFollowUp;
-        if (moved) {
-          const during = duringFollowUp ? ' during a follow-up' : '';
-          this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}.`);
-        }
-        const stayed = this.deps.backlog.get(item.id)?.status ?? item.status;
-        this.deps.notify(
-          'pr.merged',
-          moved
-            ? `${this.label(item)}: pull request #${pr.number} was merged on GitHub${duringFollowUp ? ' during a follow-up' : ''}, so the item is done.`
-            : `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is ${stayed}.`,
-          item.id,
-        );
-      } else if (state === 'closed') {
-        this.deps.notify('pr.closed', `${this.label(item)}: pull request #${pr.number} was closed without merging; the item stays ${item.status}.`, item.id);
+    const stale =
+      (!!head && this.olderHeads.get(item.id)?.has(head) === true) || (s.headSha !== recordedSha && head !== s.headSha);
+    if (!stale) {
+      const state = pull.merged || pull.merged_at ? 'merged' : pull.state === 'closed' ? 'closed' : 'open';
+      if (head && head !== s.headSha) {
+        this.noteOlder(item.id, s.headSha, head);
+        s.headSha = head;
+        if (s.ci?.sha !== head) s.ci = this.watch(head);
       }
+      if (state !== s.prState) {
+        s.prState = state;
+        this.save();
+        this.patchPr(item, { state });
+        if (state === 'merged') {
+          const duringFollowUp = item.status === 'queued' || holdsSlot(item.status);
+          const moved = item.status === 'review' || duringFollowUp;
+          if (moved) {
+            const during = duringFollowUp ? ' during a follow-up' : '';
+            this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}.`);
+          }
+          const stayed = this.deps.backlog.get(item.id)?.status ?? item.status;
+          this.deps.notify(
+            'pr.merged',
+            moved
+              ? `${this.label(item)}: pull request #${pr.number} was merged on GitHub${duringFollowUp ? ' during a follow-up' : ''}, so the item is done.`
+              : `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is ${stayed}.`,
+            item.id,
+          );
+        } else if (state === 'closed') {
+          this.deps.notify('pr.closed', `${this.label(item)}: pull request #${pr.number} was closed without merging; the item stays ${item.status}.`, item.id);
+        }
+      }
+      if (state === 'open') await this.pollFeedback(item, repo, pr.number);
+    } else if (s.prState === 'open') {
+      await this.pollFeedback(item, repo, pr.number);
     }
-    if (state === 'open') await this.pollFeedback(item, repo, pr.number);
     this.save();
   }
 
@@ -805,6 +846,10 @@ export class GithubSync {
     ]);
     const fresh: Feedback[] = [];
     const seen = new Set(s.seen);
+    const live = new Set<string>();
+    for (const r of (Array.isArray(reviews.data) ? reviews.data : []) as GhReview[]) if (r.state !== 'PENDING') live.add(`r${r.id}`);
+    for (const c of (Array.isArray(inline.data) ? inline.data : []) as GhReviewComment[]) live.add(`c${c.id}`);
+    for (const c of (Array.isArray(convo.data) ? convo.data : []) as GhComment[]) live.add(`i${c.id}`);
     const take = async (
       key: string,
       user: { login?: string; type?: string } | null,
@@ -841,7 +886,7 @@ export class GithubSync {
       }
       await take(`i${c.id}`, c.user, (trusted) => this.entry('comment', c, trusted, { at: parseTime(c.created_at, this.now()) }));
     }
-    s.seen = [...seen].slice(-LIMITS.seenKept);
+    s.seen = trimSeen([...seen], live, LIMITS.seenKept);
     if (!fresh.length) return;
     s.feedback = [...s.feedback, ...fresh].slice(-LIMITS.feedbackKept);
     const passed = fresh.filter((f) => f.trusted);
@@ -923,7 +968,7 @@ export class GithubSync {
     const ci = s?.ci;
     if (!item?.pr || !repo || !ci || ci.notified === ci.sha) return;
     const [runs, status] = await Promise.all([this.deps.api.checkRuns(repo.github, ci.sha), this.deps.api.combinedStatus(repo.github, ci.sha)]);
-    const result = evaluateChecks(runs.data?.check_runs ?? [], status.data ?? null);
+    const result = evaluateChecks(runs.data ?? [], status.data ?? null, runs.incomplete === true || status.incomplete === true);
     const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
     if (s.ci !== ci) return; // a publish replaced the watch meanwhile
     ci.failing = result.failing;
