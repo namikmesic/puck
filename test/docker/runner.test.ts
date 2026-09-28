@@ -87,15 +87,33 @@ async function createEnvironment(runnerId: string, publicKey: string, name: stri
 }
 
 async function attachReady(runnerId: string, publicKey: string, id: string, since: number | null = null): Promise<DaemonClient> {
-  const channel = await waitFor('an attach channel', async () => app.open(runnerId, publicKey, 'attach', id).catch(() => null), 60_000);
-  const d = new DaemonClient(channel);
-  await d.hello(since);
-  await waitFor('the environment to be ready', async () => {
-    const snap = await d.cmd<Snapshot>('snapshot.get');
-    if (snap.instance.status === 'failed') throw new Error(`environment failed: ${snap.instance.error}`);
-    return snap.instance.status === 'ready';
-  }, 120_000);
-  return d;
+  // The runner accepts an attach as soon as the container is running, which is
+  // before puckd is listening after a restart. That exec exits and the relay
+  // closes the channel; keep opening until the daemon welcomes.
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const channel = await waitFor(
+      'an attach channel',
+      async () => app.open(runnerId, publicKey, 'attach', id).catch(() => null),
+      Math.max(1, deadline - Date.now()),
+    );
+    const d = new DaemonClient(channel);
+    try {
+      await d.hello(since);
+    } catch (err) {
+      channel.close();
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.includes('channel closed') || Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 250));
+      continue;
+    }
+    await waitFor('the environment to be ready', async () => {
+      const snap = await d.cmd<Snapshot>('snapshot.get');
+      if (snap.instance.status === 'failed') throw new Error(`environment failed: ${snap.instance.error}`);
+      return snap.instance.status === 'ready';
+    }, Math.max(1, deadline - Date.now()));
+    return d;
+  }
 }
 
 describe('Docker scenarios: puck-runner', () => {
