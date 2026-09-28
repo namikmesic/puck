@@ -16,9 +16,10 @@
  *     dispatch and edited in place. Its hidden marker names the
  *     environment and the item, so a comment whose id was never recorded
  *     (a crash right after creating it) is found again, not duplicated.
- *   - Published pull requests: merged moves the item to done, including
- *     one queued, running or waiting on a follow-up (that worker stops);
- *     closed without merging only tells the orchestrator.
+ *   - Published pull requests: merged moves the item to done from any
+ *     status that is not already done (a follow-up in flight stops), and
+ *     the accept note records the status it came from; closed without
+ *     merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
  *     redacted log tails of failed workflow jobs. A success or failure is
  *     a notice; `ci: fix` also queues a follow-up whenever the item can
@@ -799,20 +800,18 @@ export class GithubSync {
         this.save();
         this.patchPr(item, { state });
         if (state === 'merged') {
-          const duringFollowUp = item.status === 'queued' || holdsSlot(item.status);
-          const moved = item.status === 'review' || duringFollowUp;
-          if (moved) {
-            const during = duringFollowUp ? ' during a follow-up' : '';
-            this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}.`);
+          const from = item.status;
+          if (from !== 'done') {
+            const during = from === 'queued' || holdsSlot(from) ? ' during a follow-up' : '';
+            this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}; it was ${from}.`);
+            this.deps.notify(
+              'pr.merged',
+              `${this.label(item)}: pull request #${pr.number} was merged on GitHub${during}, so the item is done; it was ${from}.`,
+              item.id,
+            );
+          } else {
+            this.deps.notify('pr.merged', `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is done.`, item.id);
           }
-          const stayed = this.deps.backlog.get(item.id)?.status ?? item.status;
-          this.deps.notify(
-            'pr.merged',
-            moved
-              ? `${this.label(item)}: pull request #${pr.number} was merged on GitHub${duringFollowUp ? ' during a follow-up' : ''}, so the item is done.`
-              : `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is ${stayed}.`,
-            item.id,
-          );
         } else if (state === 'closed') {
           this.deps.notify('pr.closed', `${this.label(item)}: pull request #${pr.number} was closed without merging; the item stays ${item.status}.`, item.id);
         }

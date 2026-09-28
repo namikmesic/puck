@@ -34,6 +34,7 @@ import {
   type ProvisionStage,
   type Snapshot,
 } from '../harness/daemon-protocol';
+import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
 import { harnessDescriptors } from '../harness/providers';
 import { Credentials } from './credentials';
 import {
@@ -50,6 +51,7 @@ import { createAdapters } from './harness';
 import { harnessEnv } from './harness/spawn';
 import type { HarnessAdapter, OrchestratorTool } from './harness/types';
 import { testAdapters } from './harness/test-adapters';
+import { syncGrantPolicies } from './grant-sync';
 import { Git } from './git';
 import { GitHubApi } from './github-api';
 import { GithubSync } from './github-sync';
@@ -359,7 +361,7 @@ export class Daemon {
    * not start work. A change that needs a rebuild is refused: the app
    * recreates the container itself.
    */
-  private applyDefinition(raw: unknown, pin: Pin): { classes: string[] } {
+  private async applyDefinition(raw: unknown, pin: Pin): Promise<{ classes: string[] }> {
     if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');
     if (this.reprovisioning) throw new OpError('invalid-state', 'An update is already being applied.');
     const record = this.instance.get();
@@ -374,6 +376,11 @@ export class Daemon {
     if (classes.includes('rebuild')) {
       const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
       throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+    }
+    const prevPolicies = tokenPoliciesFrom(prev.policies.github);
+    const nextPolicies = tokenPoliciesFrom(next.policies.github);
+    if (!sameTokenPermissions(prevPolicies, nextPolicies)) {
+      await syncGrantPolicies(this.opts.env, record.envId, nextPolicies);
     }
     this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
     this.definition = next;

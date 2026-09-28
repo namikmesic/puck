@@ -208,6 +208,8 @@ export interface Store {
   instancesOnRunner(runnerId: string): Promise<Instance[]>;
   setInstanceStatus(id: string, status: InstanceStatus, now: number): Promise<void>;
   replaceGrant(envId: string, repos: GrantRepo[], permissions: Instance['permissions'], now: number): Promise<void>;
+  /** Replaces the permission set minted for this environment. Repositories stay. */
+  setPermissions(envId: string, permissions: Instance['permissions'], now: number): Promise<void>;
   deleteInstance(id: string): Promise<void>;
   grantRepos(envId: string): Promise<GrantRepo[]>;
   markRepoVerified(envId: string, repoId: number, now: number): Promise<void>;
@@ -784,6 +786,10 @@ export class SqliteStore implements Store {
       for (const repo of repos) this.insertRepo(repo);
       this.run('UPDATE instances SET permissions = ?, updated_at = ? WHERE id = ?', JSON.stringify(permissions), now, envId);
     });
+  }
+
+  async setPermissions(envId: string, permissions: Instance['permissions'], now: number): Promise<void> {
+    this.run('UPDATE instances SET permissions = ?, updated_at = ? WHERE id = ?', JSON.stringify(permissions), now, envId);
   }
 
   async deleteInstance(id: string): Promise<void> {

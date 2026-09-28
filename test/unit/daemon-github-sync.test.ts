@@ -341,6 +341,16 @@ function publishedItem(status: ItemRecord['status'] = 'review', sourceNumber: nu
   if (status === 'queued' || status === 'running' || status === 'needs-input') backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
   if (status === 'running' || status === 'needs-input') backlog.transition(item, 'dispatch', { attempts: 1 });
   if (status === 'needs-input') backlog.transition(item, 'ask');
+  if (status === 'failed') {
+    backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
+    backlog.transition(item, 'dispatch', { attempts: 1 });
+    backlog.transition(item, 'error-final');
+  }
+  if (status === 'cancelled') backlog.transition(item, 'cancel');
+  if (status === 'backlog') {
+    backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
+    backlog.transition(item, 'unassign', { agent: null });
+  }
   fake.gh.pulls.set(7, { number: 7, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/7', head: { sha: SHA, ref: 'puck/W-1-fix-it' } });
   return item;
 }
@@ -781,6 +791,9 @@ describe('pull request state', () => {
     { status: 'queued', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: true },
     { status: 'running', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: true },
     { status: 'needs-input', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: true },
+    { status: 'failed', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
+    { status: 'cancelled', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
+    { status: 'backlog', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
     { status: 'review', pull: { state: 'closed', merged: false, merged_at: null }, after: 'review', notice: 'pr.closed', during: false },
     { status: 'review', pull: { state: 'open', merged: false, merged_at: null }, after: 'review', notice: null, during: false },
   ] as const)('$pull.state (merged: $pull.merged) with the item in $status', async (c) => {
@@ -792,7 +805,7 @@ describe('pull request state', () => {
     expect(now.status).toBe(c.after);
     expect(notices.filter((n) => n.kind === 'pr.merged' || n.kind === 'pr.closed').map((n) => n.kind)).toEqual(c.notice ? [c.notice] : []);
     if (c.after === 'done') {
-      const note = c.during ? 'Pull request #7 was merged on GitHub during a follow-up.' : 'Pull request #7 was merged on GitHub.';
+      const note = `Pull request #7 was merged on GitHub${c.during ? ' during a follow-up' : ''}; it was ${c.status}.`;
       expect(now.acceptNote).toBe(note);
       expect(now.requeue).toBeNull();
       expect(notices.find((n) => n.kind === 'pr.merged')?.text).toContain(c.during ? 'during a follow-up, so the item is done' : 'so the item is done');
@@ -811,7 +824,7 @@ describe('pull request state', () => {
     await sync.poll();
     const now = backlog.get(item.id) as ItemRecord;
     expect(now.status).toBe('done');
-    expect(now.acceptNote).toContain('during a follow-up');
+    expect(now.acceptNote).toBe('Pull request #7 was merged on GitHub during a follow-up; it was queued.');
     expect(noticesOf('issue.closed')).toHaveLength(1);
     expect(noticesOf('pr.merged')).toHaveLength(1);
   });

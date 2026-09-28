@@ -57,10 +57,13 @@ const EXPECTED: Array<[ItemStatus, ItemTrigger, ItemStatus | 'removed', 'acquire
   ['backlog', 'cancel', 'cancelled', 'releases'],
   ['review', 'cancel', 'cancelled', 'releases'],
   ['review', 'follow-up', 'queued', null],
+  ['backlog', 'accept', 'done', null],
   ['review', 'accept', 'done', null],
   ['queued', 'accept', 'done', null],
   ['running', 'accept', 'done', 'releases'],
   ['needs-input', 'accept', 'done', 'releases'],
+  ['failed', 'accept', 'done', null],
+  ['cancelled', 'accept', 'done', null],
   ['failed', 'retry', 'queued', null],
   ['cancelled', 'retry', 'queued', null],
   ['backlog', 'delete', 'removed', null],
@@ -154,7 +157,7 @@ describe('backlog', () => {
 
   it('refuses a transition the table does not allow and leaves the item alone', () => {
     const a = make('A');
-    expect(() => backlog.transition(a, 'accept')).toThrow(/Cannot accept an item that is backlog/);
+    expect(() => backlog.transition(a, 'finish')).toThrow(/Cannot finish an item that is backlog/);
     expect(backlog.get(a.id)?.status).toBe('backlog');
   });
 

@@ -10,8 +10,9 @@
  *   - `restart` also takes `needs-input` back to `queued`: the question
  *     died with the turn that asked it, and the resumed session asks again.
  *   - `assign` from `queued` to `queued` re-assigns a waiting item.
- *   - `accept` also takes `queued`, `running` and `needs-input` to `done`:
- *     a merged pull request is the work accepted, ahead of a follow-up.
+ *   - `accept` takes every status except `done` to `done`. A merged pull
+ *     request is the work shipped, including after a follow-up, a failure
+ *     or a cancellation. `running` and `needs-input` release their slot.
  */
 
 import type { DaemonEvent, IssueSource, ItemPosition, ItemStatus, WorkItem } from '../harness/daemon-protocol';
@@ -59,8 +60,7 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: ['running', 'needs-input'], trigger: 'restart', to: 'queued', slot: 'releases' },
   { from: ['running', 'needs-input', 'queued', 'backlog', 'review'], trigger: 'cancel', to: 'cancelled', slot: 'releases' },
   { from: ['review'], trigger: 'follow-up', to: 'queued', slot: null },
-  { from: ['review'], trigger: 'accept', to: 'done', slot: null },
-  { from: ['queued'], trigger: 'accept', to: 'done', slot: null },
+  { from: ['backlog', 'queued', 'review', 'failed', 'cancelled'], trigger: 'accept', to: 'done', slot: null },
   { from: ['running', 'needs-input'], trigger: 'accept', to: 'done', slot: 'releases' },
   { from: ['failed', 'cancelled'], trigger: 'retry', to: 'queued', slot: null },
   { from: ['backlog', 'done', 'failed', 'cancelled'], trigger: 'delete', to: 'removed', slot: null },
