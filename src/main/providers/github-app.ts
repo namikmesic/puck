@@ -24,17 +24,23 @@ function isPlaceholder(id: string): boolean {
   return id.startsWith('PLACEHOLDER');
 }
 
-/** The client id to sign in with, or null while only the placeholder exists. */
+function devApp(env: NodeJS.ProcessEnv): { clientId: string | null; slug: string | null } | null {
+  const clientId = env[CLIENT_ID_ENV]?.trim() || null;
+  const slug = env[APP_SLUG_ENV]?.trim() || null;
+  return clientId || slug ? { clientId, slug } : null;
+}
+
+/** The client id to sign in with, or null while that half of the selected app is unset. */
 export function githubClientId(env: NodeJS.ProcessEnv = process.env): string | null {
-  const override = env[CLIENT_ID_ENV]?.trim();
-  if (override) return override;
+  const dev = devApp(env);
+  if (dev) return dev.clientId;
   return isPlaceholder(GITHUB_APP_CLIENT_ID) ? null : GITHUB_APP_CLIENT_ID;
 }
 
-/** The app slug, or null while only the placeholder exists. */
+/** The app slug, or null while that half of the selected app is unset. */
 export function githubAppSlug(env: NodeJS.ProcessEnv = process.env): string | null {
-  const override = env[APP_SLUG_ENV]?.trim();
-  if (override) return override;
+  const dev = devApp(env);
+  if (dev) return dev.slug;
   return isPlaceholder(GITHUB_APP_SLUG) ? null : GITHUB_APP_SLUG;
 }
 

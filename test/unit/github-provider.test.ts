@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { APP_SLUG_ENV, CLIENT_ID_ENV, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
+import { APP_SLUG_ENV, CLIENT_ID_ENV, githubAppSlug, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
 import {
   account,
   githubProvider,
@@ -55,6 +55,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   delete process.env[CLIENT_ID_ENV];
+  delete process.env[APP_SLUG_ENV];
   await githubProvider.auth.logout();
   updateGithubSettings({ configRepo: null });
   useGitHubDeps(undefined);
@@ -73,12 +74,29 @@ describe('GitHub App identity', () => {
     expect(form(gh.requests[0])).toMatchObject({ client_id: 'Iv23liEFTqLz112apImK' });
   });
 
-  it('links the install page of the registered app, with PUCK_GITHUB_APP_SLUG as a development override', () => {
+  it('links the install page of the registered app, with both development overrides as one test app', () => {
+    expect(githubClientId({})).toBe('Iv23liEFTqLz112apImK');
+    expect(githubAppSlug({})).toBe('puck-agents');
     expect(githubInstallUrl({})).toBe('https://github.com/apps/puck-agents/installations/new');
+    expect(githubClientId({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe('Iv1.dev');
+    expect(githubAppSlug({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe('puck-dev');
     expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe(
       'https://github.com/apps/puck-dev/installations/new',
     );
-    expect(githubProvider.state().installUrl).toBe('https://github.com/apps/puck-agents/installations/new');
+  });
+
+  it('keeps a half override on the test app and offers no install link', () => {
+    expect(githubClientId({ [CLIENT_ID_ENV]: 'Iv1.dev' })).toBe('Iv1.dev');
+    expect(githubAppSlug({ [CLIENT_ID_ENV]: 'Iv1.dev' })).toBeNull();
+    expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev' })).toBeNull();
+    expect(githubProvider.state().installUrl).toBeNull();
+
+    delete process.env[CLIENT_ID_ENV];
+    process.env[APP_SLUG_ENV] = 'puck-dev';
+    expect(githubClientId()).toBeNull();
+    expect(githubAppSlug()).toBe('puck-dev');
+    expect(githubInstallUrl()).toBeNull();
+    expect(githubProvider.state()).toMatchObject({ appConfigured: false, installUrl: null });
   });
 });
 
