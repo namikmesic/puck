@@ -14,10 +14,10 @@
  *      the policy says so) or update its body.
  *
  * An item from a GitHub issue links it in the pull request body:
- * `Closes owner/name#n` when the publish resolves the issue (the default)
- * and the base is the repository's default branch, since GitHub honors
- * closing keywords only there; `Refs owner/name#n` otherwise, saying why
- * merging will not close the issue. Keywords never go in commit messages.
+ * `Closes owner/name#n` when the base is the repository's default branch,
+ * since GitHub honors closing keywords only there; `Refs owner/name#n`
+ * otherwise, saying why merging will not close the issue. Keywords never
+ * go in commit messages.
  *
  * Publishing never changes the item's status. The token is the grant the
  * runner supplied for the repository's owner; the daemon never refreshes
@@ -53,8 +53,6 @@ export interface PublishDeps {
 export interface PublishRequest {
   title?: string;
   body?: string;
-  /** For an item from an issue: whether merging resolves it (default true). */
-  closesIssue?: boolean;
 }
 
 export interface Published {
@@ -68,16 +66,13 @@ export interface Published {
  * The issue link of an item's pull request body. `defaultBranch` is the
  * repository's default branch ('' when unknown, which never closes).
  */
-export function issueLink(item: Pick<ItemRecord, 'source' | 'base'>, closesIssue: boolean, defaultBranch: string): string | null {
+export function issueLink(item: Pick<ItemRecord, 'source' | 'base'>, defaultBranch: string): string | null {
   const src = item.source;
   if (!src) return null;
   const ref = `${src.repo}#${src.number}`;
   const base = item.base?.branch ?? '';
-  if (closesIssue && base && base === defaultBranch) return `Closes ${ref}`;
-  if (closesIssue) {
-    return `Refs ${ref}\n\nMerging this pull request will not close the issue: it targets \`${base || 'another branch'}\`, not the default branch.`;
-  }
-  return `Refs ${ref}`;
+  if (base && base === defaultBranch) return `Closes ${ref}`;
+  return `Refs ${ref}\n\nMerging this pull request will not close the issue: it targets \`${base || 'another branch'}\`, not the default branch.`;
 }
 
 function prBody(item: ItemRecord, envName: string, body: string | undefined, link: string | null): string {
@@ -166,7 +161,7 @@ export class Publisher {
     let link: string | null = null;
     if (item.source) {
       const defaultBranch = (await client.repo(owner, name)).default_branch ?? '';
-      link = issueLink(item, req.closesIssue ?? true, defaultBranch);
+      link = issueLink(item, defaultBranch);
     }
     const body = prBody(item, this.deps.envName(), req.body, link);
     const open = await client.pulls(owner, name, { head: `${owner}:${branch}`, state: 'open' });

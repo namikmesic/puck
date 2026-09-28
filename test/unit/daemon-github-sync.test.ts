@@ -63,6 +63,8 @@ function fakeGitHub() {
     reruns: [] as number[],
     requests: [] as Req[],
     nextId: 9000,
+    /** Hits `/search/issues` serves; a page past 1,000 answers 422. */
+    searchTotal: 0,
     /** When set, list routes return every row in one page (no Link header). */
     unpaged: false,
   };
@@ -80,6 +82,19 @@ function fakeGitHub() {
   };
   const etag = (body: string): string => `"${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`;
   const route = (method: string, url: URL, body: Json | null): [number, unknown, Record<string, string>?] => {
+    if (method === 'GET' && url.pathname === '/search/issues') {
+      const perPage = Math.max(1, Number(url.searchParams.get('per_page') ?? '100') || 100);
+      const page = Math.max(1, Number(url.searchParams.get('page') ?? '1') || 1);
+      const start = (page - 1) * perPage;
+      if (start >= 1000) return [422, { message: 'Only the first 1000 search results are available' }];
+      const end = Math.min(start + perPage, gh.searchTotal, 1000);
+      const items = Array.from({ length: Math.max(0, end - start) }, (_, i) => issue(start + i + 1, ['bug']));
+      if (end >= gh.searchTotal) return [200, { total_count: gh.searchTotal, items }];
+      const next = new URL(url.href);
+      next.searchParams.set('page', String(page + 1));
+      next.searchParams.set('per_page', String(perPage));
+      return [200, { total_count: gh.searchTotal, items }, { link: `<${next.href}>; rel="next"` }];
+    }
     const p = url.pathname.replace(/^\/repos\/octo\/app/, '');
     let m: RegExpExecArray | null;
     if (method === 'GET' && p === '') return [200, { full_name: 'octo/app', default_branch: 'main' }];
@@ -464,6 +479,16 @@ describe('issue intake', () => {
     expect(backlog.list()).toHaveLength(102);
   });
 
+  it('takes in an issue that arrives on the page after a full cached page', async () => {
+    for (let n = 1; n <= 100; n++) fake.gh.issues.set(n, issue(n, ['puck']));
+    await sync.poll();
+    expect(backlog.list()).toHaveLength(100);
+    fake.gh.issues.set(101, issue(101, ['puck']));
+    await pollAll();
+    expect(backlog.list().map((i) => i.source?.number)).toContain(101);
+    expect(backlog.list()).toHaveLength(101);
+  });
+
   it('agentFromLabels picks the first assigned agent a label names', () => {
     expect(agentFromLabels(['bug', 'puck:ghost', 'puck:reviewer'], 'puck', ['implementer', 'reviewer'])).toEqual({ agent: 'reviewer', unknown: ['ghost'] });
     expect(agentFromLabels(['puckish:implementer'], 'puck', ['implementer'])).toEqual({ agent: null, unknown: [] });
@@ -504,6 +529,17 @@ describe('manual import', () => {
     linkedItem(5, 'done');
     const again = await sync.importIssue('app', 5, {}, 'user');
     expect(again.source?.number).toBe(5);
+  });
+
+  it('returns the first 1000 search hits when more match', async () => {
+    fake.gh.searchTotal = 1500;
+    const found = await sync.searchIssues('bug');
+    expect(found.issues).toHaveLength(1000);
+    expect(found.issues[0]).toMatchObject({ number: 1, repo: 'octo/app' });
+    expect(found.issues[999]).toMatchObject({ number: 1000 });
+    const pages = fake.gh.requests.filter((r) => r.path.startsWith('/search/issues'));
+    expect(pages).toHaveLength(10);
+    expect(pages.every((r) => r.status === 200 && r.path.includes('per_page=100'))).toBe(true);
   });
 });
 
@@ -823,6 +859,49 @@ describe('pull request state', () => {
     const sha2 = 'c'.repeat(40);
     const pull = fake.gh.pulls.get(7) as Json;
     pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+  });
+
+  it('follows a force-push back onto an earlier head', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const sha2 = 'c'.repeat(40);
+    const pull = fake.gh.pulls.get(7) as Json;
+    pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    pull.head = { sha: SHA, ref: 'puck/W-1-fix-it' };
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(SHA);
+  });
+
+  it('moves the item to done when an earlier head is merged', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const sha2 = 'c'.repeat(40);
+    const pull = fake.gh.pulls.get(7) as Json;
+    pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
+    await pollAll();
+    pull.head = { sha: SHA, ref: 'puck/W-1-fix-it' };
+    Object.assign(pull, { state: 'closed', merged: true, merged_at: iso(T0) });
+    await pollAll();
+    expect(backlog.get(item.id)?.status).toBe('done');
+    expect(noticesOf('pr.merged')).toHaveLength(1);
+  });
+
+  it('keeps CI on the published commit when the cached pull body is unchanged', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    await sync.poll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(SHA);
+    const sha2 = 'd'.repeat(40);
+    const current = backlog.get(item.id) as ItemRecord;
+    backlog.patch(current, { pr: { ...(current.pr as NonNullable<ItemRecord['pr']>), lastPushedSha: sha2 } });
+    await sync.published(item.id);
     await pollAll();
     expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
   });
@@ -1150,18 +1229,22 @@ describe('CI on the published head', () => {
 describe('linking the pull request to its issue', () => {
   const src = { source: source(12), base: { branch: 'main', sha: SHA } };
   it.each([
-    { name: 'resolving, into the default branch', item: src, closes: true, defaultBranch: 'main', link: 'Closes octo/app#12' },
-    { name: 'not resolving', item: src, closes: false, defaultBranch: 'main', link: 'Refs octo/app#12' },
+    { name: 'into the default branch', item: src, defaultBranch: 'main', link: 'Closes octo/app#12' },
     {
-      name: 'resolving, into another branch',
+      name: 'into another branch',
       item: { ...src, base: { branch: 'release', sha: SHA } },
-      closes: true,
       defaultBranch: 'main',
       link: 'Refs octo/app#12\n\nMerging this pull request will not close the issue: it targets `release`, not the default branch.',
     },
-    { name: 'an item not from an issue', item: { source: null, base: src.base }, closes: true, defaultBranch: 'main', link: null },
+    {
+      name: 'when the default branch is unknown',
+      item: src,
+      defaultBranch: '',
+      link: 'Refs octo/app#12\n\nMerging this pull request will not close the issue: it targets `main`, not the default branch.',
+    },
+    { name: 'an item not from an issue', item: { source: null, base: src.base }, defaultBranch: 'main', link: null },
   ])('$name', (c) => {
-    expect(issueLink(c.item, c.closes, c.defaultBranch)).toBe(c.link);
+    expect(issueLink(c.item, c.defaultBranch)).toBe(c.link);
   });
 });
 

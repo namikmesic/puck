@@ -198,10 +198,6 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
         item: itemRef(zod(z)),
         title: zod(z).string().min(1).max(256).optional().describe('Pull request title (default "W-n: <item title>").'),
         body: zod(z).string().max(60_000).optional().describe('Pull request description (default: the worker summary).'),
-        closesIssue: zod(z)
-          .boolean()
-          .optional()
-          .describe("For an item from a GitHub issue: merging resolves the issue (default true). False links it with Refs instead of Closes."),
       }),
       run: async (a: Args) =>
         work.publish(
@@ -209,7 +205,6 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
           {
             ...(typeof a.title === 'string' ? { title: a.title } : {}),
             ...(typeof a.body === 'string' ? { body: a.body } : {}),
-            ...(typeof a.closesIssue === 'boolean' ? { closesIssue: a.closesIssue } : {}),
           },
           'orchestrator',
         ),

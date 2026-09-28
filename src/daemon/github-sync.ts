@@ -262,7 +262,6 @@ export class GithubSync {
   private readonly waitingForGrant = new Set<string>();
   /** `repo\0login` → write / no / unread, for the current poll only. */
   private readonly access = new Map<string, 'write' | 'no' | 'unread'>();
-  private readonly olderHeads = new Map<string, Set<string>>();
   private readonly now: () => number;
   private readonly timers: Timers;
 
@@ -419,7 +418,6 @@ export class GithubSync {
       if (this.deps.backlog.get(id)) continue;
       delete file.items[id];
       removed = true;
-      this.olderHeads.delete(id);
       for (const kind of ['issue', 'pull', 'checks']) this.last.delete(`${kind}:${id}`);
     }
     if (removed) this.deps.store.commit();
@@ -757,24 +755,14 @@ export class GithubSync {
       s.prNumber = pr.number;
       s.seen = [];
       s.feedback = [];
-      this.olderHeads.delete(item.id);
     }
     s.prState = 'open';
-    this.noteOlder(item.id, s.headSha, pr.lastPushedSha);
     s.headSha = pr.lastPushedSha;
     s.ci = this.watch(pr.lastPushedSha);
     this.last.set(`checks:${item.id}`, this.now());
     this.save();
     this.patchPr(item, { state: 'open', checks: { sha: pr.lastPushedSha, state: 'pending', failing: [] } });
     this.kick();
-  }
-
-  private noteOlder(itemId: string, prev: string | null, next: string): void {
-    if (!prev || prev === next) return;
-    const set = this.olderHeads.get(itemId) ?? new Set<string>();
-    set.delete(next);
-    set.add(prev);
-    this.olderHeads.set(itemId, set);
   }
 
   private watch(sha: string): CiWatch {
@@ -792,18 +780,17 @@ export class GithubSync {
       s.prState = null;
       s.seen = [];
       s.feedback = [];
-      this.olderHeads.delete(item.id);
     }
     const recordedSha = s.headSha;
-    const { data: pull } = await this.deps.api.pull(repo.github, pr.number);
+    const { data: pull, changed } = await this.deps.api.pull(repo.github, pr.number);
     if (!pull || typeof pull !== 'object') return;
     const head = pull.head?.sha;
-    const stale =
-      (!!head && this.olderHeads.get(item.id)?.has(head) === true) || (s.headSha !== recordedSha && head !== s.headSha);
+    const state = pull.merged || pull.merged_at ? 'merged' : pull.state === 'closed' ? 'closed' : 'open';
+    const overlapped = s.headSha !== recordedSha && head !== s.headSha;
+    const cachedBody = !changed && !!head && head !== s.headSha;
+    const stale = state !== 'merged' && (overlapped || cachedBody);
     if (!stale) {
-      const state = pull.merged || pull.merged_at ? 'merged' : pull.state === 'closed' ? 'closed' : 'open';
       if (head && head !== s.headSha) {
-        this.noteOlder(item.id, s.headSha, head);
         s.headSha = head;
         if (s.ci?.sha !== head) s.ci = this.watch(head);
       }

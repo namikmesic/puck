@@ -8,10 +8,13 @@
  * costs a 304 (which GitHub does not count against the rate limit) and the
  * caller still gets the body it had. A list keeps every page: the first
  * page is the conditional request, and Link rel="next" is followed for the
- * rest, including after a 304 when a later page may have grown. Polled URLs
- * are stable per resource (a fixed `since`, never the time of the last
- * poll), or the ETags would never hit. A check or status list that is still
- * short of the full set is incomplete and is never reported as success.
+ * rest. After a 304 the tail is read again when that response's Link has
+ * rel="next", a next link was already stored, or the cached first page is
+ * full, because a new row past a full page does not change that page's ETag.
+ * Polled URLs are stable per resource (a fixed `since`, never the time of
+ * the last poll), or the ETags would never hit. A check or status list that
+ * is still short of the full set is incomplete and is never reported as
+ * success. Search stops at 1,000 hits, which is all GitHub will serve.
  *
  * Each request uses the installation token the runner supplied for the
  * repository's owner. Everything that comes back is untrusted input: it is
@@ -123,6 +126,9 @@ export interface Polled<T> {
 export class NoGrantError extends Error {}
 
 const CACHE_MAX = 1_000;
+const LIST_PAGE = 100;
+/** GitHub search serves at most 1,000 hits; the next page is a 422. */
+const SEARCH_PAGES = 10;
 /** No single GitHub request may hold up a poll pass or a dispatch for longer. */
 export const REQUEST_TIMEOUT_MS = 30_000;
 const deadline = (): AbortSignal => AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -151,6 +157,14 @@ interface CacheEntry {
 }
 
 const asArray = <T>(page: unknown): T[] => (Array.isArray(page) ? (page as T[]) : []);
+
+function followingPage(path: string): string {
+  const q = path.indexOf('?');
+  const params = new URLSearchParams(q === -1 ? '' : path.slice(q + 1));
+  const current = Number(params.get('page') ?? '1');
+  params.set('page', String(Number.isFinite(current) && current >= 1 ? current + 1 : 2));
+  return `${q === -1 ? path : path.slice(0, q)}?${params.toString()}`;
+}
 const totalCount = (page: unknown): number | null => {
   const n = (page as { total_count?: unknown } | null)?.total_count;
   return typeof n === 'number' ? n : null;
@@ -210,8 +224,8 @@ export class GitHubApi {
 
   /**
    * A list. The first page is a conditional GET; further pages follow Link.
-   * After a 304 the cached first page is kept and the tail is read again,
-   * because a new row past page one does not change page one's ETag.
+   * After a 304 the tail is read again when a next link is present or the
+   * cached first page is full.
    */
   private async pollList<T>(
     repo: string,
@@ -222,17 +236,26 @@ export class GitHubApi {
     const client = this.client(repo);
     const signal = deadline();
     const sep = path.includes('?') ? '&' : '?';
-    const firstPath = /[?&]per_page=/.test(path) ? path : `${path}${sep}per_page=100`;
+    const firstPath = /[?&]per_page=/.test(path) ? path : `${path}${sep}per_page=${LIST_PAGE}`;
     const cached = this.cache.get(firstPath);
     const res = await client.request<unknown>(firstPath, { signal, ...(cached ? { ifNoneMatch: cached.etag } : {}) });
     if (res.status === 304 && cached) {
       this.remember(firstPath, cached);
-      if (!cached.next) return { data: cached.data as T[], changed: false, incomplete: cached.incomplete };
-      const tail = await this.rest<T>(client, cached.next, pick, signal);
-      const items = [...(cached.head as T[]), ...tail.items];
+      const from304 = nextLink(res.headers.get('link'));
+      const head = Array.isArray(cached.head) ? (cached.head as T[]) : [];
+      const full = head.length === LIST_PAGE;
+      const follow = from304 ?? cached.next ?? (full ? followingPage(firstPath) : null);
+      if (!follow) return { data: cached.data as T[], changed: false, incomplete: cached.incomplete };
+      const tail = await this.rest<T>(client, follow, pick, signal);
+      if (tail.items.length === 0 && !from304 && !cached.next) {
+        return { data: cached.data as T[], changed: false, incomplete: cached.incomplete };
+      }
+      const items = [...head, ...tail.items];
       const incomplete = tail.truncated || shortOf(cached.total, items.length);
       cached.data = items;
       cached.incomplete = incomplete;
+      if (from304) cached.next = from304;
+      else if (!cached.next && tail.items.length > 0) cached.next = follow;
       return { data: items, changed: true, incomplete };
     }
     const head = pick(res.data);
@@ -364,7 +387,10 @@ export class GitHubApi {
   }
 
   searchIssues(repo: string, q: string): Promise<GhIssue[]> {
-    return this.list(repo, `/search/issues?q=${seg(q)}`, (page) => asArray<GhIssue>((page as { items?: GhIssue[] } | null)?.items));
+    return this.client(repo).paginate(`/search/issues?q=${seg(q)}&per_page=${LIST_PAGE}`, (page) => asArray<GhIssue>((page as { items?: GhIssue[] } | null)?.items), {
+      maxPages: SEARCH_PAGES,
+      signal: deadline(),
+    });
   }
 
   private list<T>(repo: string, path: string, pick: (page: unknown) => T[]): Promise<T[]> {
