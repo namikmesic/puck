@@ -334,12 +334,15 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     turns = build();
     turns.reconcile();
     expect(calls).toEqual([]);
-    pendingNotices.push({ id: 'ntc_1', kind: 'environment.restarted', at: 1, text: 'The environment restarted.' });
+    expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+    const notice = { id: 'ntc_1', kind: 'environment.restarted' as const, at: 1, text: 'The environment restarted.' };
+    pendingNotices.push(notice);
     turns.startRestored();
     await turns.idle();
-    expect(calls.map((c) => c.prompt)).toEqual([
-      '[Puck] Updates since your last turn:\n- The environment restarted.\n\nsecond',
-    ]);
+    expect(calls.map((c) => c.prompt)).toEqual([`${noticePrompt([notice])}\n\nContinue.\n\nsecond`]);
+    expect(calls.map((c) => c.resumeId)).toEqual([null]);
+    const log = transcripts.get(s.id).log;
+    expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['first', 'Continue.', 'second']);
     expect(turns.get(s.id)?.queue).toEqual([]);
   });
 
@@ -403,20 +406,20 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(turns.isRunning(s.id)).toBe(false);
     expect(turns.get(s.id)?.status).toBe('idle');
     expect(turns.get(s.id)?.queue).toEqual([{ text: 'keep me', author: 'user' }]);
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
 
-    const transcriptFile = path.join(dir, 'transcripts', `${s.id}.json`);
-    const savedTranscript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8')) as { log: Array<{ kind: string; text?: string }> };
-    expect(savedTranscript.log.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual(['keep me']);
-    expect(savedTranscript.log.some((e) => e.kind === 'notice')).toBe(true);
-    const savedSessions = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { queue: unknown }>;
+    const savedSessions = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { queue: unknown; status: string }>;
     expect(savedSessions[s.id].queue).toEqual([{ text: 'keep me', author: 'user' }]);
+    expect(savedSessions[s.id].status).toBe('idle');
     const savedNotices = JSON.parse(fs.readFileSync(path.join(dir, 'notices.json'), 'utf8')) as { pending: typeof pendingNotices };
     expect(savedNotices.pending.map((n) => n.id)).toEqual(['ntc_1']);
 
     pendingNotices = savedNotices.pending;
     calls = [];
+    errors.length = 0;
     turns = build();
     turns.reconcile();
+    turns.resumeInterrupted();
     turns.startRestored();
     await turns.idle();
     await transcripts.flush();
@@ -424,27 +427,141 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
     expect(log.filter((e) => e.kind === 'notice')).toHaveLength(1);
     expect(calls.map((c) => c.prompt)).toEqual(['[Puck] Updates since your last turn:\n- The environment restarted.\n\nkeep me']);
+    expect(errors).toEqual([]);
   });
 
-  it('recovers a message whose turn-start commit landed before a crash', async () => {
+  it('redelivers an unhanded input once and then the queued follow-up', async () => {
+    const notice = { id: 'ntc_1', kind: 'environment.restarted' as const, at: 1, text: 'The environment restarted.' };
+    let capture = false;
+    let snap = '';
+    turns = build({
+      log: {
+        ...nullLogger,
+        info: (message) => {
+          if (!capture || message !== 'turn.start') return;
+          capture = false;
+          const session = turns.orchestrator();
+          if (!session) return;
+          turns.send(session.id, 'next');
+          snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
+          fs.cpSync(dir, snap, { recursive: true });
+        },
+      },
+    });
     const s = orchestrator();
     attempts = [
       () => new Promise<void>(() => undefined),
+      (_req, ctx) => ctx.emit(END),
+    ];
+    capture = true;
+    turns.send(s.id, 'keep me');
+    await new Promise((r) => setTimeout(r, 0));
+    const saved = JSON.parse(fs.readFileSync(path.join(snap, 'sessions.json'), 'utf8')) as Record<
+      string,
+      { handoff?: { handedOff: boolean; inputs: Array<{ text: string; author: string }> }; queue: unknown }
+    >;
+    expect(saved[s.id].handoff).toMatchObject({ handedOff: false, inputs: [{ text: 'keep me', author: 'user' }] });
+    expect(saved[s.id].queue).toEqual([{ text: 'next', author: 'user' }]);
+
+    const live = dir;
+    dir = snap;
+    calls = [];
+    try {
+      turns = build();
+      expect(turns.reconcile().map((t) => t.id)).toEqual([s.id]);
+      expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+      pendingNotices.push(notice);
+      turns.startRestored();
+      await turns.idle();
+      expect(calls.map((c) => c.resumeId)).toEqual([null]);
+      expect(calls.map((c) => c.prompt)).toEqual([`${noticePrompt([notice])}\n\nkeep me\n\nnext`]);
+      const log = transcripts.get(s.id).log;
+      expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me', 'next']);
+      expect(log.filter((e) => e.kind === 'notice')).toHaveLength(1);
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
+  });
+
+  it('redelivers an unhanded input on the saved resume id', async () => {
+    const notice = { id: 'ntc_1', kind: 'environment.restarted' as const, at: 1, text: 'The environment restarted.' };
+    let capture = false;
+    let snap = '';
+    turns = build({
+      log: {
+        ...nullLogger,
+        info: (message) => {
+          if (!capture || message !== 'turn.start') return;
+          capture = false;
+          const session = turns.orchestrator();
+          if (!session) return;
+          turns.send(session.id, 'next');
+          snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
+          fs.cpSync(dir, snap, { recursive: true });
+        },
+      },
+    });
+    const s = orchestrator();
+    attempts = [
       (_req, ctx) => {
-        ctx.emit({ kind: 'text-delta', text: 'continued' });
+        ctx.reportSession('sess-live');
         ctx.emit(END);
       },
+      () => new Promise<void>(() => undefined),
+      (_req, ctx) => ctx.emit(END),
+    ];
+    await send(s.id, 'hello');
+    capture = true;
+    turns.send(s.id, 'keep me');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const live = dir;
+    dir = snap;
+    calls = [];
+    try {
+      turns = build();
+      turns.reconcile();
+      turns.resumeInterrupted();
+      pendingNotices.push(notice);
+      turns.startRestored();
+      await turns.idle();
+      expect(calls.map((c) => c.resumeId)).toEqual(['sess-live']);
+      expect(calls.map((c) => c.prompt)).toEqual([`${noticePrompt([notice])}\n\nkeep me\n\nnext`]);
+      const log = transcripts.get(s.id).log;
+      expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['hello', 'keep me', 'next']);
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
+  });
+
+  it('resumes a handed-off turn with continue and keeps the queued follow-up', async () => {
+    const s = orchestrator();
+    const notice = { id: 'ntc_1', kind: 'environment.restarted' as const, at: 1, text: 'The environment restarted.' };
+    attempts = [
+      async (_req, ctx) => {
+        ctx.reportSession('sess-live');
+        await new Promise(() => undefined);
+      },
+      (_req, ctx) => ctx.emit(END),
     ];
     turns.send(s.id, 'keep me');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.send(s.id, 'next')).toEqual({ queued: true });
+    await transcripts.flush();
+    await flushJsonWrites();
     const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
       string,
-      { status: string; queue: unknown }
+      { status: string; queue: unknown; handoff?: { handedOff: boolean } }
     >;
     expect(saved[s.id].status).toBe('running');
-    expect(saved[s.id].queue).toEqual([]);
-    const transcriptFile = path.join(dir, 'transcripts', `${s.id}.json`);
-    const savedTranscript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8')) as { log: Array<{ kind: string; text?: string }> };
-    expect(savedTranscript.log.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual(['keep me']);
+    expect(saved[s.id].queue).toEqual([{ text: 'next', author: 'user' }]);
+    expect(saved[s.id].handoff?.handedOff).toBe(true);
 
     const snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
     fs.cpSync(dir, snap, { recursive: true });
@@ -455,11 +572,13 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
       turns = build();
       expect(turns.reconcile().map((t) => t.id)).toEqual([s.id]);
       expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+      pendingNotices.push(notice);
       turns.startRestored();
       await turns.idle();
-      expect(calls.map((c) => c.prompt)).toEqual(['keep me']);
+      expect(calls.map((c) => c.resumeId)).toEqual(['sess-live']);
+      expect(calls.map((c) => c.prompt)).toEqual([`${noticePrompt([notice])}\n\nContinue.\n\nnext`]);
       const log = transcripts.get(s.id).log;
-      expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
+      expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me', 'Continue.', 'next']);
       expect(turns.get(s.id)?.status).toBe('idle');
     } finally {
       await transcripts.flush();

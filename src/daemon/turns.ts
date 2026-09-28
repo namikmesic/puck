@@ -6,9 +6,12 @@
  * arrive while a turn runs wait; the next turn takes all of them (and,
  * for the orchestrator, any pending notices) as one prompt. A turn:
  *
- *   - records the inputs as `user`/`notice` entries, durable before the
- *     queue and pending notices are cleared and the session is marked
- *     running, then a `turn` entry;
+ *   - commits one turn-start record on the session: the inputs leave the
+ *     queue, the session is running, and the turn id plus the exact input
+ *     text are stored, not yet handed off. The transcript entries follow.
+ *     Immediately before the prompt reaches the adapter, that record is
+ *     marked handed off. A restart redelivers the text until then, and
+ *     resumes with a short continue once it has been handed off;
  *   - runs the session's harness adapter, streaming every HarnessEvent as a
  *     `turn.event` and recording it in the persisted dialect;
  *   - resumes the provider conversation with the session's resume id. If
@@ -45,7 +48,7 @@ import type { DaemonAgent } from './definition';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';
-import type { QueuedInput, SessionMap, SessionRecord } from './store/sessions';
+import type { QueuedInput, SessionMap, SessionRecord, TurnHandoff } from './store/sessions';
 import type { TranscriptBook } from './transcripts';
 
 export interface TurnsDeps {
@@ -87,6 +90,9 @@ const ZERO_STATS: TurnStats = { inputTokens: 0, outputTokens: 0, durationMs: 0 }
 
 /** Sent when a restart resumes an interrupted turn. Kept in the input queue, not a new store. */
 const RESUME_PROMPT = 'Continue.';
+
+/** Reconcile closes an interrupted turn with this error so replay can tell it from a finished one. */
+const RESTART_ERROR = 'The environment restarted during this turn.';
 
 /** Notices as the orchestrator reads them at the top of its prompt. */
 export function noticePrompt(notices: Notice[]): string {
@@ -192,7 +198,7 @@ export class Turns {
       const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
       if (last && !last.events.some((e) => e.kind === 'turn-end')) {
         for (const e of last.events) if (e.kind === 'ask' && e.answers === undefined) e.answers = null;
-        last.events.push({ kind: 'error', message: 'The environment restarted during this turn.', ts: at });
+        last.events.push({ kind: 'error', message: RESTART_ERROR, ts: at });
         last.events.push({ kind: 'turn-end', stats: ZERO_STATS, ts: at });
         this.deps.transcripts.saveNow(session.id);
       }
@@ -213,26 +219,21 @@ export class Turns {
   }
 
   /**
- * Queue a short continue on every session a restart left interrupted, so
- * the saved resume id is used without waiting for a new message. A start
- * the provider never saw is sent its accepted input again. Returns the
- * sessions that will resume.
+   * Queue recovery for every session a restart left interrupted. A turn not
+   * yet handed to the adapter is delivered again as its stored text (the
+   * saved resume id is used when there is one). A turn already handed off
+   * resumes with a short continue. Follow-ups already queued stay behind
+   * that text. Returns the sessions that will resume.
    */
   resumeInterrupted(): SessionRecord[] {
     const resumed: SessionRecord[] = [];
     for (const session of this.list()) {
       if (session.status !== 'interrupted') continue;
       const queue = this.queues.get(session.id) ?? [];
-      let redeliver = false;
-      if (!session.resumeId) {
-        const unsent = unsentUserInputs(this.deps.transcripts.get(session.id).log);
-        if (unsent.length && queue.length === 0) queue.push(...unsent);
-        redeliver =
-          unsent.length > 0 &&
-          queue.length === unsent.length &&
-          queue.every((item, i) => item.text === unsent[i].text && item.author === unsent[i].author);
-      }
-      if (!redeliver && !queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
+      const handoff = session.handoff;
+      if (handoff && !handoff.handedOff) {
+        if (handoff.inputs.length && !startsWithInputs(queue, handoff.inputs)) queue.unshift(...handoff.inputs.map(copyInput));
+      } else if (!queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
         queue.unshift({ text: RESUME_PROMPT, author: 'system' });
       }
       this.queues.set(session.id, queue);
@@ -382,10 +383,16 @@ export class Turns {
     const inputs = (this.queues.get(session.id) ?? []).slice();
     const notices = session.kind === 'orchestrator' ? this.deps.peekNotices() : [];
     const at = this.now();
-    this.commitStarted(session, inputs, notices, at);
-    turn.started = true;
+    this.commitStarted(session, turn.turnId, inputs, at);
 
     const prompt = [...(notices.length ? [noticePrompt(notices)] : []), ...inputs.map((i) => i.text)].join('\n\n');
+    try {
+      this.recordDurable(session, inputs, notices, at);
+      if (notices.length) this.deps.commitNotices(notices.length);
+    } catch (err) {
+      this.abortUnhanded(session, inputs);
+      throw err;
+    }
     const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
     transcripts.append(session.id, record);
 
@@ -415,6 +422,7 @@ export class Turns {
       emit({ kind: 'turn.event', sessionId: session.id, turnId: turn.turnId, event: stamped });
     };
 
+    let startFailed = false;
     try {
       const agent = this.deps.agentFor(session);
       const adapter = this.deps.adapters[session.harness];
@@ -494,6 +502,16 @@ export class Turns {
           askUser: (questions) => this.ask(session, turn, questions, forward),
           signal: aborter.signal,
         };
+        if (i === 0) {
+          try {
+            this.markHandedOff(session);
+          } catch (err) {
+            startFailed = true;
+            this.abortUnhanded(session, inputs);
+            throw err;
+          }
+          turn.started = true;
+        }
         try {
           await adapter.run(req, ctx);
         } catch (err) {
@@ -502,6 +520,7 @@ export class Turns {
         if (!stale) break;
       }
     } catch (err) {
+      if (startFailed) throw err;
       forward({ kind: 'error', message: errText(err) });
     } finally {
       this.cancelAsks(session.id);
@@ -514,12 +533,17 @@ export class Turns {
       if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
       session.lastActiveAt = this.now();
       if (session.status === 'running') session.status = 'idle';
+      delete session.handoff;
       const t = transcripts.get(session.id);
       t.turns = session.turns;
       t.lastTurnTokens = session.lastTurnTokens;
       t.lastActiveAt = session.lastActiveAt;
       transcripts.saveNow(session.id);
-      this.deps.sessions.save();
+      try {
+        this.deps.sessions.commit();
+      } catch (err) {
+        log.error('turn.end-failed', err, { sessionId: session.id });
+      }
       emit({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
       log.info('turn.end', {
         sessionId: session.id,
@@ -532,60 +556,91 @@ export class Turns {
     }
   }
 
-  private commitStarted(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
-    this.recordDurable(session, inputs, notices, at);
+  /** One commit: queue no longer holds these inputs, the session is running, and the text is stored unhanded. */
+  private commitStarted(session: SessionRecord, turnId: string, inputs: QueuedInput[], at: number): void {
     const previous = {
       status: session.status,
-      queue: session.queue.map((item) => ({ text: item.text, author: item.author })),
+      queue: session.queue.map(copyInput),
       turns: session.turns,
       lastActiveAt: session.lastActiveAt,
+      handoff: session.handoff,
     };
+    const handoff: TurnHandoff = { turnId, inputs: inputs.map(copyInput), handedOff: false };
     session.status = 'running';
     session.turns += 1;
     session.lastActiveAt = at;
     session.queue = [];
+    session.handoff = handoff;
     try {
       this.deps.sessions.commit();
-      if (notices.length) this.deps.commitNotices(notices.length);
     } catch (err) {
       session.status = previous.status;
       session.queue = previous.queue;
       session.turns = previous.turns;
       session.lastActiveAt = previous.lastActiveAt;
-      try {
-        this.deps.sessions.commit();
-      } catch (revertErr) {
-        this.deps.log.error('turn.start-failed', revertErr, { sessionId: session.id });
-      }
+      if (previous.handoff) session.handoff = previous.handoff;
+      else delete session.handoff;
       throw err;
     }
     const live = this.queues.get(session.id);
     if (live) live.splice(0, inputs.length);
   }
 
+  /** The prompt is about to be passed to the adapter. A crash after this resumes with continue. */
+  private markHandedOff(session: SessionRecord): void {
+    const handoff = session.handoff;
+    if (!handoff || handoff.handedOff) return;
+    handoff.handedOff = true;
+    try {
+      this.deps.sessions.commit();
+    } catch (err) {
+      handoff.handedOff = false;
+      throw err;
+    }
+  }
+
+  /**
+   * The turn-start commit landed but the prompt was never passed on. Put the
+   * text back on the queue and drop the record so a later start can deliver
+   * it, without scheduling another attempt from this failure.
+   */
+  private abortUnhanded(session: SessionRecord, inputs: QueuedInput[]): void {
+    const queue = this.queues.get(session.id) ?? [];
+    if (inputs.length && !startsWithInputs(queue, inputs)) queue.unshift(...inputs.map(copyInput));
+    this.queues.set(session.id, queue);
+    session.queue = queue.map(copyInput);
+    session.status = 'idle';
+    session.turns = Math.max(0, session.turns - 1);
+    delete session.handoff;
+    try {
+      this.deps.sessions.commit();
+    } catch (err) {
+      this.deps.log.error('turn.start-failed', err, { sessionId: session.id });
+    }
+  }
+
   private recordDurable(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
     if (inputs.length === 0 && notices.length === 0) return;
     const { transcripts, emit } = this.deps;
     const log = transcripts.get(session.id).log;
-    if (!recordedTail(log, inputs, notices)) {
-      const start = log.length;
-      const added: TranscriptEntry[] = [];
-      if (notices.length) added.push({ kind: 'notice', ts: at, notices });
-      for (const input of inputs) added.push({ kind: 'user', text: input.text, author: input.author, ts: at });
-      log.push(...added);
-      try {
-        transcripts.commit(session.id);
-      } catch (err) {
-        log.splice(start);
-        throw err;
-      }
-      for (const entry of added) {
-        if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
-        else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
-      }
-      return;
+    const missing = missingInputs(userTail(log), inputs);
+    const noticeMissing = notices.length > 0 && !log.some((entry) => entry.kind === 'notice' && sameNotices(entry.notices, notices));
+    if (missing.length === 0 && !noticeMissing) return;
+    const start = log.length;
+    const added: TranscriptEntry[] = [];
+    if (noticeMissing) added.push({ kind: 'notice', ts: at, notices });
+    for (const input of missing) added.push({ kind: 'user', text: input.text, author: input.author, ts: at });
+    log.push(...added);
+    try {
+      transcripts.commit(session.id);
+    } catch (err) {
+      log.splice(start);
+      throw err;
     }
-    transcripts.commit(session.id);
+    for (const entry of added) {
+      if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
+      else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
+    }
   }
 
   private ask(
@@ -617,47 +672,52 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function copyInput(item: QueuedInput): QueuedInput {
+  return { text: item.text, author: item.author };
+}
+
+function sameInput(a: QueuedInput, b: QueuedInput): boolean {
+  return a.text === b.text && a.author === b.author;
+}
+
+function startsWithInputs(queue: QueuedInput[], inputs: QueuedInput[]): boolean {
+  return inputs.every((item, i) => queue[i] !== undefined && sameInput(queue[i], item));
+}
+
 function sawProvider(events: TurnEntry['events']): boolean {
   return events.some(
     (e) => e.kind === 'text-delta' || e.kind === 'thinking' || e.kind === 'tool-start' || e.kind === 'tool-end' || e.kind === 'ask',
   );
 }
 
-function openTurnIndex(log: TranscriptEntry[]): number {
-  const last = log[log.length - 1];
-  if (last?.kind === 'turn' && !sawProvider(last.events)) return log.length - 1;
-  return -1;
-}
-
-function unsentUserInputs(log: TranscriptEntry[]): QueuedInput[] {
-  const last = log[log.length - 1];
-  if (last?.kind === 'turn' && sawProvider(last.events)) return [];
-  const end = openTurnIndex(log);
-  const body = end === -1 ? log : log.slice(0, end);
+/** User lines of the in-flight turn. A finished turn ends the tail; a restart-closed one does not. */
+function userTail(log: TranscriptEntry[]): QueuedInput[] {
   const inputs: QueuedInput[] = [];
-  for (let i = body.length - 1; i >= 0; i--) {
-    const entry = body[i];
+  for (let i = log.length - 1; i >= 0; i--) {
+    const entry = log[i];
+    if (entry.kind === 'notice') continue;
+    if (entry.kind === 'turn') {
+      if (sawProvider(entry.events) || finishedTurn(entry.events)) break;
+      continue;
+    }
     if (entry.kind !== 'user') break;
     inputs.unshift({ text: entry.text, author: entry.author });
   }
   return inputs;
 }
 
-function recordedTail(log: TranscriptEntry[], inputs: QueuedInput[], notices: Notice[]): boolean {
-  const end = openTurnIndex(log);
-  const body = end === -1 ? log : log.slice(0, end);
-  const count = inputs.length + (notices.length > 0 ? 1 : 0);
-  if (body.length < count) return false;
-  const tail = body.slice(body.length - count);
-  let index = 0;
-  if (notices.length) {
-    const entry = tail[index++];
-    if (entry.kind !== 'notice' || entry.notices.length !== notices.length) return false;
-    for (let i = 0; i < notices.length; i++) if (entry.notices[i].id !== notices[i].id) return false;
-  }
-  for (const input of inputs) {
-    const entry = tail[index++];
-    if (entry.kind !== 'user' || entry.text !== input.text || entry.author !== input.author) return false;
-  }
-  return true;
+function finishedTurn(events: TurnEntry['events']): boolean {
+  const ended = events.some((event) => event.kind === 'turn-end');
+  const restarted = events.some((event) => event.kind === 'error' && event.message === RESTART_ERROR);
+  return ended && !restarted;
+}
+
+function missingInputs(tail: QueuedInput[], inputs: QueuedInput[]): QueuedInput[] {
+  if (tail.length <= inputs.length && startsWithInputs(inputs, tail)) return inputs.slice(tail.length);
+  if (tail.length >= inputs.length && startsWithInputs(tail.slice(tail.length - inputs.length), inputs)) return [];
+  return inputs;
+}
+
+function sameNotices(recorded: Notice[], notices: Notice[]): boolean {
+  return recorded.length === notices.length && recorded.every((notice, i) => notice.id === notices[i].id);
 }

@@ -15,6 +15,17 @@ export interface QueuedInput {
   author: EntryAuthor;
 }
 
+/**
+ * The in-flight turn, written in the same commit that removes its inputs
+ * from the queue and marks the session running. `handedOff` becomes true
+ * only once that exact text has been passed to the harness adapter.
+ */
+export interface TurnHandoff {
+  turnId: string;
+  inputs: QueuedInput[];
+  handedOff: boolean;
+}
+
 export interface SessionRecord {
   id: string;
   kind: SessionKind;
@@ -24,8 +35,10 @@ export interface SessionRecord {
   cwd: string;
   status: SessionStatus;
   resumeId?: string;
-  /** Inputs acknowledged but not yet started. Empty once their turn starts. */
+  /** Inputs acknowledged but not yet part of a turn. Empty once their turn starts. */
   queue: QueuedInput[];
+  /** Present from the turn-start commit until the turn ends. */
+  handoff?: TurnHandoff;
   turns: number;
   lastTurnTokens: number;
   costUsd: number;
@@ -48,11 +61,23 @@ function normalizeQueue(raw: unknown): QueuedInput[] {
   return queue;
 }
 
+function normalizeHandoff(raw: unknown): TurnHandoff | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const turnId = (raw as { turnId?: unknown }).turnId;
+  if (typeof turnId !== 'string' || !turnId) return undefined;
+  return {
+    turnId,
+    inputs: normalizeQueue((raw as { inputs?: unknown }).inputs),
+    handedOff: (raw as { handedOff?: unknown }).handedOff === true,
+  };
+}
+
 function normalize(raw: unknown): SessionMap {
   const out: SessionMap = Object.create(null) as SessionMap;
   if (!raw || typeof raw !== 'object') return out;
   for (const [id, value] of Object.entries(raw as Record<string, Partial<SessionRecord>>)) {
     if (!value || typeof value !== 'object' || typeof value.agent !== 'string') continue;
+    const handoff = normalizeHandoff(value.handoff);
     out[id] = {
       id,
       kind: value.kind === 'worker' ? 'worker' : 'orchestrator',
@@ -63,6 +88,7 @@ function normalize(raw: unknown): SessionMap {
       status: value.status ?? 'idle',
       ...(value.resumeId ? { resumeId: value.resumeId } : {}),
       queue: normalizeQueue(value.queue),
+      ...(handoff ? { handoff } : {}),
       turns: value.turns ?? 0,
       lastTurnTokens: value.lastTurnTokens ?? 0,
       costUsd: value.costUsd ?? 0,
