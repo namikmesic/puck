@@ -30,7 +30,7 @@ import {
 import type { GitHubAppConfig } from './config';
 import { b64url } from './ids';
 
-export { RefreshRejectedError, type UserTokens };
+export { GitHubApiError, RefreshRejectedError, type UserTokens };
 
 export interface GitHubAppDeps {
   fetch: typeof fetch;

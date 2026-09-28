@@ -7,13 +7,15 @@
  * refresh token never leaves this module: callers get the current access
  * token, refreshed single-flight when it is within five minutes of expiry.
  * GitHub rotates the refresh token on every refresh, so the new pair is
- * stored before the access token is handed out. A refresh GitHub rejects
- * deletes the pair; the user signs in again.
+ * stored before the access token is handed out. A call GitHub answers 401
+ * refreshes once more, even outside that margin, and retries; if the
+ * refresh is rejected or the retry is 401 again, the pair is deleted and
+ * the user signs in again.
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import type { Clock } from './clock';
-import { RefreshRejectedError, type GitHubApp, type UserTokens } from './github';
+import { GitHubApiError, RefreshRejectedError, type GitHubApp, type UserTokens } from './github';
 import type { Store } from './store';
 
 export const REFRESH_MARGIN_MS = 5 * 60_000;
@@ -47,6 +49,10 @@ export function unseal(key: Buffer, userId: string, blob: Buffer): UserTokens | 
   }
 }
 
+function isUserUnauthorized(err: unknown): boolean {
+  return err instanceof GitHubApiError && err.status === 401;
+}
+
 export class UserTokenCustody {
   private inflight = new Map<string, Promise<UserTokens>>();
 
@@ -63,6 +69,28 @@ export class UserTokenCustody {
 
   async forget(userId: string): Promise<void> {
     await this.store.deleteGitHubTokens(userId);
+  }
+
+  /**
+   * Runs `fn` with the user's access token. A 401 refreshes once, even when
+   * the token is outside the expiry margin, and retries; a rejected refresh
+   * or a second 401 forgets the pair.
+   */
+  async use<T>(userId: string, fn: (accessToken: string) => Promise<T>): Promise<T> {
+    const current = await this.accessToken(userId);
+    try {
+      return await fn(current.token);
+    } catch (err) {
+      if (!isUserUnauthorized(err)) throw err;
+    }
+    const fresh = await this.refresh(userId, await this.load(userId));
+    try {
+      return await fn(fresh.accessToken);
+    } catch (err) {
+      if (!isUserUnauthorized(err)) throw err;
+      await this.forget(userId);
+      throw new GitHubAuthLostError();
+    }
   }
 
   /** The user's current GitHub access token and its expiry (epoch ms, or null when it does not expire). */

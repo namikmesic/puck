@@ -29,7 +29,7 @@ import { compareVersions } from './config';
 import { sessionFor, type ServerContext } from './context';
 import { HttpError, intOrNull, str, strList, type Req, type Router } from './http';
 import { fromB64url, hashSecret, hasPrefix, newId, newSecret, type SecretPrefix } from './ids';
-import type { DockerInfo, EnrollKind, Runner } from './store';
+import { NameTakenError, type DockerInfo, type EnrollKind, type NewRunner, type Runner } from './store';
 
 export const ENROLL_TTL_MS = 60 * 60_000;
 export const RUNNER_TOKEN_TTL_MS = 60 * 60_000;
@@ -178,15 +178,10 @@ export async function authenticateRunner(ctx: ServerContext, token: string | nul
 /** Revokes the runner and settles its environments; shared by every removal path. */
 async function removeRunner(ctx: ServerContext, runner: Runner, how: 'keep' | 'delete' | 'force', by: string): Promise<void> {
   const now = ctx.clock.now();
-  await ctx.store.removeRunner(runner.id, now);
-  let affected: string[];
+  const affected = await ctx.store.retireRunner(runner.id, now, how);
   if (how === 'delete') {
-    const instances = await ctx.store.instancesOnRunner(runner.id);
-    for (const i of instances) await ctx.store.deleteInstance(i.id);
-    affected = instances.map((i) => i.id);
     for (const envId of affected) ctx.hub.push(runner.userId, { type: 'instance.removed', envId });
   } else {
-    affected = await ctx.store.setRunnerInstancesStatus(runner.id, how === 'keep' ? 'orphaned' : 'lost', now);
     for (const envId of affected) {
       const instance = await ctx.store.getInstance(envId);
       if (instance) ctx.hub.push(runner.userId, { type: 'instance.upsert', instance });
@@ -248,14 +243,7 @@ export function registerRunnerRoutes(router: Router, ctx: ServerContext): void {
     if (existing && body.replace !== true) {
       throw new HttpError(409, 'name-taken', `You already have a runner named "${name}". Pick another name or re-register with --replace.`);
     }
-    if (existing) {
-      // Re-registering under a name replaces that runner on the same host:
-      // the old key is revoked and its environments follow the new record.
-      await ctx.store.removeRunner(existing.id, now);
-      ctx.hub.dropRunner(existing.id, 'runner-replaced');
-      ctx.hub.push(user.id, { type: 'runner.removed', runnerId: existing.id });
-    }
-    const runner = await ctx.store.createRunner({
+    const record: NewRunner = {
       id: newId('rnr', now),
       userId: user.id,
       name,
@@ -268,10 +256,28 @@ export function registerRunnerRoutes(router: Router, ctx: ServerContext): void {
       maxEnvironments,
       docker: dockerInfo(body.docker),
       createdAt: now,
-    });
-    if (existing) {
-      const moved = await ctx.store.moveInstances(existing.id, runner.id, now);
-      await ctx.audit('runner.replaced', { userId: user.id, runnerId: existing.id, detail: { by: runner.id, environments: moved.length } });
+    };
+    const taken = new HttpError(409, 'name-taken', `You already have a runner named "${name}". Pick another name or re-register with --replace.`);
+    let runner: Runner;
+    try {
+      if (existing) {
+        // Re-registering under a name replaces that runner on the same host:
+        // the old key is revoked and its environments follow the new record.
+        const swapped = await ctx.store.replaceRunner(existing.id, record, now);
+        runner = swapped.runner;
+        ctx.hub.dropRunner(existing.id, 'runner-replaced');
+        ctx.hub.push(user.id, { type: 'runner.removed', runnerId: existing.id });
+        await ctx.audit('runner.replaced', {
+          userId: user.id,
+          runnerId: existing.id,
+          detail: { by: runner.id, environments: swapped.moved.length },
+        });
+      } else {
+        runner = await ctx.store.createRunner(record);
+      }
+    } catch (err) {
+      if (err instanceof NameTakenError) throw taken;
+      throw err;
     }
     const fresh = (await ctx.store.getRunner(runner.id)) as Runner;
     await ctx.audit('runner.registered', {
@@ -350,7 +356,14 @@ export function registerRunnerRoutes(router: Router, ctx: ServerContext): void {
       if (clash && clash.id !== runner.id) throw new HttpError(409, 'name-taken', `You already have a runner named "${patch.name}".`);
     }
     if (body.labels !== undefined) patch.labels = labelSet(runner.os, runner.arch, strList(body, 'labels', 16));
-    await ctx.store.updateRunner(runner.id, patch);
+    try {
+      await ctx.store.updateRunner(runner.id, patch);
+    } catch (err) {
+      if (err instanceof NameTakenError && patch.name) {
+        throw new HttpError(409, 'name-taken', `You already have a runner named "${patch.name}".`);
+      }
+      throw err;
+    }
     const fresh = (await ctx.store.getRunner(runner.id)) as Runner;
     ctx.hub.push(user.id, { type: 'runner.upsert', runner: runnerView(ctx, fresh) });
     await ctx.audit('runner.updated', { userId: user.id, runnerId: runner.id, detail: { fields: Object.keys(patch) } });

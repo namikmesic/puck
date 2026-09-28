@@ -97,6 +97,59 @@ describe('POST /v1/instances', () => {
     expect(offline.body.error).toBe('runner-offline');
   });
 
+  it('lets only one of two overlapping creates claim the last slot', async () => {
+    const { s, r, sock } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    sock.send({ type: 'status', version: '0.1.0', docker: { ok: true }, maxEnvironments: 1, instances: [] });
+    await sock.sync();
+    const gate = h.github.pauseRepoReads(2);
+    const pending = Promise.all([
+      create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] }),
+      create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] }),
+    ]);
+    await gate.arrived;
+    gate.release();
+    const [a, b] = await pending;
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    expect([a, b].find((res) => res.status === 409)?.body.error).toBe('runner-full');
+    const list = await call(h, 'GET', '/v1/instances', { token: s.accessToken });
+    expect(list.body.instances).toHaveLength(1);
+  });
+
+  it('refreshes a user token GitHub rejected and retries the repository check', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    h.github.rejectUserAccess();
+    const res = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    expect(res.status).toBe(201);
+    expect(h.github.refreshCount).toBe(1);
+    expect(await h.server.ctx.store.getGitHubTokens(s.userId)).not.toBeNull();
+  });
+
+  it('forgets the user when GitHub rejects the access token and the refresh', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    h.github.rejectUserAccess();
+    h.github.revokeAuthorizations();
+    const res = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('owner-auth-lost');
+    expect(await h.server.ctx.store.getGitHubTokens(s.userId)).toBeNull();
+    const token = await call(h, 'GET', '/v1/github/token', { token: s.accessToken });
+    expect(token.status).toBe(401);
+    expect(token.body.error).toBe('github-auth-lost');
+  });
+
+  it('does not treat an App JWT rejection as the user losing GitHub', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    h.github.rejectAppJwt = true;
+    const res = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('github-unavailable');
+    expect(await h.server.ctx.store.getGitHubTokens(s.userId)).not.toBeNull();
+  });
+
   it('validates repositories and policies', async () => {
     const { s, r } = await setup();
     const bad = [
@@ -168,6 +221,19 @@ describe('installation tokens for a runner', () => {
     res = await mint(r.accessToken, envId);
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('no-repositories');
+  });
+
+  it('reports owner-auth-lost when re-verification’s user token is rejected', async () => {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    const inst = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    h.clock.advance(10 * 60_000);
+    h.github.rejectUserAccess();
+    h.github.revokeAuthorizations();
+    const res = await mint(r.accessToken, String(inst.body.envId));
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('owner-auth-lost');
+    expect(await h.server.ctx.store.getGitHubTokens(s.userId)).toBeNull();
   });
 
   it('refuses another runner’s environment and inactive ones', async () => {

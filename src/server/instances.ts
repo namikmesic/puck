@@ -22,7 +22,7 @@
  */
 
 import { type ServerContext, requireGitHub, sessionFor } from './context';
-import type { GitHubApp } from './github';
+import type { GitHubApp, RepoAccess } from './github';
 import { HttpError, str, type Req, type Router } from './http';
 import { newId } from './ids';
 import { authenticateRunner } from './runners';
@@ -97,9 +97,15 @@ function parseRepos(body: Record<string, unknown>): { owner: string; name: strin
   return out;
 }
 
-async function ownerToken(custody: UserTokenCustody, userId: string): Promise<string> {
+async function userRepoAccess(
+  github: GitHubApp,
+  custody: UserTokenCustody,
+  userId: string,
+  owner: string,
+  name: string,
+): Promise<RepoAccess | null> {
   try {
-    return (await custody.accessToken(userId)).token;
+    return await custody.use(userId, (token) => github.repoAccess(token, owner, name));
   } catch (err) {
     if (err instanceof GitHubAuthLostError) throw new HttpError(403, 'owner-auth-lost', 'The owner must sign in to Puck again.');
     throw err;
@@ -109,7 +115,8 @@ async function ownerToken(custody: UserTokenCustody, userId: string): Promise<st
 /** Checks each repository with the owner's token and finds its installation; throws on the first that fails. */
 async function verifyRepos(
   github: GitHubApp,
-  token: string,
+  custody: UserTokenCustody,
+  userId: string,
   envId: string,
   repos: { owner: string; name: string }[],
   now: number,
@@ -117,7 +124,7 @@ async function verifyRepos(
   const out: GrantRepo[] = [];
   for (const { owner, name } of repos) {
     const full = `${owner}/${name}`;
-    const access = await github.repoAccess(token, owner, name);
+    const access = await userRepoAccess(github, custody, userId, owner, name);
     if (!access) {
       // A user token sees only repositories where the App is installed, so
       // "not found" is also what a missing installation looks like.
@@ -175,7 +182,7 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const repos = parseRepos(body);
     const now = ctx.clock.now();
     const envId = newId('env', now);
-    const grant = await verifyRepos(github, await ownerToken(custody, user.id), envId, repos, now);
+    const grant = await verifyRepos(github, custody, user.id, envId, repos, now);
     const instance: Instance = {
       id: envId,
       userId: user.id,
@@ -186,7 +193,10 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
       createdAt: now,
       updatedAt: now,
     };
-    await ctx.store.createInstance(instance, grant);
+    const placed = await ctx.store.createInstance(instance, grant);
+    if (placed !== 'ok') {
+      throw new HttpError(409, 'runner-full', `${runner.name} already hosts its maximum of ${placed.full} environments.`);
+    }
     const view = await instanceView(ctx, instance);
     await ctx.audit('instance.created', {
       userId: user.id,
@@ -216,7 +226,7 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const body = await req.json();
     const policies = parsePolicies(body);
     const now = ctx.clock.now();
-    const grant = await verifyRepos(github, await ownerToken(custody, user.id), instance.id, parseRepos(body), now);
+    const grant = await verifyRepos(github, custody, user.id, instance.id, parseRepos(body), now);
     const permissions = permissionsFor(policies);
     await ctx.store.replaceGrant(instance.id, grant, permissions, now);
     const view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
@@ -247,14 +257,13 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const now = ctx.clock.now();
     let repos = (await ctx.store.grantRepos(instance.id)).filter((r) => r.revokedAt === null);
     if (repos.some((r) => now - r.verifiedAt >= REVERIFY_AFTER_MS)) {
-      const token = await ownerToken(custody, instance.userId);
       const kept: GrantRepo[] = [];
       for (const r of repos) {
         if (now - r.verifiedAt < REVERIFY_AFTER_MS) {
           kept.push(r);
           continue;
         }
-        const access = await github.repoAccess(token, r.owner, r.name);
+        const access = await userRepoAccess(github, custody, instance.userId, r.owner, r.name);
         if (access && access.push && access.id === r.repoId) {
           await ctx.store.markRepoVerified(instance.id, r.repoId, now);
           kept.push({ ...r, verifiedAt: now });

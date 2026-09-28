@@ -23,6 +23,14 @@
  * that overruns its credit, or a receiver that returns credit it was never
  * owed, loses the channel (`flow-control`). So the server never buffers more
  * than one window per channel direction however slow a reader is.
+ *
+ * An app socket stays authorized only until the access token presented at
+ * upgrade expires. The server closes it with 4401 `token-expired` at that
+ * time, and with 4401 `signed-out` when the session is revoked. The app
+ * extends the same socket, without dropping its channels, by sending
+ * `{ "type": "auth", "token": "<PSA access token>" }` for that same
+ * session. A token for another session, or any token the server rejects,
+ * closes the socket with 4401 `token-expired`.
  */
 
 import { createHash } from 'node:crypto';
@@ -83,6 +91,7 @@ export type ServerToRunner =
   | { type: 'pong'; t: number };
 
 export type AppToServer =
+  | { type: 'auth'; token: string }
   | { type: 'open'; ch: number; runnerId: string; kind: ChannelKind; envId?: string; e2e: { appEphemeralPub: string } }
   | { type: 'close'; ch: number; reason: string }
   | { type: 'window'; ch: number; credit: number }

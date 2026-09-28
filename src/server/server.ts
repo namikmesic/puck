@@ -105,7 +105,7 @@ export function createPuckServer(deps: ServerDeps): PuckServer {
           wss.handleUpgrade(req, socket, head, (ws) => relay.attachRunner(ws, runner));
         } else if (path === '/v1/app/connect') {
           const { session, user } = await authenticate(ctx, token);
-          wss.handleUpgrade(req, socket, head, (ws) => relay.attachApp(ws, session.id, user.id));
+          wss.handleUpgrade(req, socket, head, (ws) => relay.attachApp(ws, session.id, user.id, session.accessExpiresAt));
         } else {
           reject(socket, 404, 'Not Found');
         }

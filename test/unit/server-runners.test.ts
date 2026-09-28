@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { keyFingerprint } from '../../src/channel/wire';
+import { NameTakenError } from '../../src/server/store';
 import {
   assertion,
   call,
@@ -131,6 +132,58 @@ describe('register', () => {
       body: { assertion: assertion(old.runnerId, old.privateKey, TOKEN_AUD, h.clock.now()) },
     });
     expect(oldToken.body.error).toBe('runner-removed');
+  });
+
+  it('answers name-taken when two registers claim one name together', async () => {
+    const s = await setup();
+    const reg = await call(h, 'POST', '/v1/runners/registration-token', { token: s.accessToken });
+    const token = String(reg.body.token);
+    const [a, b] = await Promise.all([register(s, token), register(s, token)]);
+    expect([a.res.status, b.res.status].sort((x, y) => x - y)).toEqual([201, 409]);
+    expect([a, b].find((r) => r.res.status === 409)?.res.body.error).toBe('name-taken');
+    const list = await call(h, 'GET', '/v1/runners', { token: s.accessToken });
+    expect(list.body.runners).toHaveLength(1);
+  });
+
+  it('keeps the old runner and its environments when a replace cannot claim the name', async () => {
+    const s = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    await registerRunner(h, s, { name: 'kept' });
+    const old = await registerRunner(h, s, { name: 'old' });
+    const sock = await connectRunner(h, old.accessToken);
+    const inst = await call(h, 'POST', '/v1/instances', {
+      token: s.accessToken,
+      body: { runnerId: old.runnerId, definition: 'web', repos: ['namik/web'] },
+    });
+    expect(inst.status).toBe(201);
+    const current = (await h.server.ctx.store.getRunner(old.runnerId))!;
+    await expect(
+      h.server.ctx.store.replaceRunner(
+        old.runnerId,
+        {
+          id: 'rnr_does_not_land',
+          userId: s.userId,
+          name: 'kept',
+          labels: current.labels,
+          os: current.os,
+          arch: current.arch,
+          publicKey: current.publicKey,
+          fingerprint: current.fingerprint,
+          version: current.version,
+          maxEnvironments: current.maxEnvironments,
+          docker: current.docker,
+          createdAt: h.clock.now(),
+        },
+        h.clock.now(),
+      ),
+    ).rejects.toBeInstanceOf(NameTakenError);
+    sock.close();
+    const again = await connectRunner(h, old.accessToken);
+    again.close();
+    const moved = await call(h, 'GET', `/v1/instances/${String(inst.body.envId)}`, { token: s.accessToken });
+    expect(moved.body.instance).toMatchObject({ runnerId: old.runnerId, status: 'active' });
+    expect(await h.server.ctx.store.getRunner('rnr_does_not_land')).toBeNull();
+    expect((await h.server.ctx.store.listRunners(s.userId)).map((r) => r.name).sort()).toEqual(['kept', 'old']);
   });
 
   it('refuses runners older than the minimum version', async () => {

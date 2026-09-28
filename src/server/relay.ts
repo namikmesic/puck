@@ -36,7 +36,7 @@ import {
   type RunnerStatus,
 } from '../channel/wire';
 import { compareVersions } from './config';
-import type { Hub, LiveRunner, PushEvent, ServerContext } from './context';
+import { authenticate, type Hub, type LiveRunner, type PushEvent, type ServerContext } from './context';
 import { runnerView } from './runners';
 import type { DockerInfo, Runner } from './store';
 
@@ -62,9 +62,11 @@ interface AppConn {
   ws: WebSocket;
   sessionId: string;
   userId: string;
+  accessExpiresAt: number;
   channels: Map<number, Channel>;
   /** Channel numbers whose `open` is still being checked. */
   pending: Set<number>;
+  tail: Promise<void>;
 }
 
 interface Channel {
@@ -140,7 +142,7 @@ export class Relay implements Hub {
   }
 
   dropSession(sessionId: string): void {
-    for (const app of [...this.apps]) if (app.sessionId === sessionId) app.ws.close(CLOSE.unauthorized, 'signed-out');
+    for (const app of [...this.apps]) if (app.sessionId === sessionId) this.endApp(app, 'signed-out');
   }
 
   dropRunner(runnerId: string, reason: string): void {
@@ -164,11 +166,35 @@ export class Relay implements Hub {
         void this.announce(runnerId);
       }
     }
-    for (const app of this.apps) {
+    const apps = [...this.apps];
+    for (const app of apps) {
       for (const ch of [...app.channels.values()]) {
         if (!ch.open && now - ch.openedAt >= OPEN_TIMEOUT_MS) this.closeChannel(ch, 'open-timeout', true, true);
       }
+      if (this.apps.has(app) && app.accessExpiresAt <= now) this.endApp(app, 'token-expired');
     }
+    const live = apps.filter((app) => this.apps.has(app));
+    if (live.length) void this.closeSignedOut(live);
+  }
+
+  private async closeSignedOut(apps: AppConn[]): Promise<void> {
+    if (!this.ctx) return;
+    for (const app of apps) {
+      if (!this.apps.has(app)) continue;
+      let session: Awaited<ReturnType<ServerContext['store']['getSession']>>;
+      try {
+        session = await this.ctx.store.getSession(app.sessionId);
+      } catch {
+        continue;
+      }
+      if (!this.apps.has(app)) continue;
+      if (!session || session.revokedAt !== null) this.endApp(app, 'signed-out');
+    }
+  }
+
+  private endApp(app: AppConn, reason: 'token-expired' | 'signed-out'): void {
+    if (!this.apps.delete(app)) return;
+    app.ws.close(CLOSE.unauthorized, reason);
   }
 
   /** Pushes `runner.upsert` when what an app would render (status, running count, Docker) changed. */
@@ -302,10 +328,19 @@ export class Relay implements Hub {
 
   /* ---------- App sockets ---------- */
 
-  attachApp(ws: WebSocket, sessionId: string, userId: string): void {
-    const app: AppConn = { ws, sessionId, userId, channels: new Map(), pending: new Set() };
+  attachApp(ws: WebSocket, sessionId: string, userId: string, accessExpiresAt: number): void {
+    const app: AppConn = {
+      ws,
+      sessionId,
+      userId,
+      accessExpiresAt,
+      channels: new Map(),
+      pending: new Set(),
+      tail: Promise.resolve(),
+    };
     this.apps.add(app);
     ws.on('message', (data, isBinary) => {
+      if (!this.apps.has(app)) return;
       if (isBinary) return this.fromAppData(app, data as Buffer);
       let frame: Record<string, unknown>;
       try {
@@ -313,8 +348,13 @@ export class Relay implements Hub {
       } catch {
         return ws.close(CLOSE.protocol, 'bad-frame');
       }
-      void this.fromAppControl(app, frame).catch((err) => {
-        this.ctx.log.error('app frame failed', { error: err instanceof Error ? err.name : 'unknown' });
+      app.tail = app.tail.then(async () => {
+        if (!this.apps.has(app)) return;
+        try {
+          await this.fromAppControl(app, frame);
+        } catch (err) {
+          this.ctx.log.error('app frame failed', { error: err instanceof Error ? err.name : 'unknown' });
+        }
       });
     });
     ws.on('close', () => {
@@ -325,6 +365,8 @@ export class Relay implements Hub {
 
   private async fromAppControl(app: AppConn, frame: Record<string, unknown>): Promise<void> {
     switch (frame.type) {
+      case 'auth':
+        return this.extendAuth(app, frame);
       case 'open':
         return this.openChannel(app, frame);
       case 'close': {
@@ -345,6 +387,18 @@ export class Relay implements Hub {
         return;
       default:
         return;
+    }
+  }
+
+  private async extendAuth(app: AppConn, frame: Record<string, unknown>): Promise<void> {
+    try {
+      const token = typeof frame.token === 'string' ? frame.token : null;
+      const { session } = await authenticate(this.ctx, token);
+      if (!this.apps.has(app)) return;
+      if (session.id !== app.sessionId) return this.endApp(app, 'token-expired');
+      app.accessExpiresAt = session.accessExpiresAt;
+    } catch {
+      if (this.apps.has(app)) this.endApp(app, 'token-expired');
     }
   }
 

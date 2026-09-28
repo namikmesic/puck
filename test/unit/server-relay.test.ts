@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { decodeData, encodeData, MAX_CIPHERTEXT_BYTES, WINDOW_BYTES } from '../../src/channel/wire';
+import { ACCESS_TTL_MS } from '../../src/server/auth';
+import { hashSecret } from '../../src/server/ids';
 import {
   call,
   connectApp,
@@ -217,6 +219,68 @@ describe('sockets', () => {
     const sock = await connectRunner(h, r.accessToken, { version: '0.0.9' });
     sockets.push(sock);
     expect(await sock.waitClosed()).toMatchObject({ code: 4426, reason: 'runner-outdated' });
+  });
+
+  it('closes an app socket when the access token that opened it expires', async () => {
+    const { s, app } = await setup();
+    h.clock.advance(10 * 60_000);
+    const fresh = await call(h, 'POST', '/v1/auth/token', {
+      body: { grant_type: 'refresh_token', refresh_token: s.refreshToken },
+    });
+    expect(fresh.status).toBe(200);
+    expect((await call(h, 'GET', '/v1/me', { token: s.accessToken })).status).toBe(401);
+    app.send({ type: 'ping', t: 1 });
+    expect(await app.next('pong')).toMatchObject({ t: 1 });
+    h.clock.advance(ACCESS_TTL_MS - 10 * 60_000);
+    expect(await app.waitClosed()).toMatchObject({ code: 4401, reason: 'token-expired' });
+    expect((await call(h, 'GET', '/v1/me', { token: String(fresh.body.accessToken) })).status).toBe(200);
+  });
+
+  it('extends an app socket when the same session presents a fresh access token', async () => {
+    const { s, r, runner, app } = await setup();
+    const { rch } = await openChannel(app, runner, r.runnerId, 1);
+    const beat = async (ms: number) => {
+      let left = ms;
+      while (left > 0) {
+        const step = Math.min(left, 50_000);
+        h.clock.advance(step);
+        left -= step;
+        runner.send({ type: 'ping', t: left });
+        await runner.next('pong');
+      }
+    };
+    await beat(10 * 60_000);
+    const fresh = await call(h, 'POST', '/v1/auth/token', {
+      body: { grant_type: 'refresh_token', refresh_token: s.refreshToken },
+    });
+    app.send({ type: 'auth', token: String(fresh.body.accessToken) });
+    await app.sync();
+    await beat(6 * 60_000);
+    app.sendBinary(encodeData(1, 0n, Buffer.from('still')));
+    expect(decodeData(await runner.nextBinary())).toEqual({ ch: rch, seq: 0n, payload: Buffer.from('still') });
+    h.clock.advance(ACCESS_TTL_MS - 6 * 60_000);
+    expect(await app.waitClosed()).toMatchObject({ code: 4401, reason: 'token-expired' });
+  });
+
+  it('closes an app socket whose auth frame is for another session or is invalid', async () => {
+    const { s, app } = await setup();
+    h.github.addUser('mallory');
+    const m = await signIn(h, 'mallory');
+    app.send({ type: 'auth', token: m.accessToken });
+    expect(await app.waitClosed()).toMatchObject({ code: 4401, reason: 'token-expired' });
+
+    const other = await connectApp(h, s.accessToken);
+    sockets.push(other);
+    other.send({ type: 'auth', token: `PSA_${'x'.repeat(43)}` });
+    expect(await other.waitClosed()).toMatchObject({ code: 4401, reason: 'token-expired' });
+  });
+
+  it('closes an app socket on the sweep after its session is revoked', async () => {
+    const { s, app } = await setup();
+    const session = await h.server.ctx.store.sessionByAccess(hashSecret(s.accessToken));
+    await h.server.ctx.store.revokeSession(session!.id, h.clock.now());
+    h.clock.advance(5_000);
+    expect(await app.waitClosed()).toMatchObject({ code: 4401, reason: 'signed-out' });
   });
 
   it('answers pings', async () => {

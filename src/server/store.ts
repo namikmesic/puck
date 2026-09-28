@@ -154,6 +154,7 @@ export interface Store {
 
   createSession(s: Session, accessHash: string, refreshHash: string): Promise<void>;
   sessionByAccess(accessHash: string): Promise<Session | null>;
+  getSession(id: string): Promise<Session | null>;
   /**
    * Rotates the refresh token. `reused` means `oldHash` was already spent
    * (the session is revoked as a precaution); `null` means it never existed.
@@ -170,13 +171,24 @@ export interface Store {
   enrollTokenByHash(hash: string): Promise<EnrollToken | null>;
   revokeEnrollToken(userId: string, id: string, now: number): Promise<boolean>;
 
+  /** Inserts a live runner. Throws `NameTakenError` when that user already has the name. */
   createRunner(r: NewRunner): Promise<Runner>;
+  /**
+   * Removes `oldId` and its tokens, inserts `next`, and moves its instances,
+   * in one transaction. Throws `NameTakenError` (and keeps `oldId`) when the
+   * new name is already live.
+   */
+  replaceRunner(oldId: string, next: NewRunner, now: number): Promise<{ runner: Runner; moved: string[] }>;
   getRunner(id: string): Promise<Runner | null>;
   activeRunnerByName(userId: string, name: string): Promise<Runner | null>;
   listRunners(userId: string): Promise<Runner[]>;
   updateRunner(id: string, patch: Partial<Pick<Runner, 'name' | 'labels' | 'version' | 'docker' | 'maxEnvironments' | 'lastSeenAt'>>): Promise<void>;
-  /** Marks the runner removed and drops its access tokens. */
-  removeRunner(id: string, now: number): Promise<void>;
+  /**
+   * Removes the runner and its tokens and settles its instances, in one
+   * transaction: `delete` forgets them, `keep` marks them orphaned, `force`
+   * marks them lost. Returns the affected environment ids.
+   */
+  retireRunner(id: string, now: number, how: 'keep' | 'delete' | 'force'): Promise<string[]>;
 
   putRunnerToken(hash: string, runnerId: string, expiresAt: number): Promise<void>;
   runnerByToken(hash: string, now: number): Promise<Runner | null>;
@@ -185,13 +197,15 @@ export interface Store {
   /** Deletes expired sign-in state, tokens and assertion ids. */
   sweep(now: number): Promise<void>;
 
-  createInstance(i: Instance, repos: GrantRepo[]): Promise<void>;
+  /**
+   * Inserts the instance and its grant, unless the runner already hosts
+   * `maxEnvironments` active instances. `full` is that cap.
+   */
+  createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | { full: number }>;
   getInstance(id: string): Promise<Instance | null>;
   listInstances(userId: string): Promise<Instance[]>;
   instancesOnRunner(runnerId: string): Promise<Instance[]>;
   setInstanceStatus(id: string, status: InstanceStatus, now: number): Promise<void>;
-  setRunnerInstancesStatus(runnerId: string, status: InstanceStatus, now: number): Promise<string[]>;
-  moveInstances(fromRunner: string, toRunner: string, now: number): Promise<string[]>;
   replaceGrant(envId: string, repos: GrantRepo[], permissions: Instance['permissions'], now: number): Promise<void>;
   deleteInstance(id: string): Promise<void>;
   grantRepos(envId: string): Promise<GrantRepo[]>;
@@ -312,6 +326,17 @@ function toGrantRepo(r: Row): GrantRepo {
     verifiedAt: num(r.verified_at),
     revokedAt: optNum(r.revoked_at),
   };
+}
+
+export class NameTakenError extends Error {
+  constructor() {
+    super('A runner with this name is already registered.');
+    this.name = 'NameTakenError';
+  }
+}
+
+function isLiveNameTaken(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('UNIQUE constraint failed: runners.user_id, runners.name');
 }
 
 function toAudit(r: Row): AuditEvent {
@@ -485,6 +510,11 @@ export class SqliteStore implements Store {
     return r ? toSession(r) : null;
   }
 
+  async getSession(id: string): Promise<Session | null> {
+    const r = this.one('SELECT * FROM sessions WHERE id = ?', id);
+    return r ? toSession(r) : null;
+  }
+
   async rotateRefresh(
     oldHash: string,
     next: { accessHash: string; refreshHash: string; accessExpiresAt: number; refreshExpiresAt: number },
@@ -554,7 +584,7 @@ export class SqliteStore implements Store {
     return this.run('UPDATE enroll_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND user_id = ?', now, id, userId) > 0;
   }
 
-  async createRunner(r: NewRunner): Promise<Runner> {
+  private insertRunner(r: NewRunner): Runner {
     this.run(
       `INSERT INTO runners (id, user_id, name, labels, os, arch, public_key, fingerprint, version, max_environments, docker, created_at, last_seen_at, removed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
@@ -572,6 +602,31 @@ export class SqliteStore implements Store {
       r.createdAt,
     );
     return toRunner(this.one('SELECT * FROM runners WHERE id = ?', r.id) as Row);
+  }
+
+  async createRunner(r: NewRunner): Promise<Runner> {
+    try {
+      return this.insertRunner(r);
+    } catch (err) {
+      if (isLiveNameTaken(err)) throw new NameTakenError();
+      throw err;
+    }
+  }
+
+  async replaceRunner(oldId: string, next: NewRunner, now: number): Promise<{ runner: Runner; moved: string[] }> {
+    try {
+      return this.tx(() => {
+        this.run('UPDATE runners SET removed_at = COALESCE(removed_at, ?) WHERE id = ?', now, oldId);
+        this.run('DELETE FROM runner_tokens WHERE runner_id = ?', oldId);
+        const runner = this.insertRunner(next);
+        const moved = this.all('SELECT id FROM instances WHERE runner_id = ?', oldId).map((row) => text(row.id));
+        if (moved.length) this.run('UPDATE instances SET runner_id = ?, updated_at = ? WHERE runner_id = ?', next.id, now, oldId);
+        return { runner, moved };
+      });
+    } catch (err) {
+      if (isLiveNameTaken(err)) throw new NameTakenError();
+      throw err;
+    }
   }
 
   async getRunner(id: string): Promise<Runner | null> {
@@ -601,13 +656,27 @@ export class SqliteStore implements Store {
     if (patch.lastSeenAt !== undefined) cols.last_seen_at = patch.lastSeenAt;
     const keys = Object.keys(cols);
     if (!keys.length) return;
-    this.run(`UPDATE runners SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => cols[k]), id);
+    try {
+      this.run(`UPDATE runners SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => cols[k]), id);
+    } catch (err) {
+      if (isLiveNameTaken(err)) throw new NameTakenError();
+      throw err;
+    }
   }
 
-  async removeRunner(id: string, now: number): Promise<void> {
-    this.tx(() => {
+  async retireRunner(id: string, now: number, how: 'keep' | 'delete' | 'force'): Promise<string[]> {
+    return this.tx(() => {
       this.run('UPDATE runners SET removed_at = COALESCE(removed_at, ?) WHERE id = ?', now, id);
       this.run('DELETE FROM runner_tokens WHERE runner_id = ?', id);
+      if (how === 'delete') {
+        const ids = this.all('SELECT id FROM instances WHERE runner_id = ?', id).map((row) => text(row.id));
+        this.run('DELETE FROM instances WHERE runner_id = ?', id);
+        return ids;
+      }
+      const status = how === 'keep' ? 'orphaned' : 'lost';
+      const ids = this.all("SELECT id FROM instances WHERE runner_id = ? AND status = 'active'", id).map((row) => text(row.id));
+      this.run("UPDATE instances SET status = ?, updated_at = ? WHERE runner_id = ? AND status = 'active'", status, now, id);
+      return ids;
     });
   }
 
@@ -652,8 +721,14 @@ export class SqliteStore implements Store {
     });
   }
 
-  async createInstance(i: Instance, repos: GrantRepo[]): Promise<void> {
-    this.tx(() => {
+  async createInstance(i: Instance, repos: GrantRepo[]): Promise<'ok' | { full: number }> {
+    return this.tx(() => {
+      const runner = this.one('SELECT max_environments FROM runners WHERE id = ?', i.runnerId);
+      const cap = runner ? optNum(runner.max_environments) : null;
+      if (cap !== null) {
+        const count = this.one("SELECT COUNT(*) AS n FROM instances WHERE runner_id = ? AND status = 'active'", i.runnerId) as Row;
+        if (num(count.n) >= cap) return { full: cap };
+      }
       this.run(
         `INSERT INTO instances (id, user_id, runner_id, definition, status, permissions, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -667,6 +742,7 @@ export class SqliteStore implements Store {
         i.updatedAt,
       );
       for (const repo of repos) this.insertRepo(repo);
+      return 'ok';
     });
   }
 
@@ -698,22 +774,6 @@ export class SqliteStore implements Store {
 
   async setInstanceStatus(id: string, status: InstanceStatus, now: number): Promise<void> {
     this.run('UPDATE instances SET status = ?, updated_at = ? WHERE id = ?', status, now, id);
-  }
-
-  async setRunnerInstancesStatus(runnerId: string, status: InstanceStatus, now: number): Promise<string[]> {
-    return this.tx(() => {
-      const ids = this.all("SELECT id FROM instances WHERE runner_id = ? AND status = 'active'", runnerId).map((r) => text(r.id));
-      this.run("UPDATE instances SET status = ?, updated_at = ? WHERE runner_id = ? AND status = 'active'", status, now, runnerId);
-      return ids;
-    });
-  }
-
-  async moveInstances(fromRunner: string, toRunner: string, now: number): Promise<string[]> {
-    return this.tx(() => {
-      const ids = this.all('SELECT id FROM instances WHERE runner_id = ?', fromRunner).map((r) => text(r.id));
-      this.run('UPDATE instances SET runner_id = ?, updated_at = ? WHERE runner_id = ?', toRunner, now, fromRunner);
-      return ids;
-    });
   }
 
   async replaceGrant(envId: string, repos: GrantRepo[], permissions: Instance['permissions'], now: number): Promise<void> {

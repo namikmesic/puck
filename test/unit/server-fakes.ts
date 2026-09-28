@@ -49,6 +49,9 @@ export class FakeGitHub {
   readonly mints: MintRequest[] = [];
   readonly calls: string[] = [];
   refreshCount = 0;
+  /** App JWT calls answer 401. User tokens are left alone. */
+  rejectAppJwt = false;
+  private repoPause: { need: number; seen: number; arrive: () => void; gate: Promise<void> } | null = null;
   /** Access-token life GitHub hands out (8 h, like user-to-server tokens). */
   tokenLifeMs = 8 * 60 * 60_000;
 
@@ -81,6 +84,31 @@ export class FakeGitHub {
   /** The user revoked the App's authorization: every refresh token stops working. */
   revokeAuthorizations(): void {
     this.refreshTokens.clear();
+  }
+
+  /** GitHub rejects current user access tokens while the server still treats them as unexpired. */
+  rejectUserAccess(): void {
+    this.access.clear();
+  }
+
+  /** Holds the next `need` repository reads until `release`. */
+  pauseRepoReads(need: number): { arrived: Promise<void>; release: () => void } {
+    let arrive!: () => void;
+    let release!: () => void;
+    const arrived = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.repoPause = { need, seen: 0, arrive, gate };
+    return {
+      arrived,
+      release: () => {
+        this.repoPause = null;
+        release();
+      },
+    };
   }
 
   revokePush(full: string, login: string): void {
@@ -121,6 +149,7 @@ export class FakeGitHub {
   }
 
   private appJwtOk(auth: string | null): boolean {
+    if (this.rejectAppJwt) return false;
     const parts = (auth?.replace(/^Bearer /, '') ?? '').split('.');
     if (parts.length !== 3) return false;
     if (!verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), this.publicKey, Buffer.from(parts[2], 'base64url'))) return false;
@@ -169,6 +198,12 @@ export class FakeGitHub {
     }
     const repoPath = /^\/repos\/([^/]+)\/([^/]+)$/.exec(url.pathname);
     if (repoPath) {
+      const pause = this.repoPause;
+      if (pause) {
+        pause.seen += 1;
+        if (pause.seen >= pause.need) pause.arrive();
+        await pause.gate;
+      }
       const login = this.userFor(auth);
       if (!login) return json(401, { message: 'Bad credentials' });
       const repo = this.repos.get(`${repoPath[1]}/${repoPath[2]}`.toLowerCase());
