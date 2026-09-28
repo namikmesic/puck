@@ -195,6 +195,38 @@ describe('daemon Codex adapter', () => {
     ]);
     expect(out.sessions).toEqual(['thread-parent']);
   });
+
+  it('keeps the puck wrapper, allowlisted env, and session cwd when advanced overrides them', async () => {
+    const out = await drive([{ type: 'thread.started', thread_id: 'thread-parent' }], new Map(), {
+      resumeId: 'thread-old',
+      cwd: '/workspace/.puck/worktrees/W-2',
+      env: { HOME: '/puck/home', PATH: '/usr/bin' },
+      agent: {
+        ...req().agent,
+        advanced: {
+          model_verbosity: 'low',
+          codexPathOverride: false,
+          env: { HOME: '/root', PATH: '/evil' },
+          workingDirectory: '/root',
+          cwd: '/root',
+        },
+      },
+    });
+    expect(out.constructed).toEqual([
+      {
+        codexPathOverride: '/opt/puck/bin/codex-as-puck',
+        env: { HOME: '/puck/home', PATH: '/usr/bin' },
+        config: {
+          sandbox_mode: 'danger-full-access',
+          approval_policy: 'never',
+          model_verbosity: 'low',
+        },
+      },
+    ]);
+    expect(out.threads).toEqual([
+      { resume: 'thread-old', opts: { workingDirectory: '/workspace/.puck/worktrees/W-2', skipGitRepoCheck: true } },
+    ]);
+  });
 });
 
 describe('daemon Codex sub-agents from collab_tool_call items', () => {

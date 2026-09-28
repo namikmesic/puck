@@ -154,13 +154,10 @@ export async function runClaude(
     return { behavior: 'allow', updatedInput: input };
   };
   const options: Options = {
-    cwd: req.cwd,
-    env: req.env,
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     includePartialMessages: true,
     canUseTool,
-    spawnClaudeCodeProcess: deps.spawner,
   };
   if (req.agent.model && req.agent.model !== 'auto') options.model = req.agent.model;
   if (req.resumeId) options.resume = req.resumeId;
@@ -179,6 +176,9 @@ export async function runClaude(
     }
   }
   applyOverrides(options as Record<string, unknown>, req);
+  options.cwd = req.cwd;
+  options.env = req.env;
+  options.spawnClaudeCodeProcess = deps.spawner;
 
   let sawText = false;
   // AskUserQuestion renders as a question card via the 'ask' event; its raw

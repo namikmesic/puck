@@ -86,14 +86,15 @@ async function drive(script: Script, over: Partial<AdapterRequest> = {}, answers
   };
   const s = scriptedSdk(script);
   const tools = [{ name: 'backlog_list' }];
+  const spawner = (): never => {
+    throw new Error('not spawned in tests');
+  };
   await runClaude(request(over), s.sdk as unknown as ClaudeSdk, ctx, {
-    spawner: () => {
-      throw new Error('not spawned in tests');
-    },
+    spawner,
     orchestratorTools: () => tools,
     daemonVersion: '0.0.1+abc',
   });
-  return { events, sessions, asked, ...s };
+  return { events, sessions, asked, spawner, ...s };
 }
 
 /** The same script through runner.js, with the runner's context shape. */
@@ -227,6 +228,29 @@ describe('daemon Claude adapter', () => {
     });
     expect(typeof options.spawnClaudeCodeProcess).toBe('function');
     expect(options.mcpServers).toBeUndefined(); // workers get no orchestrator tools
+  });
+
+  it('keeps the puck-user spawn, cwd, and allowlisted env when advanced overrides them', async () => {
+    for (const spawnClaudeCodeProcess of [null, false]) {
+      const { calls, spawner } = await drive([{ type: 'result', subtype: 'success', result: 'ok', usage: {} }], {
+        cwd: '/workspace/.puck/worktrees/W-1',
+        env: { PATH: '/usr/bin', HOME: '/puck/home' },
+        agent: {
+          ...request().agent,
+          advanced: {
+            maxTurns: 3,
+            spawnClaudeCodeProcess,
+            env: { PATH: '/tmp/evil', HOME: '/root' },
+            cwd: '/root',
+          },
+        },
+      });
+      const options = calls[0].options;
+      expect(options.spawnClaudeCodeProcess).toBe(spawner);
+      expect(options.cwd).toBe('/workspace/.puck/worktrees/W-1');
+      expect(options.env).toEqual({ PATH: '/usr/bin', HOME: '/puck/home' });
+      expect(options.maxTurns).toBe(3);
+    }
   });
 
   it('gives the orchestrator session the in-process puck MCP server', async () => {

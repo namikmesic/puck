@@ -6,7 +6,8 @@
  * arrive while a turn runs wait; the next turn takes all of them (and,
  * for the orchestrator, any pending notices) as one prompt. A turn:
  *
- *   - records the inputs as `user`/`notice` entries, then a `turn` entry;
+ *   - records the inputs as `user`/`notice` entries, durable before the
+ *     queue and pending notices are cleared, then a `turn` entry;
  *   - runs the session's harness adapter, streaming every HarnessEvent as a
  *     `turn.event` and recording it in the persisted dialect;
  *   - resumes the provider conversation with the session's resume id. If
@@ -27,7 +28,14 @@ import type {
   SessionKind,
   SessionSummary,
 } from '../harness/daemon-protocol';
-import { recordAskAnswer, recordEvent, type EntryAuthor, type Notice, type TurnEntry } from '../harness/transcript';
+import {
+  recordAskAnswer,
+  recordEvent,
+  type EntryAuthor,
+  type Notice,
+  type TranscriptEntry,
+  type TurnEntry,
+} from '../harness/transcript';
 import { isStaleResumeError } from '../harness/resume';
 import { harnessDescriptorById } from '../harness/providers';
 import { validateSettings } from '../harness/options';
@@ -49,8 +57,10 @@ export interface TurnsDeps {
   agentFor(session: SessionRecord): DaemonAgent | null;
   /** The complete harness process environment for a session's turn. */
   envFor(session: SessionRecord): Record<string, string>;
-  /** Notices to deliver with the orchestrator's next turn (removed from the pending list). */
-  takeNotices(): Notice[];
+  /** Pending notices still stored. A snapshot the caller may record. */
+  peekNotices(): Notice[];
+  /** Fsync the pending list once its first `count` notices are in the transcript. */
+  commitNotices(count: number): void;
   now?: () => number;
 }
 
@@ -72,6 +82,9 @@ interface ActiveTurn {
 }
 
 const ZERO_STATS: TurnStats = { inputTokens: 0, outputTokens: 0, durationMs: 0 };
+
+/** Sent when a restart resumes an interrupted turn. Kept in the input queue, not a new store. */
+const RESUME_PROMPT = 'Continue.';
 
 /** Notices as the orchestrator reads them at the top of its prompt. */
 export function noticePrompt(notices: Notice[]): string {
@@ -195,6 +208,26 @@ export class Turns {
         session.queue.map((item) => ({ text: item.text, author: item.author })),
       );
     }
+  }
+
+  /**
+   * Queue a short continue on every session a restart left interrupted, so
+   * the saved resume id is used without waiting for a new message. Returns
+   * the sessions that will resume.
+   */
+  resumeInterrupted(): SessionRecord[] {
+    const resumed: SessionRecord[] = [];
+    for (const session of this.list()) {
+      if (session.status !== 'interrupted') continue;
+      const queue = this.queues.get(session.id) ?? [];
+      if (!queue.some((item) => item.author === 'system' && item.text === RESUME_PROMPT)) {
+        queue.unshift({ text: RESUME_PROMPT, author: 'system' });
+        this.queues.set(session.id, queue);
+        this.persistQueue(session);
+      }
+      resumed.push(session);
+    }
+    return resumed;
   }
 
   /** Start restored inputs on open sessions that are not already running. */
@@ -333,21 +366,15 @@ export class Turns {
 
   private async runTurn(session: SessionRecord, turn: ActiveTurn): Promise<void> {
     const { transcripts, emit, log } = this.deps;
-    const inputs = this.queues.get(session.id)?.splice(0) ?? [];
-    this.persistQueue(session);
-    const notices = session.kind === 'orchestrator' ? this.deps.takeNotices() : [];
+    const inputs = (this.queues.get(session.id) ?? []).slice();
+    const notices = session.kind === 'orchestrator' ? this.deps.peekNotices() : [];
     const at = this.now();
+    this.recordDurable(session, inputs, notices, at);
+    const queue = this.queues.get(session.id);
+    if (queue) queue.splice(0, inputs.length);
+    this.persistQueue(session);
+    if (notices.length) this.deps.commitNotices(notices.length);
 
-    if (notices.length) {
-      const entry = { kind: 'notice' as const, ts: at, notices };
-      transcripts.append(session.id, entry);
-      emit({ kind: 'turn.notice', sessionId: session.id, entry });
-    }
-    for (const input of inputs) {
-      const entry = { kind: 'user' as const, text: input.text, author: input.author, ts: at };
-      transcripts.append(session.id, entry);
-      emit({ kind: 'turn.user', sessionId: session.id, entry });
-    }
     const prompt = [...(notices.length ? [noticePrompt(notices)] : []), ...inputs.map((i) => i.text)].join('\n\n');
     const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
     transcripts.append(session.id, record);
@@ -499,6 +526,25 @@ export class Turns {
     }
   }
 
+  private recordDurable(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
+    if (inputs.length === 0 && notices.length === 0) return;
+    const { transcripts, emit } = this.deps;
+    const log = transcripts.get(session.id).log;
+    if (!recordedTail(log, inputs, notices)) {
+      if (notices.length) {
+        const entry = { kind: 'notice' as const, ts: at, notices };
+        log.push(entry);
+        emit({ kind: 'turn.notice', sessionId: session.id, entry });
+      }
+      for (const input of inputs) {
+        const entry = { kind: 'user' as const, text: input.text, author: input.author, ts: at };
+        log.push(entry);
+        emit({ kind: 'turn.user', sessionId: session.id, entry });
+      }
+    }
+    transcripts.commit(session.id);
+  }
+
   private ask(
     session: SessionRecord,
     turn: ActiveTurn,
@@ -526,4 +572,21 @@ export class TurnsError extends Error {
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function recordedTail(log: TranscriptEntry[], inputs: QueuedInput[], notices: Notice[]): boolean {
+  const count = inputs.length + (notices.length > 0 ? 1 : 0);
+  if (log.length < count) return false;
+  const tail = log.slice(log.length - count);
+  let index = 0;
+  if (notices.length) {
+    const entry = tail[index++];
+    if (entry.kind !== 'notice' || entry.notices.length !== notices.length) return false;
+    for (let i = 0; i < notices.length; i++) if (entry.notices[i].id !== notices[i].id) return false;
+  }
+  for (const input of inputs) {
+    const entry = tail[index++];
+    if (entry.kind !== 'user' || entry.text !== input.text || entry.author !== input.author) return false;
+  }
+  return true;
 }

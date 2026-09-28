@@ -88,7 +88,20 @@ export function turnHelpers(ctx: AdapterContext, resumeId: string | null): TurnH
   };
 }
 
-/** Compiled settings, then the agent's `advanced` passthrough LAST. */
+/**
+ * Fields the daemon sets so the CLI runs as the puck user, with the
+ * allowlisted environment and the session working directory. A definition's
+ * settings or `advanced` passthrough must not replace them.
+ */
+const DAEMON_OWNED = new Set(['spawnClaudeCodeProcess', 'codexPathOverride', 'env', 'cwd', 'workingDirectory']);
+
+function passthrough(source: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) if (!DAEMON_OWNED.has(key)) out[key] = value;
+  return out;
+}
+
+/** Compiled settings, then the agent's `advanced` passthrough, minus daemon-owned isolation keys. */
 export function applyOverrides(target: Record<string, unknown>, req: AdapterRequest): void {
-  Object.assign(target, req.settings, req.agent.advanced);
+  Object.assign(target, passthrough(req.settings), passthrough(req.agent.advanced));
 }

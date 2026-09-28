@@ -6,7 +6,8 @@
  * Boot: migrate the state format (a failure leaves the daemon `failed`,
  * answering only the handshake, snapshots and logs) → open the socket so
  * the app can watch → ingest the inbox → provision → reconcile what a
- * restart interrupted → make sure the orchestrator session exists → ready.
+ * restart interrupted → make sure the orchestrator session exists →
+ * resume those turns → ready.
  */
 
 import * as fs from 'node:fs';
@@ -127,7 +128,8 @@ export class Daemon {
         log,
         agentFor: (s) => this.agentFor(s.agent, s.kind === 'worker'),
         envFor: () => this.harnessEnv(),
-        takeNotices: () => this.takeNotices(),
+        peekNotices: () => this.peekNotices(),
+        commitNotices: (count) => this.commitNotices(count),
         now: this.now,
       });
     }
@@ -180,14 +182,15 @@ export class Daemon {
     this.homeReady = true;
 
     const interrupted = this.turns.reconcile();
-    if (interrupted.length) {
-      const names = interrupted.map((s) => (s.kind === 'orchestrator' ? 'the orchestrator' : s.agent));
+    this.ensureOrchestrator(def.value);
+    const resumed = this.turns.resumeInterrupted();
+    if (resumed.length) {
+      const names = resumed.map((s) => (s.kind === 'orchestrator' ? 'the orchestrator' : s.agent));
       this.pushNotice(
         'environment.restarted',
-        `The environment restarted; interrupted turns were not resumed (${names.join(', ')}).`,
+        `The environment restarted; interrupted turns were resumed (${names.join(', ')}).`,
       );
     }
-    this.ensureOrchestrator(def.value);
     this.turns.startRestored();
     this.setState({ status: 'ready' });
     this.emit({ kind: 'capacity', ...this.capacity() });
@@ -259,10 +262,14 @@ export class Daemon {
     this.notices.save();
   }
 
-  private takeNotices(): Notice[] {
-    const pending = this.notices.get().pending.splice(0);
-    if (pending.length) this.notices.save();
-    return pending;
+  private peekNotices(): Notice[] {
+    return this.notices.get().pending.slice();
+  }
+
+  private commitNotices(count: number): void {
+    if (count <= 0) return;
+    this.notices.get().pending.splice(0, count);
+    this.notices.commit();
   }
 
   private capacity(): Capacity {

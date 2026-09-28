@@ -13,7 +13,7 @@ import {
   type TurnEntry,
   TRANSCRIPT_VERSION,
 } from '../harness/transcript';
-import { readJsonFile, writeJsonAtomic } from './store/jsonfile';
+import { readJsonFile, writeJsonAtomic, writeJsonAtomicSync } from './store/jsonfile';
 
 const SAVE_DEBOUNCE_MS = 250;
 
@@ -79,6 +79,15 @@ export class TranscriptBook {
     const timer = setTimeout(() => this.saveNow(sessionId), SAVE_DEBOUNCE_MS);
     timer.unref?.();
     this.timers.set(sessionId, timer);
+  }
+
+  commit(sessionId: string): void {
+    const timer = this.timers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(sessionId);
+    const t = this.open.get(sessionId);
+    if (!t) return;
+    writeJsonAtomicSync(this.file(sessionId), t);
   }
 
   saveNow(sessionId: string): void {

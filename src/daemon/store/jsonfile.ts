@@ -57,6 +57,21 @@ function fsyncDir(dir: string): void {
   }
 }
 
+/**
+ * Synchronous atomic write that supersedes any queued write of the same file.
+ * A crash after this returns leaves this value, not an older queued snapshot.
+ */
+export function writeJsonAtomicSync(file: string, value: unknown, mode = 0o600): void {
+  const text = JSON.stringify(value);
+  const marker = Promise.resolve();
+  chains.set(file, marker);
+  writeFileAtomicSync(file, text, mode);
+  const settled = (): void => {
+    if (chains.get(file) === marker) chains.delete(file);
+  };
+  marker.then(settled, settled);
+}
+
 /** Queue an atomic write; resolves once this write, or a newer one for the same file, is durable. */
 export function writeJsonAtomic(file: string, value: unknown, mode = 0o600): Promise<void> {
   const text = JSON.stringify(value);

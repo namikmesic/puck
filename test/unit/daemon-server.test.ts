@@ -477,7 +477,7 @@ describe('upgrade failure restarts instead of rolling back', () => {
     expect(notice.ev).toMatchObject({
       kind: 'turn.notice',
       entry: {
-        notices: [expect.objectContaining({ kind: 'environment.restarted' })],
+        notices: [expect.objectContaining({ kind: 'environment.restarted', text: expect.stringContaining('were resumed (the orchestrator)') })],
       },
     });
     expect(prompts.some((p) => p.includes('later'))).toBe(true);
@@ -630,7 +630,7 @@ describe('restored follow-up through Daemon.start', () => {
     expect(notice.ev).toMatchObject({
       kind: 'turn.notice',
       entry: {
-        notices: [expect.objectContaining({ kind: 'environment.restarted', text: expect.stringContaining('The environment restarted') })],
+        notices: [expect.objectContaining({ kind: 'environment.restarted', text: expect.stringContaining('were resumed (the orchestrator)') })],
       },
     });
     const restored = prompts.find((p) => p.includes('second'));

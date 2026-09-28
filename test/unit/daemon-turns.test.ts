@@ -11,7 +11,8 @@ import { nullLogger } from '../../src/daemon/log';
 import { flushJsonWrites } from '../../src/daemon/store/jsonfile';
 import { sessionsStore } from '../../src/daemon/store/sessions';
 import { TranscriptBook } from '../../src/daemon/transcripts';
-import { noticePrompt, Turns } from '../../src/daemon/turns';
+import { noticesStore } from '../../src/daemon/store/notices';
+import { noticePrompt, Turns, type TurnsDeps } from '../../src/daemon/turns';
 import { defined } from './daemon-fakes';
 
 // The daemon's turn loop inherits the app's stale-resume retry, whose
@@ -41,7 +42,7 @@ const agent: DaemonAgent = {
   advanced: {},
 };
 
-function build(): Turns {
+function build(over: Partial<TurnsDeps> = {}): Turns {
   const adapter: HarnessAdapter = {
     id: 'claude-code',
     run: async (req, ctx) => {
@@ -60,7 +61,11 @@ function build(): Turns {
     log: nullLogger,
     agentFor: () => agent,
     envFor: () => ({ HOME: '/puck/home' }),
-    takeNotices: () => pendingNotices.splice(0),
+    peekNotices: () => pendingNotices.slice(),
+    commitNotices: (count) => {
+      pendingNotices.splice(0, count);
+    },
+    ...over,
   });
 }
 
@@ -358,6 +363,114 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(turns.get(s.id)?.queue).toEqual([{ text: 'second', author: 'user' }]);
     expect(turns.get(replacement.id)?.queue).toEqual([]);
     expect(turns.get(replacement.id)?.status).toBe('idle');
+  });
+
+  it('keeps accepted input when the process dies after the transcript is durable and before the queue is cleared', async () => {
+    const sessions = sessionsStore(dir);
+    let crash = false;
+    const commit = sessions.commit.bind(sessions);
+    (sessions as { commit(): void }).commit = () => {
+      const emptied = Object.values(sessions.get()).every((s) => s.queue.length === 0);
+      if (crash && emptied) throw new Error('killed before the empty queue was committed');
+      commit();
+    };
+    const notices = noticesStore(dir);
+    notices.get().pending.push({ id: 'ntc_1', kind: 'environment.restarted', at: 1, text: 'The environment restarted.' });
+    notices.commit();
+    turns = build({
+      sessions,
+      peekNotices: () => notices.get().pending.slice(),
+      commitNotices: (count) => {
+        notices.get().pending.splice(0, count);
+        notices.commit();
+      },
+    });
+    const s = orchestrator();
+    crash = true;
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    turns.send(s.id, 'keep me');
+    await turns.idle();
+
+    const transcriptFile = path.join(dir, 'transcripts', `${s.id}.json`);
+    const savedTranscript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8')) as { log: Array<{ kind: string; text?: string }> };
+    expect(savedTranscript.log.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual(['keep me']);
+    expect(savedTranscript.log.some((e) => e.kind === 'notice')).toBe(true);
+    const savedSessions = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { queue: unknown }>;
+    expect(savedSessions[s.id].queue).toEqual([{ text: 'keep me', author: 'user' }]);
+    const savedNotices = JSON.parse(fs.readFileSync(path.join(dir, 'notices.json'), 'utf8')) as { pending: typeof pendingNotices };
+    expect(savedNotices.pending.map((n) => n.id)).toEqual(['ntc_1']);
+
+    pendingNotices = savedNotices.pending;
+    calls = [];
+    turns = build();
+    turns.reconcile();
+    turns.startRestored();
+    await turns.idle();
+    await transcripts.flush();
+    const log = transcripts.get(s.id).log;
+    expect(log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''))).toEqual(['keep me']);
+    expect(log.filter((e) => e.kind === 'notice')).toHaveLength(1);
+    expect(calls.map((c) => c.prompt)).toEqual(['[Puck] Updates since your last turn:\n- The environment restarted.\n\nkeep me']);
+  });
+
+  it('resumes an interrupted turn after restart without a new message', async () => {
+    const s = orchestrator();
+    attempts = [
+      async (_req, ctx) => {
+        ctx.reportSession('sess-live');
+        await new Promise(() => undefined);
+      },
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'continued' });
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'long job');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(turns.get(s.id)?.resumeId).toBe('sess-live');
+    await transcripts.flush();
+    await flushJsonWrites();
+    calls = [];
+    events = [];
+    turns = build();
+    expect(turns.reconcile().map((t) => t.id)).toEqual([s.id]);
+    expect(turns.resumeInterrupted().map((t) => t.id)).toEqual([s.id]);
+    turns.startRestored();
+    await turns.idle();
+    expect(calls.map((c) => c.resumeId)).toEqual(['sess-live']);
+    expect(calls.map((c) => c.prompt)).toEqual(['Continue.']);
+    expect(turns.get(s.id)?.status).toBe('idle');
+  });
+
+  it('retries a resumed turn fresh when the saved id no longer resolves', async () => {
+    const s = orchestrator();
+    attempts = [
+      async (_req, ctx) => {
+        ctx.reportSession('sess-live');
+        await new Promise(() => undefined);
+      },
+      (_req, ctx) => {
+        ctx.emit({ kind: 'error', message: 'No conversation found with session ID sess-live' });
+      },
+      (_req, ctx) => {
+        ctx.reportSession('sess-new');
+        ctx.emit({ kind: 'text-delta', text: 'fresh' });
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'long job');
+    await new Promise((r) => setTimeout(r, 0));
+    await transcripts.flush();
+    await flushJsonWrites();
+    calls = [];
+    turns = build();
+    turns.reconcile();
+    turns.resumeInterrupted();
+    turns.startRestored();
+    await turns.idle();
+    expect(calls.map((c) => c.resumeId)).toEqual(['sess-live', null]);
+    expect(calls.map((c) => c.prompt)).toEqual(['Continue.', 'Continue.']);
+    expect(turns.get(s.id)?.resumeId).toBe('sess-new');
   });
 
   it('refuses input once it stops accepting, and for closed sessions', () => {
