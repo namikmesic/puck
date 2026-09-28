@@ -10,7 +10,7 @@
 
 import type { AgentConfig, AgentInfo } from '../harness/bridge';
 import { isPlainObject, validateSettings } from '../harness/options';
-import { defaultProvider, providerById } from './providers';
+import { defaultHarness, harnessById } from './providers';
 import { defineStore } from './store';
 
 interface Store {
@@ -84,7 +84,7 @@ function sanitize(cfg: Omit<AgentConfig, 'id'>): Omit<AgentConfig, 'id'> {
     }
     if (!isPlainObject(parsed)) throw new Error('Advanced options must be a JSON object.');
   }
-  const provider = providerById(cfg.provider) ?? defaultProvider();
+  const provider = harnessById(cfg.provider) ?? defaultHarness();
   return {
     name: cfg.name.trim() || 'agent',
     provider: provider.id,

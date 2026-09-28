@@ -13,13 +13,14 @@ import './styles/editors.css';
 import './styles/chat.css';
 import './styles/overlays.css';
 import './harness/bridge';
-import { armDelete, el, showToast, statusEl } from './renderer/dom';
+import { armDelete, el, showToast } from './renderer/dom';
 import { button, errText, latestToken, SEND_ICON, STOP_ICON } from './renderer/util';
 import { createSessionStore, type Session } from './renderer/session-store';
 import { applyEvent, initChatView } from './renderer/chat-view';
 import { initAgentEditor } from './renderer/settings/agent-editor';
 import { initEnvEditor } from './renderer/settings/env-editor';
 import { initSupportView } from './renderer/settings/support';
+import { initProvidersView } from './renderer/settings/providers';
 import { initPalette } from './renderer/palette';
 import { initRoster } from './renderer/roster';
 import {
@@ -46,19 +47,25 @@ import type {
   AgentInfo,
   ConversationEntry,
   EnvironmentInfo,
+  HarnessProviderInfo,
   HarnessStatus,
   ProviderCapabilities,
   ProviderInfo,
   PuckBridge,
 } from './harness/bridge';
 
-/** Provider metadata cache — labels, hints, capabilities come from main. */
-let providersById = new Map<string, ProviderInfo>();
+/** Harness provider metadata cache — labels, hints, capabilities come from main. */
+let providersById = new Map<string, HarnessProviderInfo>();
 
-async function loadProviders(): Promise<ProviderInfo[]> {
-  const infos = (await bridge?.providers().catch(() => [])) ?? [];
-  if (infos.length) providersById = new Map(infos.map((p) => [p.id, p]));
-  return infos;
+function cacheHarnesses(infos: ProviderInfo[]): HarnessProviderInfo[] {
+  const harnesses = infos.filter((p): p is HarnessProviderInfo => p.kind === 'harness');
+  if (harnesses.length) providersById = new Map(harnesses.map((p) => [p.id, p]));
+  return harnesses;
+}
+
+/** The harness providers (agents only ever name a harness). */
+async function loadProviders(): Promise<HarnessProviderInfo[]> {
+  return cacheHarnesses((await bridge?.providers().catch(() => [])) ?? []);
 }
 
 function providerLabel(id: string): string {
@@ -105,10 +112,8 @@ const heroCta = byId<HTMLButtonElement>('hero-cta');
 /** Display label for the human author; persisted entries store 'user'. */
 const USER_NAME = 'You';
 const settingsView = byId('settings-view');
-const providerCards = byId('provider-cards');
 const envCards = byId('env-cards');
 const envMsg = byId('env-msg');
-const providerMsg = byId('provider-msg');
 const envDetailView = byId('env-detail-view');
 const detailTitle = byId('detail-title');
 const secAgents = byId('sec-agents');
@@ -271,7 +276,7 @@ function showSettingsSection(section: SettingsSection): void {
     void renderAgents();
     secAgentsTitle.focus();
   } else if (section === 'providers') {
-    void renderProviders();
+    void providersView.render();
     secProvidersTitle.focus();
   } else if (section === 'support') {
     void supportView.render();
@@ -309,7 +314,7 @@ function showView(view: View): void {
   } else if (view === 'agent-detail') {
     agentTitle.focus();
   } else {
-    stopAuthPoll(); // leaving settings abandons any pending connect poll
+    providersView.stopPolling(); // leaving settings abandons any pending connect poll
     void refreshStatus();
     prompt.focus();
   }
@@ -342,31 +347,28 @@ heroCta.addEventListener('click', () => nav({ view: 'settings', section: 'envs' 
 
 /* ---------- Providers view ---------- */
 
-// A login completes in the system browser; main reports `auth.pending` until
-// its loopback callback lands, fails, or times out - the view polls that.
-let authPoll: ReturnType<typeof setInterval> | null = null;
+// Grouped by kind (src/renderer/settings/providers.ts); this file hands it the DOM.
+const providersView = initProvidersView({
+  bridge,
+  els: {
+    harnessCards: byId('pv-harness-cards'),
+    envCards: byId('pv-env-cards'),
+    integrationCards: byId('pv-integration-cards'),
+    msg: byId('provider-msg'),
+  },
+  onProviders: cacheHarnesses,
+  copy: (text) => navigator.clipboard.writeText(text),
+});
 
-function stopAuthPoll(): void {
-  if (authPoll) clearInterval(authPoll);
-  authPoll = null;
-}
-
-function pollAuthUntilSettled(providerId: string): void {
-  stopAuthPoll();
-  authPoll = setInterval(async () => {
-    const latest = await loadProviders();
-    if (!latest.find((p) => p.id === providerId)?.auth.pending) {
-      stopAuthPoll();
-      await renderProviders();
-    }
-  }, 2000);
-}
+// Back from github.com (installing the app, approving a sign-in): re-check.
+window.addEventListener('focus', () => {
+  if (navState.view === 'settings' && navState.lastSection === 'providers') void providersView.refresh();
+});
 
 /* ---------- Agents (settings section + detail page) ---------- */
 
 // Monotonic request tokens: rapid tab switches must not land stale content.
 const agentsGrid = latestToken();
-const providersGrid = latestToken();
 const envsGrid = latestToken();
 
 async function renderAgents(): Promise<void> {
@@ -500,56 +502,6 @@ const agentEditor = initAgentEditor({
     advancedCard: byId('aed-advanced'),
   },
 });
-
-async function renderProviders(): Promise<void> {
-  if (!bridge) return;
-  const token = providersGrid.next();
-  loadingInto(providerCards);
-  const infos = await loadProviders();
-  if (!providersGrid.isCurrent(token)) return;
-  providerCards.removeAttribute('aria-busy');
-  providerCards.textContent = '';
-  for (const info of infos) {
-    const card = cardShell({
-      title: info.label,
-      headRight: statusEl(info.auth.connected, info.auth.connected ? 'connected' : 'offline'),
-    });
-    const waiting = info.auth.pending && !info.auth.connected;
-    card.appendChild(
-      el(
-        'div',
-        'card-sub',
-        waiting ? 'waiting for the sign-in in your browser… come back here when done' : info.auth.detail,
-      ),
-    );
-    if (waiting && !authPoll) pollAuthUntilSettled(info.id); // e.g. settings reopened mid-login
-
-    const foot = el('div', 'card-foot');
-    const btn = button('btn-ghost', info.auth.connected ? 'Disconnect' : waiting ? 'Cancel' : 'Connect');
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      providerMsg.textContent = '';
-      try {
-        if (info.auth.connected) {
-          stopAuthPoll();
-          await bridge.providerAuthLogout(info.id);
-        } else if (waiting) {
-          stopAuthPoll();
-          await bridge.providerAuthCancel(info.id);
-        } else {
-          await bridge.providerAuthStart(info.id);
-          pollAuthUntilSettled(info.id);
-        }
-      } catch (err) {
-        providerMsg.textContent = errText(err);
-      }
-      await renderProviders();
-    });
-    foot.appendChild(btn);
-    card.appendChild(foot);
-    providerCards.appendChild(card);
-  }
-}
 
 /* ---------- Environment list + detail editor ---------- */
 

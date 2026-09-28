@@ -10,11 +10,10 @@ import {
   verifyScript,
   type ExpectedPackage,
 } from '../../src/main/provisioning';
-import { providers } from '../../src/main/providers';
-import type { Provider } from '../../src/main/providers/types';
+import { harnessDescriptors as providers, type HarnessDescriptor } from '../../src/harness/providers';
 
-function providerStub(container: Partial<Provider['container']>): Provider {
-  return { container } as Provider;
+function providerStub(packages: HarnessDescriptor['packages']): HarnessDescriptor {
+  return { packages } as HarnessDescriptor;
 }
 
 describe('bootstrapPlan (pinned installs)', () => {
@@ -25,20 +24,20 @@ describe('bootstrapPlan (pinned installs)', () => {
     // CLIs: resolved against the global npm root, installed with -g.
     expect(clis.check).toContain('root="$(npm root -g)"');
     expect(clis.check).not.toContain('npm install');
-    for (const pkg of providers.flatMap((p) => p.container.cliPackages)) {
+    for (const pkg of providers.flatMap((p) => p.packages.cli)) {
       expect(clis.check).toContain(`[ "$(v "$root/${pkg.name}")" = "${pkg.version}" ]`);
     }
     expect(clis.install).toBe(
-      'npm install -g ' + providers.flatMap((p) => p.container.cliPackages).map(pinnedSpec).join(' '),
+      'npm install -g ' + providers.flatMap((p) => p.packages.cli).map(pinnedSpec).join(' '),
     );
     // SDKs: under /opt/puck for the runner's require().
     expect(sdks.check).not.toContain('npm install');
-    for (const pkg of providers.flatMap((p) => p.container.sdkPackages)) {
+    for (const pkg of providers.flatMap((p) => p.packages.sdk)) {
       expect(sdks.check).toContain(`[ "$(v "${SDK_PREFIX}/node_modules/${pkg.name}")" = "${pkg.version}" ]`);
     }
     expect(sdks.install).toBe(
       `npm install --prefix ${SDK_PREFIX} ` +
-        providers.flatMap((p) => p.container.sdkPackages).map(pinnedSpec).join(' '),
+        providers.flatMap((p) => p.packages.sdk).map(pinnedSpec).join(' '),
     );
     // Every installed spec carries an exact version.
     for (const spec of [clis.install, sdks.install].flatMap((s) => s.split(' ').filter((w) => w.startsWith('@')))) {
@@ -50,10 +49,8 @@ describe('bootstrapPlan (pinned installs)', () => {
     const plan = bootstrapPlan([
       providerStub({
         cliBin: '',
-        cliPackages: [],
-        sdkPackages: [{ name: '@x/sdk', version: '1.2.3' }],
-        forwardedEnvKeys: [],
-        containerEnv: {},
+        cli: [],
+        sdk: [{ name: '@x/sdk', version: '1.2.3' }],
       }),
     ]);
     // No CLI step at all — never a dangling `npm install -g `.
@@ -77,10 +74,10 @@ describe('version verification', () => {
   it('expectedPackages lists every registry pin with its kind', () => {
     const all = expectedPackages(providers);
     expect(all.filter((p) => p.kind === 'cli').map((p) => p.name)).toEqual(
-      providers.flatMap((p) => p.container.cliPackages.map((c) => c.name)),
+      providers.flatMap((p) => p.packages.cli.map((c) => c.name)),
     );
     expect(all.filter((p) => p.kind === 'sdk').map((p) => p.name)).toEqual(
-      providers.flatMap((p) => p.container.sdkPackages.map((c) => c.name)),
+      providers.flatMap((p) => p.packages.sdk.map((c) => c.name)),
     );
   });
 

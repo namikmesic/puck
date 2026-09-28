@@ -10,7 +10,7 @@
  * open id is B, and Save would write A's fields onto B.
  */
 
-import type { AgentConfig, AgentInfo, ProviderInfo, PuckBridge } from '../../harness/bridge';
+import type { AgentConfig, AgentInfo, HarnessProviderInfo, PuckBridge } from '../../harness/bridge';
 import { el, flashSaved } from '../dom';
 import { renderOptionsForm, type OptionsForm } from '../options';
 import { buildSeg, button, errText, latestToken, stableJson } from '../util';
@@ -46,7 +46,7 @@ export interface AgentEditorElements {
 export interface AgentEditorContext {
   bridge: PuckBridge | undefined;
   els: AgentEditorElements;
-  loadProviders(): Promise<ProviderInfo[]>;
+  loadProviders(): Promise<HarnessProviderInfo[]>;
   /** Reveal the editor view (the nav module owns view switching). */
   showView(): void;
   navToAgents(): void;
@@ -102,7 +102,7 @@ export function initAgentEditor(ctx: AgentEditorContext) {
 
   /** Populates provider-dependent controls (models, thinking levels, options form). */
   function syncProviderFields(
-    infos: ProviderInfo[],
+    infos: HarnessProviderInfo[],
     providerId: string,
     model: string,
     selectedThinking: string,

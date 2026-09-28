@@ -18,7 +18,7 @@ import * as agents from './agents';
 import { docker } from './docker-client';
 import * as environments from './environments';
 import { log, redact } from './log';
-import { providers } from './providers';
+import { byKind } from './providers';
 import { zipBuffer, type ZipEntry } from './zip';
 
 /** What the Settings → Support page shows: version and the two data paths. */
@@ -94,7 +94,7 @@ export async function supportSummary(now: Date = new Date()): Promise<SupportSum
       osRelease: os.release(),
       dataDir: app.getPath('userData'),
     },
-    providers: providers.map((p) => {
+    providers: byKind('harness').map((p) => {
       const auth = p.auth.status();
       return { id: p.id, label: p.label, connected: auth.connected, pending: auth.pending };
     }),

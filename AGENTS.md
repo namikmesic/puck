@@ -45,7 +45,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   The binary is resolved in this order: configured path (`PUCK_DOCKER_BIN`), well-known install locations, inherited PATH, login-shell probe.
   The not-found error lists what was searched.
   Everything goes through `docker-client.ts` (argv, timeouts, abort signal, line streaming), and `TIMEOUTS` in `environments.ts` is the one table.
-- **Provider packages are pinned** (`PinnedPackage` in `src/main/providers/types.ts`).
+- **Provider packages are pinned** (`PinnedPackage` in `src/harness/providers/index.ts`).
   `provisioning.ts` checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every start.
   With auto-install on, any drift fails the start, and with it off only a missing SDK fails.
   Bump a pin deliberately, together with any runner.js adaptation.
@@ -72,7 +72,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   The Settings copy in `index.html` states this behavior.
 - **Persisted stores** live in Electron `userData`.
   Migrate, don't break: new fields get `??` defaults at load, and legacy keys are dual-read, never rewritten in place.
-  Layout: `puck-agents.json`, `puck-environments.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
+  Layout: `puck-agents.json`, `puck-environments.json`, `puck-providers.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
   Resume ids are keyed `agentId@envId`, scoped to the environment because a rebuilt container loses its transcripts.
   A legacy single-blob `puck-convos.json` is still read.
   Conversation files carry a format version `v`.
@@ -87,7 +87,8 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   Never call `page.setViewportSize` on the live app.
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.
-- **Provider logins** run in the system browser (RFC 8252).
+- **Provider logins** for harnesses run in the system browser (RFC 8252).
+  GitHub uses the OAuth device flow with a client id only (`src/main/providers/github-app.ts`, overridden by `PUCK_GITHUB_CLIENT_ID`) - never add a client secret.
   The authorize URL goes through `shell.openExternal`.
   The redirect lands on the shared loopback listener `src/main/providers/loopback.ts` (127.0.0.1 only, one request, state check, timeout).
   Claude binds an ephemeral port (`http://localhost:<port>/callback`, the shape Claude Code registers).
@@ -103,7 +104,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
 
 ## Adding a provider - checklist
 
-1. Descriptor module `src/main/providers/<id>.ts`: models, thinking levels, `configOptions` schema, `compileSettings`, capabilities, auth, and container integration (CLI/SDK packages, credential paths, forwarded env).
+1. Pure descriptor `src/harness/providers/<id>.ts` (models, thinking levels, `configOptions` schema, `compileSettings`, capabilities, pinned CLI/SDK packages, container env, credential path) and host half `src/main/providers/<id>.ts` (auth and the credential mirror).
 2. OAuth module (transport and token mapping).
    Shared PKCE and token-store helpers live in `oauth.ts`.
 3. Registry entry in `src/main/providers/index.ts`.
@@ -132,8 +133,9 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   Keep this directory free of node/electron imports.
   `bridge.ts` holds the types and `PuckBridge`, `channels.ts` the IPC channel table, `types.ts` the `HarnessEvent` wire protocol.
   `options.ts` holds the provider option schema and `ipc.ts` the `IpcHarness`.
-- `src/main/providers/` - the Provider interface and registry.
-  See its README header comment for what a new provider needs.
+  `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
+- `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
+  The header comments say what a new provider needs.
 - `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.
 - `src/main/environments.ts` - Puck lifecycle state, Docker lifecycle, bootstrap, credential and secret injection, credential purge on logout (all registry-driven, no provider names).
 - `src/main/runner.ts` - docker-exec stdio bridge (handshake, watchdog, stderr diagnostics, `WIRE` contract).
@@ -156,6 +158,7 @@ CI runs these plus `node --check src/main/runner/runner.js` and `npm run package
   - `settings/cards.ts` and `settings/env-rail.ts` - card-grid kit and the ONE environment op ladder (list cards and detail header share it).
   - `env-progress.ts` - lifecycle presentation: status chip, "stage · elapsed" line, and composer gate text.
     Its tracker merges pushed lifecycle events and runs the elapsed-time ticker.
+  - `settings/providers.ts` - the Providers section grouped by kind, with `github.ts` and `ssh-hosts.ts` for its cards.
   - `settings/support.ts` - the Support section: version, data paths, and the support-bundle export button.
   - `nav.ts` - pure nav state machine (`navTransition`, `escapeTarget`).
   - `options.ts`, `util.ts`, `dom.ts`, `format.ts`, `markdown.ts`.

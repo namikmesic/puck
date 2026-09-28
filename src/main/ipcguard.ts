@@ -99,3 +99,42 @@ export function envConfigFrom(raw: unknown): EnvironmentConfig {
     envVars,
   };
 }
+
+/* ---------- Providers ---------- */
+
+/** `ssh://[user@]host[:port]`; user and host never start with a dash (argv safety). */
+const SSH_URL_RE = /^ssh:\/\/(?:[A-Za-z0-9._][A-Za-z0-9._-]*@)?[A-Za-z0-9.][A-Za-z0-9.-]*(?::(\d{1,5}))?$/;
+/** An ssh-config alias (Host entry). */
+const SSH_ALIAS_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
+
+/** A Docker-over-SSH host to add: label ≤ 64 chars; host an ssh:// URL or an ssh-config alias. */
+export function sshHostFrom(raw: unknown): { label: string; host: string } {
+  const a = objArgs(raw);
+  const label = str(a.label).trim();
+  const host = str(a.host).trim();
+  if (label.length > 64) throw new Error('Host label is too long (64 characters at most).');
+  if (!host || host.startsWith('-')) throw new Error('Invalid SSH host.');
+  const url = SSH_URL_RE.exec(host);
+  if (url) {
+    const port = url[1] === undefined ? null : Number(url[1]);
+    if (port !== null && (port < 1 || port > 65535)) throw new Error('Invalid SSH port.');
+  } else if (!SSH_ALIAS_RE.test(host)) {
+    throw new Error('Invalid SSH host: use ssh://user@host[:port] or a Host alias from ~/.ssh/config.');
+  }
+  return { label, host };
+}
+
+/** GitHub `owner/name`. */
+const REPO_NAME_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+
+export function repoNameFrom(value: unknown): string {
+  if (typeof value !== 'string' || !REPO_NAME_RE.test(value)) throw new Error('Invalid repository name.');
+  return value;
+}
+
+/** A pasted personal access token: a non-empty string of at most 255 characters. */
+export function patFrom(value: unknown): string {
+  const token = requireString(value, 'token').trim();
+  if (!token || token.length > 255 || /\s/.test(token)) throw new Error('Invalid personal access token.');
+  return token;
+}

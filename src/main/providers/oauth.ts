@@ -80,6 +80,12 @@ export interface OAuthAccountConfig<T> {
   refresh(tokens: T): Promise<T | null>;
   /** Tokens from a container-side credential file's parsed JSON (null = invalid). */
   parseContainerFile(parsed: unknown): T | null;
+  /**
+   * True when a refresh failure means the stored tokens are dead for good
+   * (e.g. GitHub's bad_refresh_token): the account signs out locally instead
+   * of keeping the old tokens for an offline retry.
+   */
+  refreshRejected?(err: unknown): boolean;
 }
 
 export interface OAuthAccount<T> {
@@ -103,9 +109,13 @@ export interface OAuthAccount<T> {
   /** Sign out: trip every fence, clear the stored tokens, run the logout hook. */
   logout(): Promise<void>;
   /**
-   * Valid tokens, refreshed when stale. A failed refresh keeps the old
-   * tokens (offline starts must not break) and records the error. A logout
-   * during the refresh wins: the result is dropped and null is returned.
+   * Valid tokens, refreshed when stale. Refreshes are single-flight: a
+   * provider that rotates the refresh token on use (GitHub, Claude) would
+   * otherwise spend the same token twice. The new tokens are saved before
+   * they are returned. A failed refresh keeps the old tokens (offline starts
+   * must not break) and records the error, unless `refreshRejected` says
+   * they are dead, which signs out. A logout during the refresh wins: the
+   * result is dropped and null is returned.
    */
   getFreshTokens(): Promise<T | null>;
   /**
@@ -128,6 +138,27 @@ export function createOAuthAccount<T>(cfg: OAuthAccountConfig<T>): OAuthAccount<
   let lastError: string | null = null;
   /** Advances on every logout; a fence remembers the value it was taken at. */
   let epoch = 0;
+  /** The refresh in flight, shared by every concurrent getFreshTokens(). */
+  let refreshing: Promise<T | null> | null = null;
+
+  async function refreshOnce(tokens: T): Promise<T | null> {
+    const fence = account.fence();
+    try {
+      const refreshed = await cfg.refresh(tokens);
+      if (refreshed && account.save(refreshed, fence)) return refreshed;
+    } catch (err) {
+      if (fence.current() && cfg.refreshRejected?.(err)) {
+        // Dead tokens: a local sign-out. Fences trip exactly as on logout,
+        // but the logout hook does not run - the user did not ask for it.
+        epoch += 1;
+        store.clear();
+        account.recordError(err);
+        return null;
+      }
+      if (fence.current()) account.recordError(err);
+    }
+    return fence.current() ? tokens : null;
+  }
 
   const account: OAuthAccount<T> = {
     load: store.load,
@@ -165,14 +196,12 @@ export function createOAuthAccount<T>(cfg: OAuthAccountConfig<T>): OAuthAccount<
       const tokens = store.load();
       if (!tokens) return null;
       if (!cfg.needsRefresh(tokens)) return tokens;
-      const fence = account.fence();
-      try {
-        const refreshed = await cfg.refresh(tokens);
-        if (refreshed && account.save(refreshed, fence)) return refreshed;
-      } catch (err) {
-        if (fence.current()) account.recordError(err);
+      if (!refreshing) {
+        refreshing = refreshOnce(tokens).finally(() => {
+          refreshing = null;
+        });
       }
-      return fence.current() ? tokens : null;
+      return refreshing;
     },
     adoptIfNewer(containerJson: string): void {
       const candidate = cfg.parseContainerFile(parseJson(containerJson));
@@ -246,10 +275,9 @@ export function providerAuth<T>(
  *  the shared account's (refreshed) tokens. */
 export function providerCredential<T>(
   account: OAuthAccount<T>,
-  cfg: { hostPath: string; containerPath: string; serialize(tokens: T): string },
+  cfg: { containerPath: string; serialize(tokens: T): string },
 ): ProviderCredential {
   return {
-    hostPath: cfg.hostPath,
     containerPath: cfg.containerPath,
     signedIn: () => account.load() !== null,
     fresh: async () => {

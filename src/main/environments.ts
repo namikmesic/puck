@@ -48,7 +48,7 @@ import {
   verifyPins,
   verifyScript,
 } from './provisioning';
-import { providers, type Provider } from './providers';
+import { byKind, type HarnessProvider } from './providers';
 import { deleteSecret, loadSecret, saveSecret } from './secrets';
 import { defineStore } from './store';
 
@@ -61,8 +61,8 @@ interface Store {
   activeEnvId: string | null;
 }
 
-/** Host auth material forwarded into containers at creation time. */
-const FORWARDED_ENV = providers.flatMap((p) => p.container.forwardedEnvKeys);
+/** The harness providers every environment provisions (the registry's harness kind). */
+const harnesses = (): HarnessProvider[] => byKind('harness');
 
 /* ---------- Timeouts (one table; every long op names its bound in errors) ---------- */
 
@@ -622,8 +622,8 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
       '-w', '/workspace',
     ];
     // Provider-declared container env (e.g. Claude Code's IS_SANDBOX=1).
-    for (const p of providers) {
-      for (const [key, value] of Object.entries(p.container.containerEnv)) {
+    for (const p of harnesses()) {
+      for (const [key, value] of Object.entries(p.containerEnv)) {
         args.push('-e', `${key}=${value}`);
       }
     }
@@ -631,10 +631,8 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
     // the container runs with full tool access, and a writable mount would let
     // an agent plant host-side hooks/settings that execute outside the sandbox
     // (and colima doesn't share $HOME anyway). Credentials arrive via docker
-    // cp below; transcripts/session state stay container-local.
-    for (const key of FORWARDED_ENV) {
-      if (process.env[key]) args.push('-e', `${key}=${process.env[key]}`);
-    }
+    // cp below; transcripts/session state stay container-local. Host env
+    // vars never reach containers: API keys are environment secrets.
     // User-configured env vars. Secrets deliberately do NOT go through -e:
     // docker inspect would expose them forever — they travel as a root-only
     // file the runner applies to its own environment (injectSecretsFile).
@@ -660,7 +658,7 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
   checkCancelled();
 
   if (env.autoInstall) {
-    for (const step of bootstrapPlan(providers)) {
+    for (const step of bootstrapPlan(harnesses())) {
       const installStage: EnvStage = step.kind === 'clis' ? 'installing-clis' : 'installing-sdks';
       stage(installStage, 'checking installed versions');
       const check = await docker(['exec', name, 'sh', '-lc', step.check], opts(TIMEOUTS.verify));
@@ -679,7 +677,7 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
   // Pinned versions are verified on every start — including user-managed
   // images — so the runner never meets an SDK it was not written against.
   stage('verifying-packages');
-  const expected = expectedPackages(providers);
+  const expected = expectedPackages(harnesses());
   const versions = await dockerOrThrow(
     ['exec', name, 'sh', '-lc', verifyScript(expected)],
     'Package verification failed',
@@ -697,20 +695,13 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
 
   // Credential material: static labels only — never paths, never contents.
   stage('injecting-credentials');
-  // Copy file-based CLI credentials from the host. Bind mounts are not
-  // reliable for this across Docker runtimes (a colima VM without $HOME
-  // sharing silently yields empty dirs), so docker cp on every start.
-  // Signed out of Puck and no host file: a mirror left from before the
-  // sign-out is stale (the logout fence only reaches running containers, see
-  // purgeCredentials) - remove it before anything in the container can use it.
-  for (const p of providers) {
-    const cred = p.container.credential;
-    if (fs.existsSync(cred.hostPath)) {
-      detail(`${p.label} CLI credentials`);
-      const dest = path.posix.dirname(cred.containerPath) + '/';
-      await dockerOrThrow(['exec', name, 'mkdir', '-p', dest], `${p.label} credential setup failed`, opts(TIMEOUTS.run));
-      await dockerOrThrow(['cp', cred.hostPath, `${name}:${dest}`], `${p.label} credential copy failed`, opts(TIMEOUTS.run));
-    } else if (!cred.signedIn()) {
+  // Signed out of Puck: a mirror left from before the sign-out is stale (the
+  // logout fence only reaches running containers, see purgeCredentials) -
+  // remove it before anything in the container can use it. The user's own
+  // host CLI login files are never copied in.
+  for (const p of harnesses()) {
+    const cred = p.credential;
+    if (!cred.signedIn()) {
       detail(`${p.label} stale credentials removed`);
       await dockerOrThrow(
         ['exec', name, 'rm', '-f', cred.containerPath],
@@ -721,8 +712,8 @@ async function doStart(id: string, signal: AbortSignal): Promise<void> {
   }
   detail('environment secrets');
   await injectSecretsFile(id, signal);
-  // Puck-managed OAuth tokens win over host files when fresher.
-  for (const p of providers) {
+  // Puck-managed OAuth tokens, unless the container holds fresher ones.
+  for (const p of harnesses()) {
     detail(`${p.label} sign-in`);
     await injectCredentials(id, p, signal);
   }
@@ -772,8 +763,8 @@ async function injectSecretsFile(id: string, signal?: AbortSignal): Promise<void
  * that happens while this runs wins: the snapshot's fence is checked before
  * the copy, and again after it so a copy that raced the purge is undone.
  */
-async function injectCredentials(id: string, p: Provider, signal?: AbortSignal): Promise<void> {
-  const cred = p.container.credential;
+async function injectCredentials(id: string, p: HarnessProvider, signal?: AbortSignal): Promise<void> {
+  const cred = p.credential;
   const snapshot = await cred.fresh();
   if (!snapshot) return;
   const existing = await docker(['exec', containerName(id), 'cat', cred.containerPath], { signal });
@@ -808,11 +799,11 @@ async function injectCredentials(id: string, p: Provider, signal?: AbortSignal):
  * (injectCredentials re-checks its fence after copying). Reports the
  * environments it could not clean; the sign-out itself has already held.
  */
-export async function purgeCredentials(p: Provider): Promise<void> {
+export async function purgeCredentials(p: HarnessProvider): Promise<void> {
   const failures: string[] = [];
   for (const env of load().environments) {
     if ((await containerState(env.id)) !== 'running') continue;
-    const r = await docker(['exec', containerName(env.id), 'rm', '-f', p.container.credential.containerPath]);
+    const r = await docker(['exec', containerName(env.id), 'rm', '-f', p.credential.containerPath]);
     if (r.code !== 0 && !/is not running|no such container/i.test(r.stderr)) {
       failures.push(`${env.name}: ${r.stderr.trim().slice(-200) || 'docker exec failed'}`);
     }
@@ -833,7 +824,7 @@ export async function purgeCredentials(p: Provider): Promise<void> {
 export async function injectCredentialsIntoRunning(): Promise<void> {
   for (const env of load().environments) {
     if ((await containerState(env.id)) === 'running') {
-      for (const p of providers) await injectCredentials(env.id, p);
+      for (const p of harnesses()) await injectCredentials(env.id, p);
     }
   }
 }
@@ -842,9 +833,9 @@ async function doStop(id: string): Promise<void> {
   // Providers may have rotated tokens inside the container — adopt them
   // before the container goes away so Puck's copies stay valid.
   apply(id, { type: 'detail', detail: 'adopting rotated credentials' });
-  for (const p of providers) {
-    const creds = await docker(['exec', containerName(id), 'cat', p.container.credential.containerPath]);
-    if (creds.code === 0) p.container.credential.adoptIfNewer(creds.stdout);
+  for (const p of harnesses()) {
+    const creds = await docker(['exec', containerName(id), 'cat', p.credential.containerPath]);
+    if (creds.code === 0) p.credential.adoptIfNewer(creds.stdout);
   }
   apply(id, { type: 'detail', detail: `docker stop ${containerName(id)}` });
   const r = await docker(['stop', containerName(id)], { timeoutMs: TIMEOUTS.stop });

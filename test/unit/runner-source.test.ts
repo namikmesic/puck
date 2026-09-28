@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { providers } from '../../src/main/providers';
+import { byKind } from '../../src/main/providers';
 import { WIRE } from '../../src/main/runner';
 import { RUNNER_SOURCE as source } from '../../src/main/runner-source';
 
@@ -11,11 +11,11 @@ describe('container runner source', () => {
   it('has a PROVIDERS entry and SDK import for every registered provider', () => {
     // Derived from the live registry: adding a provider host-side without
     // updating runner.js must fail here, not silently misroute at runtime.
-    for (const p of providers) {
+    for (const p of byKind('harness')) {
       expect(source, `runner.js PROVIDERS lacks '${p.id}'`).toMatch(
         new RegExp(`['"]?${p.id}['"]?:\\s*\\{`),
       );
-      for (const pkg of p.container.sdkPackages) {
+      for (const pkg of p.packages.sdk) {
         expect(source, `runner.js does not import ${pkg.name}`).toContain(pkg.name);
       }
     }

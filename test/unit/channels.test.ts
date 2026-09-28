@@ -22,4 +22,19 @@ describe('IPC channel table', () => {
       expect(known.has(channel), `handler for unknown channel ${channel}`).toBe(true);
     }
   });
+
+  it('the provider channels validate their payloads before touching a store or docker', async () => {
+    const invoke = (channel: string, args: unknown): unknown =>
+      (ipcMain.handlers.get(channel) as (event: unknown, args: unknown) => Promise<unknown>)({}, args);
+    await expect(invoke(CHANNELS.sshHostAdd, { label: 'x', host: '-oProxyCommand=touch /tmp/p' })).rejects.toThrow(
+      /Invalid SSH host/,
+    );
+    await expect(invoke(CHANNELS.sshHostRemove, '../etc')).rejects.toThrow(/Invalid SSH host id/);
+    await expect(invoke(CHANNELS.targetHealth, { providerId: 'github', targetId: 'local' })).rejects.toThrow(
+      /has no targets/,
+    );
+    await expect(invoke(CHANNELS.githubSetConfigRepo, 'not a repo')).rejects.toThrow(/Invalid repository name/);
+    await expect(invoke(CHANNELS.githubSetPat, 'a b')).rejects.toThrow(/Invalid personal access token/);
+    await expect(invoke(CHANNELS.providerAuthStart, 'docker-local')).rejects.toThrow(/has no sign-in/);
+  });
 });

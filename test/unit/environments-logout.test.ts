@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { useDockerRunner, type DockerResult } from '../../src/main/docker-client';
 import * as environments from '../../src/main/environments';
-import { providers, requireProvider } from '../../src/main/providers';
+import { byKind, requireHarness } from '../../src/main/providers';
 import { account as claudeAccount } from '../../src/main/providers/claude-oauth';
 import { expectedPackages } from '../../src/main/provisioning';
 
@@ -22,8 +22,8 @@ vi.mock('../../src/main/runner', () => ({
 
 const calls: string[][] = [];
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-ws-'));
-const claude = requireProvider('claude-code');
-const CRED = claude.container.credential.containerPath;
+const claude = requireHarness('claude-code');
+const CRED = claude.credential.containerPath;
 
 /** Container names the scripted docker reports as running. */
 let running = new Set<string>();
@@ -34,9 +34,6 @@ let onCredentialCopy: (() => void) | null = null;
 const isRm = (a: string[]): boolean => a[0] === 'exec' && a[2] === 'rm' && a[4] === CRED;
 
 beforeAll(() => {
-  for (const key of providers.flatMap((p) => p.container.forwardedEnvKeys)) {
-    delete process.env[key];
-  }
   useDockerRunner(async (args): Promise<DockerResult> => {
     calls.push(args);
     if (args[0] === 'inspect') {
@@ -47,7 +44,7 @@ beforeAll(() => {
     if (args[0] === 'exec' && args[2] === 'cat') return { code: 1, stdout: '', stderr: 'No such file' };
     if (args[0] === 'exec' && args[2] === 'sh' && args[4].includes('echo "')) {
       // The pinned-version verify script: every SDK present (auto-install is off in these envs).
-      const versions = expectedPackages(providers).map((p) => `${p.name} ${p.version}`).join('\n');
+      const versions = expectedPackages(byKind('harness')).map((p) => `${p.name} ${p.version}`).join('\n');
       return { code: 0, stdout: versions, stderr: '' };
     }
     if (isRm(args) && rmFails) return { code: 1, stdout: '', stderr: 'permission denied' };
@@ -98,23 +95,20 @@ describe('logout fence: container credentials', () => {
     }
   });
 
-  it('start removes a stale mirror when Puck is signed out and there is no host copy', async () => {
+  it('start removes a stale mirror when Puck is signed out, and never copies host CLI logins', async () => {
     const id = await createEnv('cold');
     running = new Set(); // "missing": the start creates the container
     calls.length = 0;
     await environments.start(id);
-    for (const p of providers) {
-      const cred = p.container.credential;
+    for (const p of byKind('harness')) {
+      const cred = p.credential;
       expect(cred.signedIn(), `${p.id} has no Puck tokens in this test`).toBe(false);
-      // The host CLI file is the user's own login and is copied as before;
-      // only without one is a leftover mirror removed. Machine-dependent, so
-      // assert the branch that applies here.
-      const hostCopy = fs.existsSync(cred.hostPath);
       const rm = calls.some((a) => a[0] === 'exec' && a[2] === 'rm' && a[4] === cred.containerPath);
-      const cp = calls.some((a) => a[0] === 'cp' && a[1] === cred.hostPath);
-      expect(rm, `${p.id}: stale mirror removed`).toBe(!hostCopy);
-      expect(cp, `${p.id}: host copy taken`).toBe(hostCopy);
+      expect(rm, `${p.id}: stale mirror removed`).toBe(true);
     }
+    // The user's own CLI login files on this Mac never reach a container.
+    const hostLogins = [path.join(os.homedir(), '.claude'), path.join(os.homedir(), '.codex')];
+    expect(calls.some((a) => a[0] === 'cp' && hostLogins.some((dir) => a[1].startsWith(dir)))).toBe(false);
   });
 
   it('a credential copy that a sign-out raced is undone right after it lands', async () => {
