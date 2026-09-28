@@ -7,11 +7,32 @@ import { EventLog } from '../../src/daemon/eventlog';
 import { nullLogger } from '../../src/daemon/log';
 import { defined } from './daemon-fakes';
 
+const fsGate = vi.hoisted(() => ({ short: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    appendFileSync(
+      file: Parameters<typeof actual.appendFileSync>[0],
+      data: Parameters<typeof actual.appendFileSync>[1],
+      options?: Parameters<typeof actual.appendFileSync>[2],
+    ): void {
+      if (fsGate.short) {
+        actual.appendFileSync(file, String(data).slice(0, 12), options);
+        throw new Error('ENOSPC');
+      }
+      actual.appendFileSync(file, data, options);
+    },
+  };
+});
+
 let dir: string;
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-events-'));
 });
 afterEach(() => {
+  fsGate.short = false;
   vi.useRealTimers();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -99,12 +120,41 @@ describe('event log', () => {
       throw new Error('bad client');
     });
     log.subscribe((e) => seen.push(e.seq));
-    expect(() => log.append(status(1))).not.toThrow();
-    expect(log.append(status(2))).toBe(false);
+    expect(log.append(status(1))).toBe(true);
+    expect(log.append(status(2))).toBe(true);
     expect(log.head()).toBe(2);
     expect(seen).toEqual([1, 2]);
     expect(defined(log.since(0)).map((e) => e.seq)).toEqual([1, 2]);
     expect(logged).toEqual(['eventlog.write', 'eventlog.write']);
+  });
+
+  it('a short write is rolled back so later events stay readable after reopen', () => {
+    const log = new EventLog(dir, { segmentSize: 2 });
+    const appendShort = (ev: DaemonEvent): boolean => {
+      fsGate.short = true;
+      try {
+        return log.append(ev);
+      } finally {
+        fsGate.short = false;
+      }
+    };
+    expect(log.append(status(1))).toBe(true);
+    const before = fs.readFileSync(path.join(dir, '1.ndjson'), 'utf8');
+    expect(appendShort(status(2))).toBe(false);
+    expect(log.head()).toBe(1);
+    expect(fs.readFileSync(path.join(dir, '1.ndjson'), 'utf8')).toBe(before);
+    expect(log.append(status(2))).toBe(true);
+    expect(appendShort(status(3))).toBe(false);
+    expect(fs.existsSync(path.join(dir, '3.ndjson'))).toBe(false);
+    expect(log.head()).toBe(2);
+    expect(log.append(status(3))).toBe(true);
+    expect(log.append(status(4))).toBe(true);
+    const details = (events: { ev: DaemonEvent }[]): string[] =>
+      events.map((e) => (e.ev.kind === 'instance.status' ? e.ev.detail ?? '' : e.ev.kind));
+    expect(details(defined(log.since(0)))).toEqual(['step 1', 'step 2', 'step 3', 'step 4']);
+    const reopened = new EventLog(dir, { segmentSize: 2 });
+    expect(reopened.head()).toBe(4);
+    expect(details(defined(reopened.since(0)))).toEqual(['step 1', 'step 2', 'step 3', 'step 4']);
   });
 
   it('a failed write drops that event and the next append still lands', () => {

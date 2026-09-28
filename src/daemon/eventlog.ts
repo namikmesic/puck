@@ -133,7 +133,9 @@ export class EventLog {
   /**
    * Append an event. Text-deltas may be held briefly for coalescing; every
    * other event is written (after its session's held delta) immediately.
-   * Returns false when this event was not written, or a listener failed.
+   * Returns false only when this event was not written. A delta held for
+   * coalescing counts as accepted. A listener that throws after a successful
+   * write is logged and does not change the result.
    */
   append(ev: DaemonEvent): boolean {
     const sessionId = 'sessionId' in ev && typeof ev.sessionId === 'string' ? ev.sessionId : null;
@@ -144,15 +146,15 @@ export class EventLog {
         held.ev.event.text += ev.event.text;
         return true;
       }
-      const flushed = held ? this.flushSession(sessionId) : true;
+      if (held) this.flushSession(sessionId);
       const copy = { ...ev, event: { ...ev.event } } as PendingDelta['ev'];
       const timer = setTimeout(() => this.flushSession(sessionId), this.coalesceMs);
       timer.unref?.();
       this.pending.set(sessionId, { key, ev: copy, timer });
-      return flushed;
+      return true;
     }
-    const flushed = sessionId ? this.flushSession(sessionId) : true;
-    return this.write(ev) && flushed;
+    if (sessionId) this.flushSession(sessionId);
+    return this.write(ev);
   }
 
   private flushSession(sessionId: string): boolean {
@@ -182,25 +184,37 @@ export class EventLog {
         this.report(err);
       }
     }
+    let previousSize: number | null = null;
+    if (!added) {
+      try {
+        previousSize = fs.statSync(segment.file).size;
+      } catch (err) {
+        this.report(err);
+      }
+    }
     try {
       fs.appendFileSync(segment.file, JSON.stringify(entry) + '\n', { mode: 0o600 });
     } catch (err) {
       this.report(err);
+      try {
+        if (added) fs.rmSync(segment.file, { force: true });
+        else if (previousSize !== null) fs.truncateSync(segment.file, previousSize);
+      } catch (rollbackErr) {
+        this.report(rollbackErr);
+      }
       if (added && this.segments[this.segments.length - 1] === segment) this.segments.pop();
       return false;
     }
     segment.last = entry.seq;
     this.seq = entry.seq;
-    let ok = true;
     for (const fn of [...this.listeners]) {
       try {
         fn(entry);
       } catch (err) {
-        ok = false;
         this.report(err);
       }
     }
-    return ok;
+    return true;
   }
 
   private report(err: unknown): void {

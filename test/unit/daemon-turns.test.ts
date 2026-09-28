@@ -650,71 +650,95 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
   });
 
   it('keeps accepted input when publishing the turn start fails, then a later send delivers it once', async () => {
-    const cases: Array<(elog: EventLog) => () => void> = [
-      (elog) =>
-        elog.subscribe(() => {
-          throw new Error('listener');
-        }),
-      () => {
-        const eventsDir = path.join(dir, 'events');
-        for (const name of fs.readdirSync(eventsDir)) fs.chmodSync(path.join(eventsDir, name), 0o400);
-        fs.chmodSync(eventsDir, 0o500);
-        return () => {
-          fs.chmodSync(eventsDir, 0o700);
-          for (const name of fs.readdirSync(eventsDir)) fs.chmodSync(path.join(eventsDir, name), 0o600);
-        };
+    const elog = new EventLog(path.join(dir, 'events'));
+    const errors: string[] = [];
+    turns = build({
+      emit: (ev) => {
+        if (!elog.append(ev)) throw new Error('The event log could not record an event.');
+      },
+      log: { ...nullLogger, error: (message) => errors.push(message) },
+    });
+    const s = orchestrator();
+    const eventsDir = path.join(dir, 'events');
+    for (const name of fs.readdirSync(eventsDir)) fs.chmodSync(path.join(eventsDir, name), 0o400);
+    fs.chmodSync(eventsDir, 0o500);
+    const disarm = (): void => {
+      fs.chmodSync(eventsDir, 0o700);
+      for (const name of fs.readdirSync(eventsDir)) fs.chmodSync(path.join(eventsDir, name), 0o600);
+    };
+    calls = [];
+    attempts = [(_req, ctx) => ctx.emit(END)];
+    try {
+      turns.send(s.id, 'deploy');
+    } finally {
+      disarm();
+    }
+    await turns.idle();
+    expect(calls).toEqual([]);
+    expect(errors).toContain('turn.start-failed');
+    expect(turns.isRunning(s.id)).toBe(false);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'deploy', author: 'user' }]);
+    expect(turns.get(s.id)?.turns).toBe(0);
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
+      string,
+      { status: string; queue: unknown; handoff?: unknown }
+    >;
+    expect(saved[s.id].status).toBe('idle');
+    expect(saved[s.id].queue).toEqual([{ text: 'deploy', author: 'user' }]);
+    expect(saved[s.id].handoff).toBeUndefined();
+
+    calls = [];
+    errors.length = 0;
+    attempts = [
+      (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'ok' });
+        ctx.emit(END);
       },
     ];
-    for (const arm of cases) {
-      const elog = new EventLog(path.join(dir, 'events'));
-      const errors: string[] = [];
-      turns = build({
-        emit: (ev) => {
-          if (!elog.append(ev)) throw new Error('The event log could not record an event.');
-        },
-        log: { ...nullLogger, error: (message) => errors.push(message) },
-      });
-      const s = orchestrator();
-      const disarm = arm(elog);
-      calls = [];
-      attempts = [(_req, ctx) => ctx.emit(END)];
-      try {
-        turns.send(s.id, 'deploy');
-      } finally {
-        disarm();
-      }
-      await turns.idle();
-      expect(calls).toEqual([]);
-      expect(errors).toContain('turn.start-failed');
-      expect(turns.isRunning(s.id)).toBe(false);
-      expect(turns.get(s.id)?.status).toBe('idle');
-      expect(turns.get(s.id)?.handoff).toBeUndefined();
-      expect(turns.get(s.id)?.queue).toEqual([{ text: 'deploy', author: 'user' }]);
-      expect(turns.get(s.id)?.turns).toBe(0);
-      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
-        string,
-        { status: string; queue: unknown; handoff?: unknown }
-      >;
-      expect(saved[s.id].status).toBe('idle');
-      expect(saved[s.id].queue).toEqual([{ text: 'deploy', author: 'user' }]);
-      expect(saved[s.id].handoff).toBeUndefined();
+    turns.send(s.id, 'next');
+    await turns.idle();
+    expect(calls.map((c) => c.prompt)).toEqual(['deploy\n\nnext']);
+    expect(turns.get(s.id)?.turns).toBe(1);
+    const users = transcripts.get(s.id).log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''));
+    expect(users).toEqual(['deploy', 'next']);
+    const published = defined(elog.since(0)).flatMap((e) => (e.ev.kind === 'turn.user' ? [e.ev.entry.text] : []));
+    expect(published).toEqual(['deploy', 'next']);
+    expect(errors).not.toContain('turn.start-failed');
+  });
 
-      calls = [];
-      errors.length = 0;
-      attempts = [
-        (_req, ctx) => {
-          ctx.emit({ kind: 'text-delta', text: 'ok' });
-          ctx.emit(END);
-        },
-      ];
-      turns.send(s.id, 'next');
-      await turns.idle();
-      expect(calls.map((c) => c.prompt)).toEqual(['deploy\n\nnext']);
-      expect(turns.get(s.id)?.turns).toBe(1);
-      const users = transcripts.get(s.id).log.filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : ''));
-      expect(users).toEqual(['deploy', 'next']);
-      expect(errors).not.toContain('turn.start-failed');
-    }
+  it('a failure after turn.start leaves no unfinished turn and emits turn.end', async () => {
+    pendingNotices = [{ id: 'n1', kind: 'environment.restarted', at: 1, text: 'booted' }];
+    const errors: string[] = [];
+    turns = build({
+      commitNotices: () => {
+        throw new Error('notice commit failed');
+      },
+      log: { ...nullLogger, error: (message) => errors.push(message) },
+    });
+    const s = orchestrator();
+    events = [];
+    attempts = [() => undefined];
+    turns.send(s.id, 'deploy');
+    await turns.idle();
+    expect(calls).toEqual([]);
+    expect(errors).toContain('turn.start-failed');
+    await transcripts.flush();
+    const disk = JSON.parse(fs.readFileSync(path.join(dir, 'transcripts', `${s.id}.json`), 'utf8')) as {
+      log: Array<{ kind: string }>;
+    };
+    expect(disk.log.filter((e) => e.kind === 'turn')).toEqual([]);
+    expect(disk.log.some((e) => e.kind === 'user')).toBe(true);
+    const start = events.find((e): e is Extract<DaemonEvent, { kind: 'turn.start' }> => e.kind === 'turn.start');
+    const end = events.find((e): e is Extract<DaemonEvent, { kind: 'turn.end' }> => e.kind === 'turn.end');
+    expect(start).toBeDefined();
+    expect(end).toMatchObject({ kind: 'turn.end', turnId: start?.turnId });
+    expect(events.filter((e) => e.kind === 'turn.user')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'turn.end')).toHaveLength(1);
+    expect(turns.get(s.id)?.status).toBe('idle');
+    expect(turns.get(s.id)?.handoff).toBeUndefined();
+    expect(turns.get(s.id)?.queue).toEqual([{ text: 'deploy', author: 'user' }]);
   });
 
   it('a throwing listener mid-turn does not end the turn', async () => {
@@ -747,8 +771,9 @@ describe('daemon turns: queueing, recording, interrupts and asks', () => {
     expect(during).toBe(true);
     expect(turns.isRunning(s.id)).toBe(true);
     expect(turns.get(s.id)?.handoff?.handedOff).toBe(true);
-    expect(errors).toContain('turn.event-failed');
+    expect(errors).not.toContain('turn.event-failed');
     expect(errors).not.toContain('turn.crash');
+    expect(defined(elog.since(0)).some((e) => e.ev.kind === 'turn.event' && e.ev.event.kind === 'tool-start')).toBe(true);
     release();
     await turns.idle();
     expect(calls.map((c) => c.prompt)).toEqual(['deploy']);

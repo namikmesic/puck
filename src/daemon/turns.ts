@@ -401,7 +401,12 @@ export class Turns {
 
     const prompt = [...(notices.length ? [noticePrompt(notices)] : []), ...inputs.map((i) => i.text)].join('\n\n');
     const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
+    let startWritten = false;
     const failStart = (err: unknown): void => {
+      this.dropTurnEntry(session.id, turn.turnId);
+      if (startWritten) {
+        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats: { ...ZERO_STATS } });
+      }
       this.abortUnhanded(session, inputs);
       log.error('turn.start-failed', err, { sessionId: session.id });
     };
@@ -410,6 +415,7 @@ export class Turns {
       transcripts.append(session.id, record);
       this.upsert(session);
       emit({ kind: 'turn.start', sessionId: session.id, turnId: turn.turnId });
+      startWritten = true;
       log.info('turn.start', {
         sessionId: session.id,
         turnId: turn.turnId,
@@ -610,6 +616,22 @@ export class Turns {
     }
   }
 
+  private dropTurnEntry(sessionId: string, turnId: string): void {
+    const log = this.deps.transcripts.get(sessionId).log;
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i];
+      if (entry.kind === 'turn' && entry.turnId === turnId) {
+        log.splice(i, 1);
+        try {
+          this.deps.transcripts.commit(sessionId);
+        } catch (err) {
+          this.deps.log.error('turn.start-failed', err, { sessionId });
+        }
+        return;
+      }
+    }
+  }
+
   /**
    * The turn-start commit landed but the prompt was never passed on. Put the
    * text back on the queue and drop the record so a later start can deliver
@@ -648,9 +670,20 @@ export class Turns {
       log.splice(start);
       throw err;
     }
-    for (const entry of added) {
-      if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
-      else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
+    for (let i = 0; i < added.length; i++) {
+      const entry = added[i];
+      try {
+        if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
+        else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
+      } catch (err) {
+        log.splice(start + i);
+        try {
+          transcripts.commit(session.id);
+        } catch (commitErr) {
+          this.deps.log.error('turn.start-failed', commitErr, { sessionId: session.id });
+        }
+        throw err;
+      }
     }
   }
 
