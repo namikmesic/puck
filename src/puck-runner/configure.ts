@@ -9,11 +9,13 @@
  * generates the Ed25519 key pair and writes `.runner_key` (0600) before
  * anything leaves the machine, registers with the registration token, and
  * writes `.runner` (0644) and `.credentials` (0600). The token itself is
- * never stored. Only `.runner` counts as configured (`isConfigured`). A
- * key or `.credentials` left when registration did not finish is removed
- * before a new key is written, and again if registration or those writes
- * fail; the message then says to pass `--replace` if the server already
- * kept the name.
+ * never stored. Only `.runner` counts as configured (`isConfigured`).
+ * After the Docker check and the prompts, a `.runner` that is present is
+ * already configured and is left in place. A key or `.credentials` left
+ * when registration did not finish, with no `.runner`, is removed before
+ * a new key is written, and again if registration or those writes fail;
+ * the message then says to pass `--replace` if the server already kept
+ * the name.
  *
  * Remove asks whether to keep or delete the environments on this machine
  * when any exist, uninstalls the service, deletes environments when asked
@@ -140,6 +142,9 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
   const labels = parseLabels(await ask('Additional labels, comma-separated [none]: ', opts.labels, ''));
   const maxEnvironments = parseMax(await ask('Most environments this machine may host [no limit]: ', opts.maxEnvironments, ''));
 
+  if (isConfigured(paths)) {
+    throw new ConfigureError('This runner is already configured. To configure it again, run ./config.sh remove first.');
+  }
   if (fs.existsSync(paths.key) || fs.existsSync(paths.credentials)) {
     forgetRegistration(paths);
     io.print('A previous registration did not finish. If the server already kept the name, pass --replace.');

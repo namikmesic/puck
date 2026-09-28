@@ -146,6 +146,36 @@ describe('config.sh', { timeout: 20_000 }, () => {
     expect(readConfig(again).name).toBe('kept-name');
   });
 
+  it('refuses when a registration finishes during the prompts and does not delete it', async () => {
+    const session = await signIn(h, 'octo');
+    const t = io(['box', 'gpu', '2']);
+    const ask = t.ask.bind(t);
+    t.ask = async (q, fallback) => {
+      if (!fs.existsSync(paths.config)) {
+        fs.writeFileSync(paths.config, `${JSON.stringify({ runnerId: 'rnr_finished', name: 'finished', serverUrl: 'http://puck.test' })}\n`);
+        fs.writeFileSync(paths.key, 'finished-key\n', { mode: 0o600 });
+        fs.writeFileSync(paths.credentials, `${JSON.stringify({ runnerId: 'rnr_finished', keyFile: '.runner_key', keyFingerprint: 'fp' })}\n`, { mode: 0o600 });
+      }
+      return ask(q, fallback);
+    };
+    await expect(
+      configure(
+        { url: h.base, token: await token(session, 'registration'), unattended: false, replace: false, disableUpdate: false },
+        { paths, docker: docker().run, io: t, version: '0.1.0', platform: { os: 'linux', arch: 'x64' }, hostname: 'build-box' },
+      ),
+    ).rejects.toThrow(/already configured/);
+    expect(t.asked).toEqual([
+      'Runner name [build-box]: ',
+      'Additional labels, comma-separated [none]: ',
+      'Most environments this machine may host [no limit]: ',
+    ]);
+    expect(t.out.join('\n')).not.toMatch(/did not finish/);
+    expect(fs.readFileSync(paths.config, 'utf8')).toContain('rnr_finished');
+    expect(fs.readFileSync(paths.key, 'utf8')).toBe('finished-key\n');
+    expect(fs.readFileSync(paths.credentials, 'utf8')).toContain('rnr_finished');
+    expect((await call(h, 'GET', '/v1/runners', { token: session.accessToken })).body.runners).toEqual([]);
+  });
+
   it('parses names, labels and limits the way the server accepts them', () => {
     expect(defaultName('Namiks-MacBook-Pro.local')).toBe('Namiks-MacBook-Pro');
     expect(defaultName('_weird host!')).toBe('weird host-');
