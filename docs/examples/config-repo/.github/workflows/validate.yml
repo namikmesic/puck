@@ -1,0 +1,26 @@
+# Validates every definition file against the committed puck.schema.json.
+# Cross-file checks (references between files, the orchestrator's harness)
+# run in Puck when it reads the repo.
+name: Validate definitions
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate agents and environments
+        run: >-
+          npx --yes ajv-cli@5.0.0 validate
+          --spec=draft7
+          -s puck.schema.json
+          -d "agents/*.yaml"
+          -d "environments/*.yaml"

@@ -8,6 +8,7 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import * as agents from './main/agents';
 import * as backend from './main/backend';
+import * as configRepo from './main/config-repo';
 import * as conversations from './main/conversations';
 import * as providerRegistry from './main/providers';
 import * as github from './main/providers/github';
@@ -24,6 +25,7 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
+  pinFrom,
   repoNameFrom,
   requireId,
   requireSecretKey,
@@ -162,6 +164,10 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     await github.setConfigRepo(repoNameFrom(fullName));
     return providerRegistry.providerInfos();
   },
+  [CHANNELS.githubSchemaSave]: (event) => configRepo.saveSchemaFile(BrowserWindow.fromWebContents(event.sender)),
+
+  [CHANNELS.definitionRefs]: () => configRepo.definitionRefs(),
+  [CHANNELS.definitionsAt]: (_event, pin) => configRepo.definitionsAt(pinFrom(pin)),
 
   [CHANNELS.agentList]: () => agents.list(),
   [CHANNELS.agentCreate]: (_event, cfg) => agents.create(agentConfigFrom(cfg)),

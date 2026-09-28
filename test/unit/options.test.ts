@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   activeSettings,
+  checkSettings,
   compileGeneric,
   effectiveValue,
   expandDots,
@@ -215,5 +216,59 @@ describe('compileGeneric', () => {
     expect(
       compileGeneric(schema, { 'sandbox_workspace_write.network_access': true }),
     ).toEqual({});
+  });
+});
+
+describe('checkSettings (strict)', () => {
+  it('passes a valid sparse map through unchanged, defaults and all', () => {
+    const raw = {
+      sandbox_mode: 'workspace-write',
+      'sandbox_workspace_write.network_access': false,
+      'sandbox_workspace_write.writable_roots': ['/tmp'],
+      maxTurns: 150,
+      maxBudgetUsd: 2.5,
+      'tool.Bash': true,
+      note: '  as written  ',
+    };
+    expect(checkSettings(schema, raw)).toEqual({ value: raw, errors: [] });
+    expect(checkSettings(schema, {})).toEqual({ value: {}, errors: [] });
+    expect(checkSettings(schema, undefined)).toEqual({ value: {}, errors: [] });
+  });
+
+  it('reports unknown ids', () => {
+    const { value, errors } = checkSettings(schema, { maxTurn: 3, maxTurns: 3 });
+    expect(value).toEqual({ maxTurns: 3 });
+    expect(errors).toEqual([{ id: 'maxTurn', message: 'unknown option "maxTurn"' }]);
+  });
+
+  it('reports wrong types instead of dropping them', () => {
+    const { value, errors } = checkSettings(schema, {
+      sandbox_mode: 1,
+      'sandbox_workspace_write.network_access': 'yes',
+      'sandbox_workspace_write.writable_roots': ['/tmp', 3],
+      maxTurns: '10',
+      note: null,
+    });
+    expect(value).toEqual({});
+    expect(errors.map((e) => e.id)).toEqual([
+      'sandbox_mode',
+      'sandbox_workspace_write.network_access',
+      'sandbox_workspace_write.writable_roots',
+      'maxTurns',
+      'note',
+    ]);
+  });
+
+  it('reports values outside an enum, a range, or a step grid', () => {
+    const { errors } = checkSettings(schema, { sandbox_mode: 'open', maxTurns: 500, maxBudgetUsd: 2.25 });
+    expect(errors).toEqual([
+      { id: 'sandbox_mode', message: expect.stringContaining('must be one of') },
+      { id: 'maxTurns', message: 'maxTurns must be between 1 and 200' },
+      { id: 'maxBudgetUsd', message: 'maxBudgetUsd must be a multiple of 0.5 from 0.5' },
+    ]);
+  });
+
+  it('rejects a map that is not a map', () => {
+    expect(checkSettings(schema, ['maxTurns']).errors).toEqual([{ id: '', message: expect.stringContaining('must be a map') }]);
   });
 });

@@ -201,6 +201,7 @@ npm run typecheck   # strict tsc
 npm run lint
 npm test            # vitest unit suites
 npm run test:e2e    # boots the real app and smoke-checks the UI
+npm run schema      # regenerates schema/puck.schema.json (CI fails when it drifts)
 npm run make        # the release ZIP and its checksum, see RELEASE.md
 ```
 

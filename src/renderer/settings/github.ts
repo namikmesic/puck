@@ -2,9 +2,9 @@
  * Settings → Providers → Integrations → GitHub. Signed out: device-flow
  * sign-in (the code, "Copy code and open github.com/login/device"). Signed
  * in: the login, the app installations with Manage links and "Install Puck
- * on an account", the config-repo picker with "Open repo", and Sign out. Tokens never reach this
- * module; main returns the login and settings only. Context in, elements
- * built here, no DOM lookups.
+ * on an account", the config-repo picker with "Open repo" and "Save puck.schema.json",
+ * and Sign out. Tokens never reach this module; main returns the login and settings
+ * only. Context in, elements built here, no DOM lookups.
  */
 
 import type {
@@ -100,6 +100,25 @@ function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInf
   return box;
 }
 
+/** "Save puck.schema.json": the app's schema, for committing to the config repo root. */
+function schemaSave(ctx: GitHubCardContext): HTMLElement {
+  const foot = el('div', 'card-foot pv-schema');
+  const save = button('btn-ghost', 'Save puck.schema.json');
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    ctx.say('');
+    try {
+      const { path } = await ctx.bridge.githubSchemaSave();
+      if (path) ctx.say(`Saved ${path}. Commit it at the root of the config repo so editors and CI can validate definitions.`);
+    } catch (err) {
+      ctx.say(errText(err));
+    }
+    save.disabled = false;
+  });
+  foot.appendChild(save);
+  return foot;
+}
+
 function configRepoBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo): HTMLElement {
   const box = el('div', 'pv-config-repo config-form');
   box.appendChild(el('div', 'pv-subhead', 'Config repo'));
@@ -119,6 +138,7 @@ function configRepoBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo):
   row.append(select, open);
   box.appendChild(row);
   if (!current) box.appendChild(el('p', 'pv-note', 'Choose the repository that holds your agent and environment definitions.'));
+  box.appendChild(schemaSave(ctx));
 
   void ctx.bridge
     .githubRepos()

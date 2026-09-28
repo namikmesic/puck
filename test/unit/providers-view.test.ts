@@ -252,6 +252,26 @@ describe('GitHub card', () => {
     expect(githubSetConfigRepo).toHaveBeenCalledWith('me/other');
   });
 
+  it('Save puck.schema.json saves through main and says where; a canceled dialog says nothing', async () => {
+    const githubSchemaSave = vi
+      .fn()
+      .mockResolvedValueOnce({ path: '/Users/me/Downloads/puck.schema.json' })
+      .mockResolvedValueOnce({ path: null });
+    const { els, view } = mount([gh({ login: 'me', configRepo: 'me/cfg' }, { connected: true })], { githubSchemaSave });
+    await view.render();
+    await settle();
+    const save = btn(card(els.integrationCards, 'github'), 'Save puck.schema.json');
+    save.click();
+    await settle();
+    expect(githubSchemaSave).toHaveBeenCalledTimes(1);
+    expect(els.msg.textContent).toContain('/Users/me/Downloads/puck.schema.json');
+    expect(save.disabled).toBe(false);
+    save.click();
+    await settle();
+    expect(githubSchemaSave).toHaveBeenCalledTimes(2);
+    expect(els.msg.textContent).toBe('');
+  });
+
   it('offers no install link while the app slug is unconfigured', async () => {
     const githubInstallations = vi.fn(async () => []);
     const { els, view } = mount([gh({ login: 'me', installUrl: null }, { connected: true })], { githubInstallations });

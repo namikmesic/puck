@@ -16,7 +16,8 @@
     "lint": "eslint --ext .ts,.tsx,.mjs .",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node test/e2e/smoke.mjs"
+    "test:e2e": "node test/e2e/smoke.mjs",
+    "schema": "node scripts/gen-schema.mjs"
   },
   "author": {
     "name": "Namik Mesic",
@@ -33,6 +34,7 @@
     "@typescript-eslint/eslint-plugin": "^5.62.0",
     "@typescript-eslint/parser": "^5.62.0",
     "@vercel/webpack-asset-relocator-loader": "^1.7.3",
+    "ajv": "8.20.0",
     "css-loader": "^6.11.0",
     "electron": "43.4.0",
     "eslint": "^8.57.1",
@@ -48,6 +50,7 @@
   },
   "dependencies": {
     "dompurify": "^3.4.13",
-    "marked": "^18.0.9"
+    "marked": "^18.0.9",
+    "yaml": "2.9.1"
   }
 }

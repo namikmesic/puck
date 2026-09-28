@@ -23,6 +23,10 @@ export const CHANNELS = {
   githubInstallations: 'github:installations',
   githubRepos: 'github:repos',
   githubSetConfigRepo: 'github:set-config-repo',
+  githubSchemaSave: 'github:schema-save',
+
+  definitionRefs: 'defs:refs',
+  definitionsAt: 'defs:at',
 
   agentList: 'agent:list',
   agentCreate: 'agent:create',

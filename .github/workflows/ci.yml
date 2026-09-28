@@ -23,6 +23,10 @@ jobs:
         run: node --check src/main/runner/runner.js
       - name: Unit tests
         run: npm test
+      - name: Definitions schema is current
+        run: |
+          npm run schema
+          git diff --exit-code schema/ docs/examples/config-repo/puck.schema.json
 
   package:
     runs-on: macos-latest

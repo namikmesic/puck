@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=../puck.schema.json
+apiVersion: puck/v1
+kind: Environment
+name: example
+description: One application repo worked by a lead, two implementers and a reviewer.
+image: node:22-bookworm
+resources: { cpus: 4, memory: 8g }
+repos:
+  # Replace with a repository your GitHub sign-in can reach.
+  - github: your-org/your-app
+    dir: app                       # cloned to /workspace/app
+    branch: main                   # base for worktrees and pull requests
+orchestrator:
+  agent: lead
+  autoWake: true
+  maxAutoTurnsPerHour: 30
+agents:
+  - agent: implementer
+    maxParallel: 2
+  - agent: reviewer
+    maxParallel: 1
+    instructions: Review only; never push.
+limits: { maxWorkers: 3, maxAttempts: 2 }
+policies: { asks: orchestrator-first, publish: orchestrator, draftPullRequests: true }
+env: { NODE_ENV: development }
