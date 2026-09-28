@@ -95,8 +95,14 @@ function announce(signedIn: boolean): void {
   }
 }
 
-account.setOnLogin(() => announce(true));
-account.setOnLogout(() => announce(false));
+account.setOnLogin(() => {
+  wasSignedIn = true;
+  announce(true);
+});
+account.setOnLogout(() => {
+  wasSignedIn = false;
+  announce(false);
+});
 
 export class NotSignedInError extends Error {
   constructor() {
@@ -105,21 +111,16 @@ export class NotSignedInError extends Error {
   }
 }
 
-let announcedOut = false;
+/** Whether this process last saw a session; a refresh the server rejected clears it without the logout hook. */
+let wasSignedIn: boolean | null = null;
 
 /** The stored session when it belongs to this server. */
 export function current(): PuckSession | null {
   const s = account.load();
-  if (s && s.server === serverUrl()) {
-    announcedOut = false;
-    return s;
-  }
-  // A refresh the server rejected signs out without the logout hook; say so once.
-  if (!s && !announcedOut && listeners.length) {
-    announcedOut = true;
-    queueMicrotask(() => announce(false));
-  }
-  return null;
+  const mine = s && s.server === serverUrl() ? s : null;
+  if (wasSignedIn && !mine) queueMicrotask(() => announce(false));
+  wasSignedIn = !!mine;
+  return mine;
 }
 
 /** A valid access token, refreshed when stale; throws NotSignedInError when signed out. */

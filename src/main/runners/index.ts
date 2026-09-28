@@ -18,6 +18,7 @@
 import type { LocalRunnerState, RunnerRow, RunnersState } from '../../harness/bridge';
 import type { ControlArgs, ControlEvent, ControlOp, ControlResult } from '../../harness/runner-protocol';
 import type { ServerInstance, ServerPush, ServerRunner } from '../../harness/server-api';
+import { keyFingerprint } from '../../channel/wire';
 import { log } from '../log';
 import * as api from '../server/api';
 import { ServerConnection, type SocketState } from '../server/connection';
@@ -26,7 +27,7 @@ import { current, freshSession, onSessionChange, signOut } from '../server/sessi
 import { ChannelOpenError, type RunnerTransport } from './channel';
 import { ControlClient } from './control-client';
 import { localTransport } from './local';
-import { checkPinnedKey, forgetKeys, localRunner } from './store';
+import { checkPinnedKey, forgetKey, localRunner } from './store';
 import * as thisMac from './this-mac';
 import type { EnvironmentProvider } from '../providers/types';
 
@@ -69,8 +70,19 @@ function isLocal(runnerId: string): boolean {
   return localRunner()?.runnerId === runnerId;
 }
 
+/** The fingerprint of the key channels are encrypted to (never the server's own label for it). */
+function fingerprintOf(r: ServerRunner): string | null {
+  try {
+    return keyFingerprint(r.publicKey);
+  } catch {
+    return null;
+  }
+}
+
+/** True when the key the server lists is not the one this install pinned for the runner. */
 function keyChanged(r: ServerRunner): boolean {
-  return !checkPinnedKey(r.id, r.fingerprint);
+  const fp = fingerprintOf(r);
+  return fp === null || !checkPinnedKey(r.id, fp);
 }
 
 export function row(r: ServerRunner): RunnerRow {
@@ -81,7 +93,7 @@ export function row(r: ServerRunner): RunnerRow {
     os: r.os,
     arch: r.arch,
     version: r.version,
-    fingerprint: r.fingerprint,
+    fingerprint: fingerprintOf(r) ?? '',
     status: r.status,
     running: r.running,
     maxEnvironments: r.maxEnvironments,
@@ -134,7 +146,6 @@ export async function refresh(): Promise<void> {
   for (const r of list) runners.set(r.id, r);
   instances.clear();
   for (const i of envs) instances.set(i.id, i);
-  forgetKeys(new Set(runners.keys()));
   loaded = true;
   emitRunners({ kind: 'state' });
   emitInstances({ kind: 'reload' });
@@ -142,7 +153,8 @@ export async function refresh(): Promise<void> {
   for (const r of list) if (r.status !== 'offline') for (const cb of onlineListeners) cb(r.id);
 }
 
-function onPush(push: ServerPush): void {
+/** A push event from the server socket (exported for tests, which play the server). */
+export function onPush(push: ServerPush): void {
   switch (push.type) {
     case 'runner.upsert': {
       const before = runners.get(push.runner.id);
@@ -155,6 +167,7 @@ function onPush(push: ServerPush): void {
     }
     case 'runner.removed':
       runners.delete(push.runnerId);
+      forgetKey(push.runnerId);
       closeControl(push.runnerId);
       emitRunners({ kind: 'removed', runnerId: push.runnerId });
       return;
@@ -291,6 +304,14 @@ export async function control<O extends ControlOp>(
 export function shutdown(): void {
   for (const id of [...pool.keys()]) closeControl(id);
   connection.stop('app-quitting');
+}
+
+/** Removes a runner whose machine is gone (the server marks its environments lost). */
+export async function forceRemove(runnerId: string): Promise<void> {
+  await api.forceRemoveRunner(runnerId);
+  closeControl(runnerId);
+  forgetKey(runnerId);
+  await refresh();
 }
 
 /* ---------- This Mac ---------- */

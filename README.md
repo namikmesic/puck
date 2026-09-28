@@ -213,6 +213,7 @@ npm run start:isolated -- -- --remote-debugging-port=9222  # attach playwright-c
 ```
 
 Isolated mode (`PUCK_ISOLATED=1`) keeps every app data path in that folder, encrypts secrets with Electron's mock keychain so macOS is never asked, and opens the window without taking focus.
+With `PUCK_ISOLATED_BROWSER=off` as well, signing in to Puck does not open the system browser; the check completes the sign-in from the page URL the bridge returns.
 Never replace `HOME` to isolate Puck: macOS then finds no keychain and pops up a "Reset To Defaults" dialog on the desktop.
 
 ```bash

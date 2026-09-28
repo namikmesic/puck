@@ -85,6 +85,17 @@ describe('credential ingest', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('removes a harness credential file as the puck user, and a staged copy with it', async () => {
+    const { run, calls } = fakeRunner();
+    const creds = new Credentials({ paths: root.paths, log: nullLogger, run, asPuck: { uid: 10001, gid: 10001 } });
+    await creds.putHarness('codex', '{"tokens":{}}', false);
+    await creds.removeHarness('codex');
+    expect(fs.existsSync(path.join(root.paths.stagedCredentials, 'codex.json'))).toBe(false);
+    expect(calls.map((c) => [c.argv, c.opts.uid])).toEqual([[['rm', '-f', '--', path.join(root.paths.home, '.codex', 'auth.json')], 10001]]);
+    expect(await creds.writeStaged()).toEqual([]);
+    await expect(creds.removeHarness('gemini')).rejects.toThrow(/Unknown harness/);
+  });
+
   it('accepts only installation token grants with an expiry, one per owner', () => {
     expect(normalizeGithub({ grants: [grant] }, 1)).toEqual({ grants: [grant], savedAt: 1 });
     expect(normalizeGithub([grant], 1)).toEqual({ grants: [grant], savedAt: 1 });

@@ -202,8 +202,7 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     return { id: token.id, token: token.token, expiresAt: token.expiresAt, command: `./config.sh remove --token ${token.token}` };
   },
   [CHANNELS.runnerForceRemove]: async (_event, runnerId) => {
-    await serverApi.forceRemoveRunner(runnerIdFrom(runnerId));
-    await runners.refresh();
+    await runners.forceRemove(runnerIdFrom(runnerId));
     return runners.state();
   },
   [CHANNELS.runnerUpdate]: async (_event, args) => {

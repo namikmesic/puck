@@ -35,7 +35,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   `preload.ts` and `src/index.ts` both import it.
   The `satisfies` clause keeps it total over `PuckBridge`, and `test/unit/channels.test.ts` asserts main registers a handler for every entry.
   Adding a bridge method = bridge type + CHANNELS entry + preload line + handler.
-  Push channels from main to the renderer (`EVENT_CHANNEL`, `ENV_EVENT_CHANNEL`, `FLUSH_CHANNEL`, `FLUSHED_CHANNEL`) sit outside the table.
+  Push channels from main to the renderer (`EVENT_CHANNEL`, `ENV_EVENT_CHANNEL`, `RUNNER_EVENT_CHANNEL`, `INSTANCE_EVENT_CHANNEL`, `DAEMON_EVENT_CHANNEL`, `FLUSH_CHANNEL`, `FLUSHED_CHANNEL`) sit outside the table.
   The `satisfies` clause excludes their bridge methods by name.
 - **Environment readiness is Puck state, not Docker liveness.**
   `EnvLifecycle` (`src/harness/bridge.ts`) has the states stopped, starting, ready, stopping, and failed.

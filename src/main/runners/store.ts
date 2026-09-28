@@ -62,12 +62,15 @@ export function checkPinnedKey(runnerId: string, seen: string): boolean {
   return pinned === seen;
 }
 
-/** Drops pins for runners that no longer exist. */
-export function forgetKeys(keep: Set<string>): void {
+/**
+ * Drops a runner's pin once it was removed. Only removal does: a runner
+ * missing from one listing and listed again later keeps its pin, so a
+ * server cannot reset it by leaving the runner out once.
+ */
+export function forgetKey(runnerId: string): void {
   const state = store.read();
-  const drop = Object.keys(state.keys).filter((id) => !keep.has(id));
-  if (!drop.length) return;
-  for (const id of drop) delete state.keys[id];
+  if (!(runnerId in state.keys)) return;
+  delete state.keys[runnerId];
   store.persist();
 }
 
