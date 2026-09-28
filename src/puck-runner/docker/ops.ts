@@ -14,8 +14,8 @@
  *              owners and modes; /puck/inbox 0700, its files 0600)
  *   start      docker start puck-<id>
  *   stop       docker stop -t 30 puck-<id>
- *   rebuild    stop, rm, image, create with the same volumes, copy-in of the bundle and the
- *              new definition, start
+ *   rebuild    image, stop when running, rm, create with the same volumes, copy-in of the
+ *              bundle and the new definition, start
  *   delete     docker rm -f, docker volume rm of both volumes, docker image rm of a built image
  *   list       docker ps -a --filter label=puck=instance (rediscovery; nothing else is touched)
  *
