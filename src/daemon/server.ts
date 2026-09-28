@@ -138,7 +138,7 @@ export class DaemonServer {
       if (!cmdId) return fatal('bad-frame', 'A command needs an id.');
       const fail = (code: ErrorCode, message: string): void => send({ t: 'res', id: cmdId, ok: false, error: { code, message } });
       if (!isOp(frame.op)) return fail('invalid-args', `Unknown op ${String(frame.op).slice(0, 40)}.`);
-      if (!this.accepting) return fail('not-ready', 'The daemon is shutting down.');
+      if (!this.accepting && frame.op !== 'daemon.upgrade') return fail('not-ready', 'The daemon is shutting down.');
       this.deps
         .dispatch(frame.op, frame.args)
         .then((result) => send({ t: 'res', id: cmdId, ok: true, result: result ?? {} }))

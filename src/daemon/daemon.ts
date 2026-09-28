@@ -51,6 +51,8 @@ import type { DaemonIdentity } from './version';
 /** How long SIGTERM waits for interrupted turns before persisting anyway. */
 const SHUTDOWN_GRACE_MS = 20_000;
 
+type DaemonPhase = 'serving' | 'upgrading' | 'recovering' | 'shutting-down';
+
 export interface DaemonOptions {
   paths: DaemonPaths;
   log: Logger;
@@ -83,8 +85,8 @@ export class Daemon {
   private server!: DaemonServer;
   private schedulerPaused = false;
   private homeReady = false;
-  private stopping = false;
-  private shuttingDown = false;
+  private phase: DaemonPhase = 'serving';
+  private pendingShutdown = false;
   private readonly run: CommandRunner;
   private readonly now: () => number;
   private readonly shutdownGraceMs: number;
@@ -276,7 +278,7 @@ export class Daemon {
     if (this.state.status === 'failed' && !FAILED_OPS.has(op)) {
       return Promise.reject(new OpError('not-ready', `The environment failed: ${this.state.error ?? 'unknown error'}`));
     }
-    if (this.stopping && op !== 'snapshot.get' && op !== 'logs.tail') {
+    if (this.phase !== 'serving' && op !== 'snapshot.get' && op !== 'logs.tail' && op !== 'daemon.upgrade') {
       return Promise.reject(new OpError('not-ready', 'The environment daemon is stopping.'));
     }
     if (READY_OPS.has(op) && this.state.status !== 'ready') {
@@ -389,9 +391,11 @@ export class Daemon {
    * let running turns finish (drain) or interrupt them and wait out the
    * shutdown grace (now), persist, rename the new bundle into place and
    * exit 75, so the container's restart policy starts it. The response
-   * goes out before the exit.
+   * goes out before the exit. A failed swap resumes once any turn that
+   * ignored the interrupt has finished, unless a signal is already held.
    */
   private upgrade(mode: 'drain' | 'now'): Record<string, never> {
+    if (this.phase !== 'serving') throw new OpError('invalid-state', 'An upgrade or shutdown is already in progress.');
     const { paths, log } = this.opts;
     let st: fs.Stats;
     try {
@@ -400,43 +404,56 @@ export class Daemon {
       throw new OpError('invalid-state', 'No new daemon bundle is staged.');
     }
     if (!st.isFile() || st.size === 0) throw new OpError('invalid-state', 'The staged daemon bundle is not a file.');
-    if (this.stopping) throw new OpError('invalid-state', 'An upgrade or shutdown is already in progress.');
-    this.stopping = true;
-    const before = this.state;
+    this.phase = 'upgrading';
+    const before = { ...this.state };
     this.emit({ kind: 'daemon.upgrading', mode });
     log.info('daemon.upgrade', { mode });
     this.turns?.stopAccepting();
     setImmediate(() => {
       void (async () => {
-        if (mode === 'now') await this.interruptWithinGrace();
-        else await this.turns?.idle();
-        this.setState({ status: 'stopping', detail: 'upgrading' });
-        await this.persist();
-        fs.renameSync(paths.nextBundle, paths.bundle);
-        log.info('daemon.exit', { code: UPGRADE_EXIT });
-        this.opts.exit(UPGRADE_EXIT);
-      })().catch((err) => {
-        log.error('daemon.upgrade-failed', err);
-        void this.settleFailedUpgrade(before);
-      });
+        try {
+          if (mode === 'now') await this.interruptWithinGrace();
+          else await this.turns?.idle();
+          this.setState({ status: 'stopping', detail: 'upgrading' });
+          await this.persist();
+          fs.renameSync(paths.nextBundle, paths.bundle);
+          log.info('daemon.exit', { code: UPGRADE_EXIT });
+          this.opts.exit(UPGRADE_EXIT);
+        } catch (err) {
+          log.error('daemon.upgrade-failed', err);
+          if (this.pendingShutdown) await this.beginShutdown();
+          else await this.settleFailedUpgrade(before);
+        }
+      })();
     });
     return {};
   }
 
   private async settleFailedUpgrade(before: InstanceState): Promise<void> {
-    if (this.shuttingDown) return;
-    this.stopping = false;
+    this.phase = 'recovering';
     await this.turns?.idle();
-    if (this.shuttingDown || this.stopping) return;
-    this.turns?.resumeAccepting();
+    if (this.phase !== 'recovering') return;
     this.setState(before);
+    this.turns?.resumeAccepting();
+    this.phase = 'serving';
   }
 
-  /** SIGTERM: stop taking commands, interrupt every turn, persist, exit 0. */
+  /**
+   * SIGTERM or SIGINT. Serving and recovering shut down now. An upgrade
+   * holds the signal: the swap still exits 75 if it succeeds, and shuts
+   * down instead of recovering if it fails. A second signal is ignored.
+   */
   async shutdown(): Promise<void> {
-    if (this.shuttingDown || (this.stopping && this.state.status === 'stopping')) return;
-    this.shuttingDown = true;
-    this.stopping = true;
+    if (this.phase === 'shutting-down') return;
+    if (this.phase === 'upgrading') {
+      this.pendingShutdown = true;
+      return;
+    }
+    await this.beginShutdown();
+  }
+
+  private async beginShutdown(): Promise<void> {
+    this.phase = 'shutting-down';
     this.server?.stopAccepting();
     this.turns?.stopAccepting();
     this.setState({ status: 'stopping' });

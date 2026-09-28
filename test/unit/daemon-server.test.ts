@@ -464,6 +464,139 @@ describe('upgrade now is bounded when a turn ignores interrupt', () => {
     await daemon.shutdown();
     expect(exit).toHaveBeenCalledWith(0);
   });
+
+  it('refuses another upgrade while a failed one is recovering, then becomes ready', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const prompts: string[] = [];
+    let release: (() => void) | null = null;
+    const hang: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req, ctx) => {
+        prompts.push(req.prompt);
+        if (prompts.length === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return;
+        }
+        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
+      },
+    };
+    await boot({
+      shutdownGraceMs: 40,
+      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+    });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
+    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'stopping',
+    );
+    await new Promise((r) => setTimeout(r, 80));
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
+    expect(await c.cmd('chat.send', { text: 'more' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+    const mid = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(mid.result.instance.status).toBe('stopping');
+    expect(exit).not.toHaveBeenCalled();
+    if (!release) throw new Error('the running turn never started');
+    release();
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'turn.user' && f.ev.entry.text === 'later',
+    );
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance.status).toBe('ready');
+    expect(prompts).toContain('later');
+    expect(await c.cmd('chat.send', { text: 'after' })).toMatchObject({ ok: true });
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('shuts down once when signaled during a failing upgrade', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    const prompts: string[] = [];
+    const hang: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req) => {
+        prompts.push(req.prompt);
+        return new Promise<void>(() => undefined);
+      },
+    };
+    await boot({
+      shutdownGraceMs: 40,
+      adapters: { 'claude-code': hang, codex: { id: 'codex', run: () => Promise.resolve() } },
+    });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'hang' })).toMatchObject({ ok: true, result: { queued: false } });
+    expect(await c.cmd('chat.send', { text: 'later' })).toMatchObject({ ok: true, result: { queued: true } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await daemon.shutdown();
+    for (let i = 0; i < 50 && exit.mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(prompts).toEqual(['hang']);
+    const statuses = c
+      .events()
+      .map((e) => e.ev)
+      .filter((ev): ev is Extract<DaemonEvent, { kind: 'instance.status' }> => ev.kind === 'instance.status')
+      .map((ev) => ev.status);
+    expect(statuses.at(-1)).toBe('stopping');
+  });
+
+  it('exits 75 once when signaled during a successful upgrade', async () => {
+    deliver({
+      'instance.json': {
+        envId: ENV_ID,
+        name: 'Example',
+        pin: { kind: 'tag', name: 'v1', sha: 'abc1234' },
+        definition: exampleDefinition(),
+      },
+    });
+    await boot({ shutdownGraceMs: 40 });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await daemon.shutdown();
+    for (let i = 0; i < 50 && exit.mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(75);
+    await daemon.shutdown();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+    expect(fs.existsSync(root.paths.nextBundle)).toBe(false);
+  });
 });
 
 describe('restored follow-up through Daemon.start', () => {
