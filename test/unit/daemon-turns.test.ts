@@ -1084,10 +1084,11 @@ describe('daemon turns: crash windows and storage failures', () => {
 
   /** Real commit, but the directory rejects the write after the debounce is cancelled. */
   function failFinishedCommit(failing: () => boolean): void {
-    const commit = transcripts.commit.bind(transcripts);
+    const book = transcripts;
+    const commit = book.commit.bind(book);
     const transcriptDir = path.join(dir, 'transcripts');
-    transcripts.commit = (sessionId: string) => {
-      const last = [...transcripts.get(sessionId).log].reverse().find((e) => e.kind === 'turn');
+    book.commit = (sessionId: string) => {
+      const last = [...book.get(sessionId).log].reverse().find((e) => e.kind === 'turn');
       const finished = last?.kind === 'turn' && last.events.some((e) => e.kind === 'turn-end');
       if (failing() && finished) {
         fs.chmodSync(transcriptDir, 0o500);
@@ -1309,6 +1310,128 @@ describe('daemon turns: crash windows and storage failures', () => {
       await turns.idle();
       expect(calls).toEqual([]);
       expect(lastTurnKinds(diskLog(s.id))).toEqual(['text-delta', 'turn-end']);
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
+  });
+
+  /** Session file written when the turn-end transcript is durable and the idle commit has not landed. */
+  async function crashBeforeIdleSession(opts: {
+    onTurnEnd?: (sessionId: string) => void;
+    secondAttempt?: boolean;
+  }): Promise<{ snap: string; id: string }> {
+    const sessions = sessionsStore(dir);
+    let snap = '';
+    const commitSessions = sessions.commit.bind(sessions);
+    sessions.commit = () => {
+      const session = Object.values(sessions.get()).find((s) => s.status === 'idle' && s.turns > 0);
+      if (session && !snap) {
+        snap = fs.mkdtempSync(path.join(os.tmpdir(), 'puckd-crash-'));
+        fs.cpSync(dir, snap, { recursive: true });
+        return;
+      }
+      commitSessions();
+    };
+    let clock = 1_000;
+    let sessionId = '';
+    turns = build({
+      sessions,
+      now: () => clock,
+      ...(opts.onTurnEnd ? { onTurnEnd: () => opts.onTurnEnd?.(sessionId) } : {}),
+    });
+    const s = orchestrator();
+    sessionId = s.id;
+    const record = defined(turns.get(s.id));
+    record.costUsd = 2;
+    record.lastTurnTokens = 3;
+    sessions.commit();
+    const finish = { kind: 'turn-end' as const, stats: { inputTokens: 4, outputTokens: 6, durationMs: 5, costUsd: 1 } };
+    attempts = [
+      (_req, ctx) => {
+        clock = 5_000;
+        ctx.emit({ kind: 'text-delta', text: 'the reply' });
+        ctx.emit(finish);
+      },
+      ...(opts.secondAttempt ? [((_req, ctx) => ctx.emit(END)) as Attempt] : []),
+    ];
+    await send(s.id, 'hello');
+    expect(snap).not.toBe('');
+    return { snap, id: sessionId };
+  }
+
+  it('restores session turn accounting when the transcript finished before the session commit', async () => {
+    const { snap, id } = await crashBeforeIdleSession({});
+    const live = dir;
+    dir = snap;
+    try {
+      const transcript = JSON.parse(fs.readFileSync(path.join(dir, 'transcripts', `${id}.json`), 'utf8')) as {
+        turns: number;
+        lastTurnTokens: number;
+        lastActiveAt: number;
+      };
+      const before = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
+        string,
+        { status: string; turns: number; lastTurnTokens: number; costUsd: number; lastActiveAt: number; handoff?: { handedOff: boolean } }
+      >;
+      expect(transcript).toMatchObject({ turns: 1, lastTurnTokens: 10, lastActiveAt: 5_000 });
+      expect(before[id]).toMatchObject({ status: 'running', turns: 1, lastTurnTokens: 3, costUsd: 2, lastActiveAt: 1_000, handoff: { handedOff: true } });
+      let clock = 5_000;
+      turns = build({ now: () => clock });
+      expect(turns.reconcile()).toEqual([]);
+      expect(turns.resumeInterrupted()).toEqual([]);
+      expect(turns.get(id)).toMatchObject({ status: 'idle', turns: 1, lastTurnTokens: 10, costUsd: 3, lastActiveAt: 5_000 });
+      expect(turns.get(id)?.handoff).toBeUndefined();
+      await flushJsonWrites();
+      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { costUsd: number; lastTurnTokens: number; turns: number }>;
+      expect(saved[id]).toMatchObject({ turns: 1, lastTurnTokens: 10, costUsd: 3, lastActiveAt: 5_000, status: 'idle' });
+      clock = 9_000;
+      attempts = [(_req, ctx) => ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1, costUsd: 4 } })];
+      await send(id, 'again');
+      expect(turns.get(id)).toMatchObject({ status: 'idle', turns: 2, lastTurnTokens: 2, costUsd: 7, lastActiveAt: 9_000 });
+    } finally {
+      await transcripts.flush();
+      await flushJsonWrites();
+      dir = live;
+      fs.rmSync(snap, { recursive: true, force: true });
+    }
+  });
+
+  it('does not add the finished turn cost again when the end snapshot is already stored', async () => {
+    let queued = false;
+    const { snap, id } = await crashBeforeIdleSession({
+      secondAttempt: true,
+      onTurnEnd: (sessionId) => {
+        if (queued) return;
+        queued = true;
+        turns.send(sessionId, 'later');
+      },
+    });
+    const live = dir;
+    dir = snap;
+    try {
+      const before = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<
+        string,
+        { status: string; costUsd: number; lastTurnTokens: number; lastActiveAt: number; handoff?: unknown; queue: Array<{ text: string }> }
+      >;
+      expect(before[id]).toMatchObject({
+        status: 'running',
+        turns: 1,
+        lastTurnTokens: 10,
+        costUsd: 3,
+        lastActiveAt: 5_000,
+        handoff: { handedOff: true },
+        queue: [{ text: 'later', author: 'user' }],
+      });
+      turns = build();
+      expect(turns.reconcile()).toEqual([]);
+      expect(turns.get(id)).toMatchObject({ status: 'idle', turns: 1, lastTurnTokens: 10, costUsd: 3, lastActiveAt: 5_000 });
+      expect(turns.get(id)?.handoff).toBeUndefined();
+      await flushJsonWrites();
+      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')) as Record<string, { costUsd: number }>;
+      expect(saved[id].costUsd).toBe(3);
     } finally {
       await transcripts.flush();
       await flushJsonWrites();

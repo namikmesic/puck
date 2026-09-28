@@ -292,14 +292,21 @@ export class Turns {
     for (const session of this.list()) {
       if (session.status !== 'running' && session.status !== 'interrupted') continue;
       if (this.needsRelease(session.id)) continue;
-      const log = this.deps.transcripts.get(session.id).log;
-      const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
+      const transcript = this.deps.transcripts.get(session.id);
+      const last = [...transcript.log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
       if (
         session.status === 'running' &&
         last &&
         finishedTurn(last.events) &&
         (!session.handoff || session.handoff.turnId === last.turnId)
       ) {
+        const stats = finishedStats(last.events);
+        if (session.lastActiveAt !== transcript.lastActiveAt && stats && typeof stats.costUsd === 'number') {
+          session.costUsd += stats.costUsd;
+        }
+        session.turns = transcript.turns;
+        session.lastTurnTokens = transcript.lastTurnTokens;
+        session.lastActiveAt = transcript.lastActiveAt;
         session.status = 'idle';
         if (session.handoff) delete session.handoff;
         dirty = true;
