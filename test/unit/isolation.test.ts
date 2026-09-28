@@ -33,6 +33,10 @@ describe('isolated launch', () => {
     const app = fakeApp();
     expect(applyIsolatedLaunch(app, {})).toBeNull();
     expect(applyIsolatedLaunch(app, { [ISOLATED_ENV]: '0', [ISOLATED_DIR_ENV]: ' ' })).toBeNull();
+    const leftover = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'puck-iso-test-')), 'leftover');
+    made.push(path.dirname(leftover));
+    expect(applyIsolatedLaunch(app, { [ISOLATED_DIR_ENV]: leftover })).toBeNull();
+    expect(fs.existsSync(leftover)).toBe(false);
     expect(app.paths).toEqual({});
     expect(app.switches).toEqual([]);
   });
@@ -62,7 +66,7 @@ describe('isolated launch', () => {
     const given = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'puck-iso-test-')), 'data');
     made.push(path.dirname(given));
     const app = fakeApp();
-    const launch = applyIsolatedLaunch(app, { [ISOLATED_DIR_ENV]: given });
+    const launch = applyIsolatedLaunch(app, { [ISOLATED_ENV]: '1', [ISOLATED_DIR_ENV]: given });
     expect(launch).toEqual({ dataDir: given });
     expect(fs.statSync(given).isDirectory()).toBe(true);
     expect(app.paths.userData).toBe(given);

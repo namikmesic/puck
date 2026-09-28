@@ -15,9 +15,10 @@ import * as path from 'node:path';
 /** Set to "1" to launch isolated. */
 export const ISOLATED_ENV = 'PUCK_ISOLATED';
 /**
- * Optional caller-owned data directory; implies isolation. Without it Puck
- * makes a fresh one under the OS temp dir. Chromium writes into the profile
- * until the process exits, so whoever wants a dir gone removes it after exit.
+ * Optional caller-owned data directory, read only when PUCK_ISOLATED=1.
+ * Without it Puck makes a fresh one under the OS temp dir. Chromium writes
+ * into the profile until the process exits, so whoever wants a dir gone
+ * removes it after exit.
  */
 export const ISOLATED_DIR_ENV = 'PUCK_ISOLATED_DIR';
 /** The Chromium switch that swaps the OS keychain for its mock. */
@@ -44,8 +45,8 @@ export function applyIsolatedLaunch(
   env: NodeJS.ProcessEnv = process.env,
   tmpdir: string = os.tmpdir(),
 ): IsolatedLaunch | null {
+  if (env[ISOLATED_ENV] !== '1') return null;
   const given = env[ISOLATED_DIR_ENV]?.trim();
-  if (env[ISOLATED_ENV] !== '1' && !given) return null;
   const dataDir = given ? path.resolve(given) : fs.mkdtempSync(path.join(tmpdir, 'puck-isolated-'));
   fs.mkdirSync(dataDir, { recursive: true });
   app.setPath('userData', dataDir);
