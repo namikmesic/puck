@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EnvLifecycleEvent, EnvStage } from '../../src/harness/bridge';
 import { useDockerRunner, type DockerOptions, type DockerResult } from '../../src/main/docker-client';
-import { expectedPackages, pinnedSpec } from '../../src/main/provisioning';
+import { expectedPackages, pinnedSpec } from '../../src/harness/provisioning';
 import { app } from '../mocks/electron';
 
 // Characterization of an environment start against a scripted Docker: the

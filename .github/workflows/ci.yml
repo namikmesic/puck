@@ -29,6 +29,25 @@ jobs:
           git diff --exit-code schema/ docs/examples/config-repo/puck.schema.json
       - name: Puck server bundle (Node built-ins only)
         run: npm run build:server
+      - name: Build the environment daemon
+        run: npm run build:daemon
+      - name: Environment daemon runs
+        run: node .webpack/daemon/puckd.js version
+
+  daemon-docker:
+    # The daemon's Docker suite needs a Docker engine; macOS runners have none.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Build the environment daemon
+        run: npm run build:daemon
+      - name: Docker suite (real containers, fake harness)
+        run: npm run test:docker
 
   package:
     runs-on: macos-latest

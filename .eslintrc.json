@@ -24,10 +24,67 @@
   "settings": {
     "import/core-modules": [
       "raw-runner",
+      "raw-daemon",
+      "raw-daemon-meta",
       "vitest/config"
     ]
   },
   "overrides": [
+    {
+      "files": [
+        "src/harness/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "electron",
+                "message": "src/harness is shared with the renderer and the daemon: no electron."
+              }
+            ],
+            "patterns": [
+              {
+                "group": [
+                  "node:*"
+                ],
+                "message": "src/harness is pure: no Node built-ins."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/daemon/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "electron",
+                "message": "The daemon runs in containers: no electron."
+              }
+            ],
+            "patterns": [
+              {
+                "group": [
+                  "**/main",
+                  "**/main/**",
+                  "**/renderer",
+                  "**/renderer/**"
+                ],
+                "message": "The daemon may import only src/harness and itself."
+              }
+            ]
+          }
+        ]
+      }
+    },
     {
       "files": [
         "src/server/**/*.ts"
@@ -51,6 +108,29 @@
                   "**/renderer/**"
                 ],
                 "message": "The Puck server runs outside the app; it may import only src/server, src/channel and src/harness."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/main/**/*.ts",
+        "src/renderer/**/*.ts",
+        "src/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/daemon",
+                  "**/daemon/**"
+                ],
+                "message": "The app talks to the daemon over its protocol; it never imports daemon code."
               }
             ]
           }

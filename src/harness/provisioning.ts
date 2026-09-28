@@ -9,7 +9,7 @@
  * image (a follow-up) would bake in.
  */
 
-import type { HarnessDescriptor, PinnedPackage } from '../harness/providers';
+import type { HarnessDescriptor, PinnedPackage } from './providers';
 
 /** Where the runner's SDKs live inside the container (`npm --prefix`). */
 export const SDK_PREFIX = '/opt/puck';

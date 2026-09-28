@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { HarnessProviderInfo, ProviderInfo } from '../../src/harness/bridge';
 import { harnessDescriptors } from '../../src/harness/providers';
@@ -117,7 +119,12 @@ describe('provider registry', () => {
     const clis = harnessDescriptors.flatMap((p) => p.packages.cli);
     const sdks = harnessDescriptors.flatMap((p) => p.packages.sdk);
     expect(clis.map((p) => p.name)).toEqual(['@anthropic-ai/claude-code', '@openai/codex']);
-    expect(sdks.map((p) => p.name)).toEqual(['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk']);
+    expect(sdks.map((p) => p.name)).toEqual([
+      '@anthropic-ai/claude-agent-sdk',
+      'zod',
+      '@modelcontextprotocol/sdk',
+      '@openai/codex-sdk',
+    ]);
     // Every container package is pinned to an exact version (no ranges):
     // provisioning verifies the installed version against it after install.
     for (const pkg of [...clis, ...sdks]) expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
@@ -127,5 +134,16 @@ describe('provider registry', () => {
       '/puck/home/.claude/.credentials.json',
       '/puck/home/.codex/auth.json',
     ]);
+  });
+
+  it('types the daemon against the exact SDK versions containers install', () => {
+    // The daemon imports the SDKs' types from devDependencies and loads the
+    // packages themselves from the container pins, so the two must agree.
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+      devDependencies: Record<string, string>;
+    };
+    for (const sdk of harnessDescriptors.flatMap((p) => p.packages.sdk)) {
+      expect([sdk.name, pkg.devDependencies[sdk.name]]).toEqual([sdk.name, sdk.version]);
+    }
   });
 });

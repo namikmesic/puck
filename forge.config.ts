@@ -6,7 +6,7 @@ import { WebpackPlugin } from '@electron-forge/plugin-webpack';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
-import { mainConfig } from './webpack.main.config';
+import { buildDaemon, mainConfig } from './webpack.main.config';
 import { rendererConfig } from './webpack.renderer.config';
 import { signingPlan } from './scripts/release.mjs';
 
@@ -33,6 +33,12 @@ const config: ForgeConfig = {
     ...signingOptions,
   },
   rebuildConfig: {},
+  hooks: {
+    // Build and check the environment daemon before anything else, so a
+    // broken daemon fails start, package and make up front. (Forge's webpack
+    // plugin then empties .webpack/; the main config rebuilds it in place.)
+    generateAssets: async () => buildDaemon(),
+  },
   // macOS-first: ship only what we actually build.
   makers: [new MakerZIP({}, ['darwin'])],
   plugins: [

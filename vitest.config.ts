@@ -14,5 +14,7 @@ export default defineConfig({
   },
   test: {
     include: ['test/unit/**/*.test.ts'],
+    // The Docker suite needs a Docker engine: npm run test:docker (vitest.docker.config.ts).
+    exclude: ['test/docker/**', 'node_modules/**'],
   },
 });

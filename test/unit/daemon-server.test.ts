@@ -1,0 +1,301 @@
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonEvent, DaemonFrame, Snapshot } from '../../src/harness/daemon-protocol';
+import { expectedPackages } from '../../src/harness/provisioning';
+import { harnessDescriptors } from '../../src/harness/providers';
+import { attach } from '../../src/daemon/attach';
+import { Daemon } from '../../src/daemon/daemon';
+import type { HarnessAdapter } from '../../src/daemon/harness/types';
+import { createLogger } from '../../src/daemon/log';
+import { defined, exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
+
+// The daemon end to end, in process: real socket, real stores and event
+// log under a temporary root; fake commands (no users, git or npm) and a
+// scripted harness.
+
+const ENV_ID = 'env_01J0000000000000000000000A';
+const installed = expectedPackages(harnessDescriptors)
+  .map((p) => `${p.name} ${p.version}`)
+  .join('\n');
+
+let root: ReturnType<typeof tempRoot>;
+let daemon: Daemon;
+let exit: ReturnType<typeof vi.fn>;
+let clients: net.Socket[];
+
+const echo: HarnessAdapter = {
+  id: 'claude-code',
+  run: async (req, ctx) => {
+    ctx.reportSession(req.resumeId ?? 'sess-1');
+    for (const word of ['Echo: ', req.prompt]) ctx.emit({ kind: 'text-delta', text: word });
+    ctx.emit({ kind: 'turn-end', stats: { inputTokens: 3, outputTokens: 4, durationMs: 1 } });
+  },
+};
+
+function deliver(files: Record<string, unknown>): void {
+  fs.mkdirSync(root.paths.inbox, { recursive: true });
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(root.paths.inbox, name), typeof body === 'string' ? body : JSON.stringify(body));
+  }
+}
+
+async function boot(): Promise<void> {
+  const { run } = fakeRunner((argv) => {
+    if (argv[0] === 'id' || argv[0] === 'getent') return { code: 1 };
+    if (argv[0] === 'sh' && argv[1] === '-lc' && argv[2].includes('echo "')) return { stdout: installed };
+    return undefined;
+  });
+  exit = vi.fn();
+  daemon = new Daemon({
+    paths: root.paths,
+    log: createLogger({ dir: root.paths.logs }),
+    identity: { daemonVersion: '0.0.1+test', protocolVersion: 1, build: 'b'.repeat(64) },
+    env: {},
+    privileged: false,
+    exit,
+    run,
+    adapters: { 'claude-code': echo, codex: { ...echo, id: 'codex' } },
+  });
+  await daemon.start();
+}
+
+/** A raw protocol client over the unix socket. */
+function client() {
+  const socket = net.connect(root.paths.socket);
+  clients.push(socket);
+  const frames: DaemonFrame[] = [];
+  const waiters: Array<() => void> = [];
+  let buf = '';
+  let closed = false;
+  socket.setEncoding('utf8');
+  socket.on('data', (d: string) => {
+    buf += d;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      frames.push(JSON.parse(buf.slice(0, nl)) as DaemonFrame);
+      buf = buf.slice(nl + 1);
+    }
+    waiters.splice(0).forEach((w) => w());
+  });
+  socket.on('close', () => {
+    closed = true;
+    waiters.splice(0).forEach((w) => w());
+  });
+  const send = (frame: unknown) => socket.write(JSON.stringify(frame) + '\n');
+  async function until<T extends DaemonFrame>(pred: (f: DaemonFrame) => f is T, timeoutMs = 3000): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = frames.find(pred);
+      if (hit) return hit;
+      if (closed || Date.now() > deadline) throw new Error(`no matching frame; got ${JSON.stringify(frames).slice(0, 800)}`);
+      await new Promise<void>((r) => {
+        waiters.push(r);
+        setTimeout(r, 50);
+      });
+    }
+  }
+  let n = 0;
+  async function cmd(op: string, args: unknown = {}) {
+    const id = `c${++n}`;
+    send({ t: 'cmd', id, op, args });
+    return until((f): f is Extract<DaemonFrame, { t: 'res' }> => f.t === 'res' && f.id === id);
+  }
+  const hello = (since: number | null, protocol = 1) => send({ t: 'hello', protocol, client: { app: 'test', build: 'x' }, since });
+  const events = () => frames.filter((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event');
+  return { socket, frames, send, until, cmd, hello, events, isClosed: () => closed };
+}
+
+const isWelcome = (f: DaemonFrame): f is Extract<DaemonFrame, { t: 'welcome' }> => f.t === 'welcome';
+
+beforeEach(() => {
+  root = tempRoot('pd-');
+  clients = [];
+});
+afterEach(async () => {
+  for (const c of clients) c.destroy();
+  await new Promise((r) => setTimeout(r, 10));
+  root.cleanup();
+});
+
+describe('puckd server (in process)', () => {
+  beforeEach(async () => {
+    deliver({
+      'instance.json': { envId: ENV_ID, name: 'Example', pin: { kind: 'tag', name: 'v1', sha: 'abc1234' }, definition: exampleDefinition() },
+      'github.json': { accessToken: 'ghu_abcdefghijk', refreshToken: 'ghr_abcdefghijk', expiresAt: 4102444800000, login: 'octo' },
+    });
+    await boot();
+  });
+
+  it('boots to ready, with a root-only socket and an orchestrator session', async () => {
+    expect(fs.statSync(root.paths.socket).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(root.paths.state).mode & 0o777).toBe(0o700);
+    const c = client();
+    c.hello(null);
+    const welcome = await c.until(isWelcome);
+    expect(welcome).toMatchObject({ protocol: 1, envId: ENV_ID, replay: 'resync', daemon: { version: '0.0.1+test' } });
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance).toMatchObject({ status: 'ready', pin: { name: 'v1' }, sha: 'abc1234' });
+    expect(snap.result.github).toEqual({ state: 'ok', login: 'octo' });
+    expect(snap.result.sessions).toHaveLength(1);
+    expect(snap.result.sessions[0]).toMatchObject({ kind: 'orchestrator', agent: 'lead', cwd: root.paths.workspace, status: 'idle' });
+    expect(snap.result.orchestratorSessionId).toBe(snap.result.sessions[0].id);
+    expect(snap.result.capacity).toEqual({
+      agents: { implementer: { running: 0, max: 2 }, reviewer: { running: 0, max: 1 } },
+      workers: { running: 0, max: 3 },
+      paused: false,
+    });
+    expect(snap.result.head).toBe(welcome.head);
+  });
+
+  it('streams a turn, persists it, and replays exactly the missed events after a reattach', async () => {
+    const a = client();
+    a.hello(0);
+    const welcome = await a.until(isWelcome);
+    expect(welcome.replay).toBe('events');
+    const sent = await a.cmd('chat.send', { text: 'hello there' });
+    expect(sent).toMatchObject({ ok: true, result: { queued: false } });
+    await a.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'turn.end');
+    const seen = a.events();
+    const seqs = seen.map((e) => e.seq);
+    expect(seqs).toEqual([...seqs].sort((x, y) => x - y));
+    const kinds = seen.map((e) => e.ev.kind).filter((k) => k.startsWith('turn.'));
+    expect(kinds).toEqual(['turn.user', 'turn.start', 'turn.event', 'turn.event', 'turn.end']);
+    const deltas = seen
+      .map((e) => e.ev)
+      .filter((ev): ev is Extract<DaemonEvent, { kind: 'turn.event' }> => ev.kind === 'turn.event' && ev.event.kind === 'text-delta');
+    expect(deltas.map((d) => (d.event as { text: string }).text).join('')).toBe('Echo: hello there');
+
+    // Reattach from the middle of the turn: only later events come back.
+    const turnStart = defined(seen.find((e) => e.ev.kind === 'turn.start'));
+    const b = client();
+    b.hello(turnStart.seq);
+    expect((await b.until(isWelcome)).replay).toBe('events');
+    await b.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'turn.end');
+    expect(b.events().map((e) => e.seq)).toEqual(seqs.filter((s) => s > turnStart.seq));
+
+    const sessionId = (turnStart.ev as { sessionId: string }).sessionId;
+    const history = await b.cmd('session.history', { sessionId });
+    expect(history).toMatchObject({ ok: true, result: { total: 2, hasMore: false } });
+    const entries = (history as { result: { entries: Array<{ kind: string }> } }).result.entries;
+    expect(entries.map((e) => e.kind)).toEqual(['user', 'turn']);
+    const file = JSON.parse(fs.readFileSync(path.join(root.paths.transcripts, `${sessionId}.json`), 'utf8'));
+    expect(file).toMatchObject({ v: 2, sessionId, turns: 1, lastTurnTokens: 7 });
+  });
+
+  it('answers pings, rejects bad commands by id, and keeps the connection', async () => {
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    c.send({ t: 'ping', at: 1 });
+    await c.until((f): f is Extract<DaemonFrame, { t: 'pong' }> => f.t === 'pong');
+    expect(await c.cmd('no.such.op')).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    expect(await c.cmd('chat.send', { text: '' })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    expect(await c.cmd('item.create', { title: 'Later' })).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
+    expect(await c.cmd('session.interrupt', { sessionId: 'ses_01J0000000000000000000000A' })).toMatchObject({
+      ok: false,
+      error: { code: 'not-found' },
+    });
+    expect(await c.cmd('logs.tail', { lines: 5 })).toMatchObject({ ok: true });
+    expect(c.isClosed()).toBe(false);
+  });
+
+  it('refuses an unsupported protocol and a first frame that is not hello', async () => {
+    const a = client();
+    a.hello(null, 99);
+    const err = await a.until((f): f is Extract<DaemonFrame, { t: 'error' }> => f.t === 'error');
+    expect(err.code).toBe('protocol-mismatch');
+    const b = client();
+    b.send({ t: 'ping', at: 1 });
+    expect((await b.until((f): f is Extract<DaemonFrame, { t: 'error' }> => f.t === 'error')).code).toBe('bad-frame');
+  });
+
+  it('takes credentials and secrets from the app and hands harness files back', async () => {
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('secrets.put', { values: { NPM_TOKEN: 'x' } })).toMatchObject({ ok: true });
+    expect(await c.cmd('secrets.put', { values: { PUCK_X: 'x' } })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    // Only a device-flow token pair is accepted; a bare personal token is not.
+    expect(await c.cmd('github.put', { token: 'ghp_abcdefghij' })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    const pair = { accessToken: 'ghu_rotatedtoken', refreshToken: 'ghr_rotatedtoken', expiresAt: 4102444800000, login: 'octo' };
+    expect(await c.cmd('github.put', { token: pair })).toMatchObject({ ok: true });
+    await c.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'github.auth');
+    expect(await c.cmd('credentials.put', { harness: [{ id: 'claude-code', content: 'nope' }] })).toMatchObject({
+      ok: false,
+      error: { code: 'invalid-args' },
+    });
+  });
+
+  it('attach pipes a client through to the socket', async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    let out = '';
+    stdout.on('data', (d: Buffer) => (out += d.toString()));
+    const done = attach(root.paths.socket, stdin, stdout);
+    stdin.write(JSON.stringify({ t: 'hello', protocol: 1, client: { app: 't', build: 'x' }, since: null }) + '\n');
+    for (let i = 0; i < 50 && !out.includes('welcome'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(out).toContain('"t":"welcome"');
+    stdin.end();
+    expect(await done).toBe(0);
+  });
+
+  it('upgrades: persists, swaps in the staged bundle, and exits 75', async () => {
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    for (let i = 0; i < 50 && !exit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(exit).toHaveBeenCalledWith(75);
+    expect(fs.readFileSync(root.paths.bundle, 'utf8')).toBe('// new daemon');
+    expect(fs.existsSync(root.paths.nextBundle)).toBe(false);
+    expect(c.events().some((e) => e.ev.kind === 'daemon.upgrading')).toBe(true);
+  });
+
+  it('a failed upgrade keeps the daemon running and taking input', async () => {
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    fs.mkdirSync(root.paths.opt, { recursive: true });
+    fs.writeFileSync(root.paths.nextBundle, '// new daemon');
+    // A non-empty directory where the bundle goes makes the swap fail.
+    fs.mkdirSync(path.join(root.paths.bundle, 'blocker'), { recursive: true });
+    expect(await c.cmd('daemon.upgrade', { mode: 'now' })).toMatchObject({ ok: true });
+    await c.until(
+      (f): f is Extract<DaemonFrame, { t: 'event' }> =>
+        f.t === 'event' && f.ev.kind === 'instance.status' && f.ev.status === 'ready',
+    );
+    expect(exit).not.toHaveBeenCalled();
+    expect(await c.cmd('chat.send', { text: 'still here' })).toMatchObject({ ok: true });
+  });
+});
+
+describe('puckd without a usable state', () => {
+  it('fails without a definition but still answers snapshots and logs', async () => {
+    await boot();
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance).toMatchObject({ status: 'failed', error: expect.stringMatching(/No environment definition/) });
+    expect(await c.cmd('chat.send', { text: 'hi' })).toMatchObject({ ok: false, error: { code: 'not-ready' } });
+    const logs = (await c.cmd('logs.tail', { lines: 50 })) as { ok: true; result: { text: string } };
+    expect(logs.result.text).toContain('daemon.failed');
+  });
+
+  it('fails on state from a newer daemon without touching it', async () => {
+    fs.mkdirSync(root.paths.state, { recursive: true });
+    fs.writeFileSync(path.join(root.paths.state, 'meta.json'), JSON.stringify({ formatVersion: 99, daemonVersion: 'x', createdAt: 1 }));
+    await boot();
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    const snap = (await c.cmd('snapshot.get')) as { ok: true; result: Snapshot };
+    expect(snap.result.instance).toMatchObject({ status: 'failed', error: expect.stringMatching(/newer daemon/) });
+  });
+});

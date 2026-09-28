@@ -15,9 +15,9 @@ describe('container runner source', () => {
       expect(source, `runner.js PROVIDERS lacks '${p.id}'`).toMatch(
         new RegExp(`['"]?${p.id}['"]?:\\s*\\{`),
       );
-      for (const pkg of p.packages.sdk) {
-        expect(source, `runner.js does not import ${pkg.name}`).toContain(pkg.name);
-      }
+      // The first SDK package is the harness SDK; the rest are its pinned peers.
+      const [sdk] = p.packages.sdk;
+      expect(source, `runner.js does not import ${sdk.name}`).toContain(sdk.name);
     }
   });
 
