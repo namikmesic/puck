@@ -15,6 +15,7 @@
  */
 
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { RUNNER_LIMITS, type ControlEvent, type ControlRunnerFrame } from '../harness/runner-protocol';
 import { welcomeFrame, type Control } from './control';
 import { attachArgs } from './daemon-link';
@@ -38,6 +39,7 @@ export interface Endpoint {
 }
 
 export function controlEndpoint(opts: { control: Control; runnerId: string; version: string; sink: Sink; log: Logger }): Endpoint {
+  const decoder = new StringDecoder('utf8');
   let buf = '';
   let closed = false;
   const write = (frame: ControlRunnerFrame): void => {
@@ -52,7 +54,7 @@ export function controlEndpoint(opts: { control: Control; runnerId: string; vers
   };
   return {
     data(chunk, done) {
-      buf += chunk.toString('utf8');
+      buf += decoder.write(chunk);
       done();
       if (buf.length > RUNNER_LIMITS.maxFrameBytes * 2) {
         end('frame-too-large');

@@ -17,6 +17,8 @@
  * protocol and the daemon protocol use.
  */
 
+import { StringDecoder } from 'node:string_decoder';
+
 export interface ByteChannel {
   /** Queues bytes; false means wait for `onDrain` before writing more. */
   write(data: Uint8Array): boolean;
@@ -129,9 +131,10 @@ export abstract class BaseChannel implements ByteChannel {
  * than `maxBytes` closes the channel with `frame-too-large`.
  */
 export function lines(channel: ByteChannel, maxBytes: number, onLine: (line: string) => void): { send(frame: unknown): boolean } {
+  const decoder = new StringDecoder('utf8');
   let buf = '';
   channel.onData((chunk, done) => {
-    buf += chunk.toString('utf8');
+    buf += decoder.write(chunk);
     done();
     let nl: number;
     while ((nl = buf.indexOf('\n')) >= 0) {

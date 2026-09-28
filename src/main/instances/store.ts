@@ -8,8 +8,10 @@
  *   stream; the quit drain flushes it.
  * - `pin`: the definition pin, for rebuilds, and `harnesses`, whose
  *   credential files the app keeps in sync.
- * - `pendingCredentialRemoval`: harnesses the user signed out of while
- *   this environment was not attached; removed on its next attach.
+ * - `pendingCredentialRemoval`: harnesses signed out whose credential file
+ *   must still leave this environment. Recorded before a live delete and
+ *   dropped when that delete succeeds; whatever remains is removed on the
+ *   next attach.
  * - `currentId`: the environment the window shows.
  *
  * Migrate, don't break: every field defaults at load.

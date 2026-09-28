@@ -9,6 +9,14 @@ import * as fs from 'node:fs';
 
 const logFile = process.env.FAKE_DAEMON_LOG;
 const envId = process.env.FAKE_DAEMON_ENV ?? 'env_01J8Z3X0000000000000000000';
+const nap = new Int32Array(new SharedArrayBuffer(4));
+function waitForFile(file) {
+  const deadline = Date.now() + 15_000;
+  while (!fs.existsSync(file)) {
+    if (Date.now() > deadline) return;
+    Atomics.wait(nap, 0, 0, 20);
+  }
+}
 const read = () => {
   try {
     return JSON.parse(fs.readFileSync(logFile, 'utf8'));
@@ -79,13 +87,22 @@ function handle(f) {
     }
     case 'credentials.get':
       return ok({ harness: state.credentials });
-    case 'credentials.put':
+    case 'credentials.put': {
+      const removing = f.args.harness.some((h) => h.content === null);
+      if (removing && process.env.FAKE_DAEMON_HOLD_NULL_PUT) {
+        fs.writeFileSync(`${process.env.FAKE_DAEMON_HOLD_NULL_PUT}.waiting`, '');
+        waitForFile(`${process.env.FAKE_DAEMON_HOLD_NULL_PUT}.go`);
+      }
+      if (removing && process.env.FAKE_DAEMON_FAIL_NULL_PUT) {
+        return out({ t: 'res', id: f.id, ok: false, error: { code: 'unavailable', message: 'refused' } });
+      }
       for (const h of f.args.harness) {
         state.credentials = state.credentials.filter((c) => c.id !== h.id);
         if (h.content !== null) state.credentials.push(h);
       }
       save(state);
       return ok({});
+    }
     default:
       return out({ t: 'res', id: f.id, ok: false, error: { code: 'invalid-args', message: `fake daemon: ${f.op}` } });
   }

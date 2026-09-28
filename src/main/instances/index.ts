@@ -177,22 +177,22 @@ export async function onHarnessLogin(): Promise<void> {
  */
 export async function onHarnessLogout(harnessId: string): Promise<void> {
   const client = attached;
-  for (const id of new Set([...Object.keys(store.allCursors()), ...runners.serverInstances().map((i) => i.id)])) {
-    if (client && id === client.envId && client.attachState === 'attached') continue;
+  const live = client !== null && client.attachState === 'attached' ? client : null;
+  const ids = new Set([...Object.keys(store.allCursors()), ...runners.serverInstances().map((i) => i.id)]);
+  if (live) ids.add(live.envId);
+  for (const id of ids) {
     const c = store.cursor(id);
     if (!c?.pendingCredentialRemoval.includes(harnessId)) {
       store.updateCursor(id, { pendingCredentialRemoval: [...(c?.pendingCredentialRemoval ?? []), harnessId] });
     }
   }
-  if (client && client.attachState === 'attached') {
-    try {
-      await client.cmd('credentials.put', { harness: [{ id: harnessId, content: null }] });
-    } catch (err) {
-      // It goes on the next attach instead.
-      const c = store.cursor(client.envId);
-      store.updateCursor(client.envId, { pendingCredentialRemoval: [...new Set([...(c?.pendingCredentialRemoval ?? []), harnessId])] });
-      log.warn('instance.credentials-remove-failed', { envId: client.envId, error: (err as Error).message.slice(0, 200) });
-    }
+  if (!live) return;
+  try {
+    await live.cmd('credentials.put', { harness: [{ id: harnessId, content: null }] });
+    const c = store.cursor(live.envId);
+    store.updateCursor(live.envId, { pendingCredentialRemoval: (c?.pendingCredentialRemoval ?? []).filter((id) => id !== harnessId) });
+  } catch (err) {
+    log.warn('instance.credentials-remove-failed', { envId: live.envId, error: (err as Error).message.slice(0, 200) });
   }
 }
 

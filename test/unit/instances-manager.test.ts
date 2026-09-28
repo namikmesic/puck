@@ -44,7 +44,7 @@ const until = async (what: string, ok: () => boolean, ms = 10_000): Promise<void
   }
 };
 
-async function thisMacRunner(socket: string): Promise<void> {
+async function thisMacRunner(socket: string, extraEnv: Record<string, string> = {}): Promise<void> {
   const docker = async (args: string[]): Promise<DockerResult> =>
     args[0] === 'container' ? { code: 0, stdout: 'running\n', stderr: '' } : { code: 0, stdout: '', stderr: '' };
   listener = new LocalListener({
@@ -62,7 +62,10 @@ async function thisMacRunner(socket: string): Promise<void> {
       maxEnvironments: () => null,
     }),
     spawner: () =>
-      spawn(process.execPath, [FAKE_DAEMON], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FAKE_DAEMON_LOG: path.join(dir, 'daemon.json'), FAKE_DAEMON_ENV: ENV } }),
+      spawn(process.execPath, [FAKE_DAEMON], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, FAKE_DAEMON_LOG: path.join(dir, 'daemon.json'), FAKE_DAEMON_ENV: ENV, ...extraEnv },
+      }),
     instanceState: async () => 'running',
     log: nullLogger,
   });
@@ -141,6 +144,84 @@ describe('environment manager', { timeout: 30_000 }, () => {
     expect(Math.min(...seqs)).toBe(lastSeen + 1);
     expect(reopened.events.find((e) => 'ev' in e && e.ev.kind === 'turn.user')).toMatchObject({ ev: { entry: { text: 'while away' } } });
     reopened.instances.shutdown();
+  });
+
+  it('records a signed-out harness before the live delete and clears it only after success', async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-mgr-'));
+    const hold = path.join(dir, 'hold');
+    const socket = path.join(dir, 's.sock');
+    const detached = 'env_01J8Z3X0000000000000000001';
+    fs.writeFileSync(path.join(dir, 'daemon.json'), JSON.stringify({ events: [], credentials: [{ id: 'claude-code', content: '{"token":"s3cret"}' }] }));
+    await thisMacRunner(socket, { FAKE_DAEMON_HOLD_NULL_PUT: hold });
+
+    const app = await launch();
+    app.store.setLocalRunner({ runnerId: RUNNER, dir, socket });
+    app.runners.onPush({
+      type: 'instance.upsert',
+      instance: { id: ENV, runnerId: RUNNER, definition: 'example', status: 'active', createdAt: 1, updatedAt: 1, repos: [] },
+    });
+    await app.instances.open(ENV);
+    await until('attached', () => app.instances.list()[0]?.attach === 'attached');
+    const cursors = await import('../../src/main/instances/store');
+    cursors.updateCursor(ENV, { pendingCredentialRemoval: ['codex'] });
+    cursors.updateCursor(detached, {});
+
+    const removal = app.instances.onHarnessLogout('claude-code');
+    try {
+      await until('removal held', () => fs.existsSync(`${hold}.waiting`));
+      const { flushWrites } = await import('../../src/main/jsonstore');
+      await flushWrites();
+      const mid = JSON.parse(fs.readFileSync(path.join(app.data, 'puck-instances.json'), 'utf8')) as {
+        instances: Record<string, { pendingCredentialRemoval: string[] }>;
+      };
+      expect(mid.instances[ENV].pendingCredentialRemoval).toEqual(['codex', 'claude-code']);
+      expect(mid.instances[detached].pendingCredentialRemoval).toEqual(['claude-code']);
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'daemon.json'), 'utf8')).credentials).toEqual([{ id: 'claude-code', content: '{"token":"s3cret"}' }]);
+
+      fs.writeFileSync(`${hold}.go`, '');
+      await removal;
+      await flushWrites();
+      const after = JSON.parse(fs.readFileSync(path.join(app.data, 'puck-instances.json'), 'utf8')) as {
+        instances: Record<string, { pendingCredentialRemoval: string[] }>;
+      };
+      expect(after.instances[ENV].pendingCredentialRemoval).toEqual(['codex']);
+      expect(after.instances[detached].pendingCredentialRemoval).toEqual(['claude-code']);
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'daemon.json'), 'utf8')).credentials).toEqual([]);
+    } finally {
+      fs.writeFileSync(`${hold}.go`, '');
+      await removal.catch(() => undefined);
+      app.instances.shutdown();
+    }
+  });
+
+  it('keeps the signed-out harness pending when the live delete fails', async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-mgr-'));
+    const socket = path.join(dir, 's.sock');
+    const detached = 'env_01J8Z3X0000000000000000001';
+    fs.writeFileSync(path.join(dir, 'daemon.json'), JSON.stringify({ events: [], credentials: [{ id: 'claude-code', content: '{"token":"s3cret"}' }] }));
+    await thisMacRunner(socket, { FAKE_DAEMON_FAIL_NULL_PUT: '1' });
+
+    const app = await launch();
+    app.store.setLocalRunner({ runnerId: RUNNER, dir, socket });
+    app.runners.onPush({
+      type: 'instance.upsert',
+      instance: { id: ENV, runnerId: RUNNER, definition: 'example', status: 'active', createdAt: 1, updatedAt: 1, repos: [] },
+    });
+    await app.instances.open(ENV);
+    await until('attached', () => app.instances.list()[0]?.attach === 'attached');
+    const cursors = await import('../../src/main/instances/store');
+    cursors.updateCursor(detached, {});
+
+    await app.instances.onHarnessLogout('claude-code');
+    const { flushWrites } = await import('../../src/main/jsonstore');
+    await flushWrites();
+    const saved = JSON.parse(fs.readFileSync(path.join(app.data, 'puck-instances.json'), 'utf8')) as {
+      instances: Record<string, { pendingCredentialRemoval: string[] }>;
+    };
+    expect(saved.instances[ENV].pendingCredentialRemoval).toEqual(['claude-code']);
+    expect(saved.instances[detached].pendingCredentialRemoval).toEqual(['claude-code']);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'daemon.json'), 'utf8')).credentials).toEqual([{ id: 'claude-code', content: '{"token":"s3cret"}' }]);
+    app.instances.shutdown();
   });
 });
 
