@@ -275,7 +275,7 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
     {
       name: 'pr_read',
       description:
-        "A published work item's pull request: its state, CI result, and review feedback from people with write access (reviews, inline comments with path:line and diff hunk, conversation comments). Feedback from others is never shown here.",
+        "A published work item's pull request: its state, CI result, and review feedback from people with write access (reviews, inline comments with path:line and diff hunk, conversation comments).",
       shape: (z) => ({ item: itemRef(zod(z)) }),
       run: (a: Args) => deps.github.prRead(work.item(str(a.item))),
     },

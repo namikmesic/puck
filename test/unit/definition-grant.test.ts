@@ -6,6 +6,8 @@ import type { DaemonFrame, Snapshot } from '../../src/harness/daemon-protocol';
 import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
 import { Daemon } from '../../src/daemon/daemon';
+import { syncGrantPolicies } from '../../src/daemon/grant-sync';
+import type { GitHubTokenPolicies } from '../../src/harness/github-permissions';
 import type { HarnessAdapter } from '../../src/daemon/harness/types';
 import { createLogger } from '../../src/daemon/log';
 import { exampleDefinition, tempRoot } from './daemon-fakes';
@@ -132,7 +134,7 @@ describe('definition.apply governs the next mint', () => {
       if (!res?.ok) throw new Error(`${op}: ${res?.error.code}: ${res?.error.message}`);
       return res.result as T;
     }
-    return { cmd };
+    return { cmd, send, frames };
   }
 
   async function mint(): Promise<Record<string, string>> {
@@ -197,5 +199,119 @@ describe('definition.apply governs the next mint', () => {
     expect(after).not.toHaveProperty('workflows');
     expect(after.issues).toBe(before.issues);
     expect(await permissionAudits()).toHaveLength(0);
+    expect(await c.cmd('definition.apply', { definition: definition({ reviews: 'address' }), pin: pin('aaa7777') })).toEqual({ classes: ['hot'] });
+    expect((await c.cmd<Snapshot>('snapshot.get')).instance.sha).toBe('aaa7777');
+  });
+
+  it('applies the definition when permissions commit and the policies response then fails', async () => {
+    await setup(true);
+    const original = h.server.ctx.audit.bind(h.server.ctx);
+    h.server.ctx.audit = async (kind, fields) => {
+      if (kind === 'grant.permissions') throw new Error('audit failed');
+      return original(kind, fields);
+    };
+    const c = client();
+    expect(await c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') })).toEqual({ classes: ['hot'] });
+    expect((await c.cmd<Snapshot>('snapshot.get')).instance.sha).toBe('aaa1111');
+    expect(await mint()).toMatchObject({ workflows: 'write', issues: 'write' });
+  });
+
+  it('rejects a second definition.apply until the first has stored its definition', async () => {
+    await setup(true);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let writes = 0;
+    const orig = h.server.ctx.store.setPermissions.bind(h.server.ctx.store);
+    const spy = vi.spyOn(h.server.ctx.store, 'setPermissions').mockImplementation(async (envId, permissions, now) => {
+      writes += 1;
+      await gate;
+      return orig(envId, permissions, now);
+    });
+    try {
+      const c = client();
+      await vi.waitFor(() => expect(c.frames.some((f) => f.t === 'welcome')).toBe(true));
+      c.send({
+        t: 'cmd',
+        id: 'first',
+        op: 'definition.apply',
+        args: { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') },
+      });
+      await vi.waitFor(() => expect(writes).toBe(1));
+      c.send({
+        t: 'cmd',
+        id: 'second',
+        op: 'definition.apply',
+        args: { definition: definition({ allowWorkflowEdits: false }), pin: pin('bbb2222') },
+      });
+      await vi.waitFor(() => {
+        const second = c.frames.find((f) => f.t === 'res' && f.id === 'second');
+        expect(second).toMatchObject({ ok: false, error: { code: 'invalid-state' } });
+      });
+      expect(writes).toBe(1);
+      release();
+      await vi.waitFor(() => {
+        const first = c.frames.find((f) => f.t === 'res' && f.id === 'first');
+        expect(first).toMatchObject({ ok: true, result: { classes: ['hot'] } });
+      });
+      expect((await c.cmd<Snapshot>('snapshot.get')).instance.sha).toBe('aaa1111');
+      expect(await mint()).toMatchObject({ workflows: 'write' });
+      expect(writes).toBe(1);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('syncGrantPolicies', () => {
+  const env = { PUCK_SERVER_URL: 'https://puck.test', PUCK_GRANT_TOKEN: 'PSA_testtoken' };
+  const policies: GitHubTokenPolicies = { intake: 'off', statusComment: true, ci: 'notify', allowWorkflowEdits: true };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function reply(status: number, read: () => Promise<ArrayBuffer> = async () => new ArrayBuffer(0)): Response {
+    return { status, ok: status >= 200 && status < 300, arrayBuffer: read } as Response;
+  }
+
+  it('treats HTTP 200 as success when the body cannot be read', async () => {
+    const fetchMock = vi.fn(async () => reply(200, async () => Promise.reject(new Error('dropped'))));
+    vi.stubGlobal('fetch', fetchMock);
+    await syncGrantPolicies(env, 'env_1', policies);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a transport failure once and then accepts HTTP 200', async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError('network')).mockResolvedValueOnce(reply(200));
+    vi.stubGlobal('fetch', fetchMock);
+    await syncGrantPolicies(env, 'env_1', policies);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://puck.test/v1/instances/env_1/policies');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'PUT' });
+  });
+
+  it('retries a response with no status once', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(reply(0)).mockResolvedValueOnce(reply(200));
+    vi.stubGlobal('fetch', fetchMock);
+    await syncGrantPolicies(env, 'env_1', policies);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses the apply when a transport failure repeats', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('network'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(syncGrantPolicies(env, 'env_1', policies)).rejects.toThrow(/could not be updated/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry an HTTP error', async () => {
+    const fetchMock = vi.fn(async () => reply(500));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(syncGrantPolicies(env, 'env_1', policies)).rejects.toThrow(/could not be updated/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

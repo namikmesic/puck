@@ -15,9 +15,9 @@
  *
  * An item from a GitHub issue links it in the pull request body:
  * `Closes owner/name#n` when the base is the repository's default branch,
- * since GitHub honors closing keywords only there; `Refs owner/name#n`
- * otherwise, saying why merging will not close the issue. Keywords never
- * go in commit messages.
+ * or when that branch cannot be determined. GitHub honors closing keywords
+ * only on the default branch, so a known other base uses `Refs` and says
+ * why merging will not close the issue. Keywords never go in commit messages.
  *
  * Publishing never changes the item's status. The token is the grant the
  * runner supplied for the repository's owner; the daemon never refreshes
@@ -64,14 +64,14 @@ export interface Published {
 
 /**
  * The issue link of an item's pull request body. `defaultBranch` is the
- * repository's default branch ('' when unknown, which never closes).
+ * repository's default branch, or '' when a lookup could not determine it.
  */
 export function issueLink(item: Pick<ItemRecord, 'source' | 'base'>, defaultBranch: string): string | null {
   const src = item.source;
   if (!src) return null;
   const ref = `${src.repo}#${src.number}`;
   const base = item.base?.branch ?? '';
-  if (base && base === defaultBranch) return `Closes ${ref}`;
+  if (!defaultBranch || (base !== '' && base === defaultBranch)) return `Closes ${ref}`;
   return `Refs ${ref}\n\nMerging this pull request will not close the issue: it targets \`${base || 'another branch'}\`, not the default branch.`;
 }
 
@@ -160,7 +160,13 @@ export class Publisher {
     });
     let link: string | null = null;
     if (item.source) {
-      const defaultBranch = (await client.repo(owner, name)).default_branch ?? '';
+      let defaultBranch = '';
+      try {
+        const reported = (await client.repo(owner, name)).default_branch;
+        defaultBranch = typeof reported === 'string' ? reported.trim() : '';
+      } catch (err) {
+        log.warn('publish.default-branch', { error: err instanceof Error ? err.name : 'unknown' });
+      }
       link = issueLink(item, defaultBranch);
     }
     const body = prBody(item, this.deps.envName(), req.body, link);

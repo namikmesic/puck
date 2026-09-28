@@ -231,15 +231,20 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const permissions = permissionsFor(policies);
     const now = ctx.clock.now();
     await ctx.store.setPermissions(instance.id, permissions, now);
-    const view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
-    await ctx.audit('grant.permissions', {
-      userId: user.id,
-      runnerId: instance.runnerId,
-      envId: instance.id,
-      detail: { permissions },
-    });
-    ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
-    return { body: { instance: view } };
+    try {
+      const view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
+      await ctx.audit('grant.permissions', {
+        userId: user.id,
+        runnerId: instance.runnerId,
+        envId: instance.id,
+        detail: { permissions },
+      });
+      ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
+      return { body: { instance: view } };
+    } catch (err) {
+      ctx.log.error('grant.permissions', { envId: instance.id, error: err instanceof Error ? err.name : 'unknown' });
+      return { body: {} };
+    }
   });
 
   router.add('DELETE', '/v1/instances/:envId', async (req) => {

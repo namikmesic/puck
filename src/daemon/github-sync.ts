@@ -1111,14 +1111,12 @@ export class GithubSync {
       if (bytes > LIMITS.toolBytes) break;
       shown.unshift(entry);
     }
-    const other = s.feedback.length - trustedFeedback.length;
     return {
       item: itemLabel(item),
       pr: { number: pr.number, url: pr.url, state: pr.state ?? s.prState ?? 'open', draft: pr.draft },
       checks: pr.checks ?? null,
       feedback: shown,
       ...(shown.length < trustedFeedback.length ? { omitted: trustedFeedback.length - shown.length } : {}),
-      ...(other ? { notShown: `${plural(other, 'comment')} from people without write access (shown to the user only)` } : {}),
       reviewRounds: `${s.reviewRounds} of ${MAX_REVIEW_ROUNDS}`,
     };
   }

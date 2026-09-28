@@ -961,12 +961,13 @@ describe('review feedback and the trust filter', () => {
     await sync.poll();
     expect(noticesOf('pr.review')).toHaveLength(c.reaches ? 1 : 0);
     expect(followUps).toHaveLength(c.reaches ? 1 : 0);
-    const read = sync.prRead(backlog.get(item.id) as ItemRecord) as { feedback: Json[]; notShown?: string };
+    const read = sync.prRead(backlog.get(item.id) as ItemRecord) as { feedback: Json[] };
     expect(read.feedback).toHaveLength(c.reaches ? 2 : 0);
+    expect(read).not.toHaveProperty('notShown');
     // Untrusted feedback never reaches an agent: not in notices, follow-ups or pr_read.
-    const agentsSee = JSON.stringify([notices, followUps, read.feedback]);
+    const agentsSee = JSON.stringify([notices, followUps, read]);
     expect(agentsSee.includes('Rename the helper.')).toBe(c.reaches);
-    if (!c.reaches && c.type !== 'Bot') expect(read.notShown).toMatch(/2 comments from people without write access/);
+    expect(agentsSee).not.toContain('without write access');
     if (c.reaches) {
       expect(noticesOf('pr.review')[0].text).toBe('W-1 PR #7: @dana requested changes (1 inline comment). Queued to the worker (review round 1 of 5).');
       expect(followUps[0].author).toBe('system');
@@ -1253,7 +1254,13 @@ describe('linking the pull request to its issue', () => {
       name: 'when the default branch is unknown',
       item: src,
       defaultBranch: '',
-      link: 'Refs octo/app#12\n\nMerging this pull request will not close the issue: it targets `main`, not the default branch.',
+      link: 'Closes octo/app#12',
+    },
+    {
+      name: 'when the default branch cannot be determined for another base',
+      item: { ...src, base: { branch: 'release', sha: SHA } },
+      defaultBranch: '',
+      link: 'Closes octo/app#12',
     },
     { name: 'an item not from an issue', item: { source: null, base: src.base }, defaultBranch: 'main', link: null },
   ])('$name', (c) => {

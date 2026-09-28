@@ -125,6 +125,8 @@ export class Daemon {
   private git!: Git;
   /** True while a reprovision is waiting or provisioning. */
   private reprovisioning = false;
+  /** True while definition.apply has not yet stored its definition or failed. */
+  private applyingDefinition = false;
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
   private exited = false;
@@ -363,45 +365,50 @@ export class Daemon {
    */
   private async applyDefinition(raw: unknown, pin: Pin): Promise<{ classes: string[] }> {
     if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');
-    if (this.reprovisioning) throw new OpError('invalid-state', 'An update is already being applied.');
-    const record = this.instance.get();
-    const prev = this.definition;
-    if (!record || !prev) throw new OpError('not-ready', 'The environment is still starting.');
-    const parsed = readDefinition(raw);
-    if (!parsed.ok) throw new OpError('invalid-args', `The definition is invalid: ${parsed.error}`);
-    const next = parsed.value;
-    if (next.name !== prev.name) throw new OpError('invalid-args', `This environment runs "${prev.name}", not "${next.name}".`);
-    const changes = definitionChanges(record.definition, prev, raw, next);
-    const classes = changeClasses(changes);
-    if (classes.includes('rebuild')) {
-      const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
-      throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+    if (this.reprovisioning || this.applyingDefinition) throw new OpError('invalid-state', 'An update is already being applied.');
+    this.applyingDefinition = true;
+    try {
+      const record = this.instance.get();
+      const prev = this.definition;
+      if (!record || !prev) throw new OpError('not-ready', 'The environment is still starting.');
+      const parsed = readDefinition(raw);
+      if (!parsed.ok) throw new OpError('invalid-args', `The definition is invalid: ${parsed.error}`);
+      const next = parsed.value;
+      if (next.name !== prev.name) throw new OpError('invalid-args', `This environment runs "${prev.name}", not "${next.name}".`);
+      const changes = definitionChanges(record.definition, prev, raw, next);
+      const classes = changeClasses(changes);
+      if (classes.includes('rebuild')) {
+        const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
+        throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+      }
+      const prevPolicies = tokenPoliciesFrom(prev.policies.github);
+      const nextPolicies = tokenPoliciesFrom(next.policies.github);
+      if (!sameTokenPermissions(prevPolicies, nextPolicies)) {
+        await syncGrantPolicies(this.opts.env, record.envId, nextPolicies);
+      }
+      this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
+      this.definition = next;
+      this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
+      this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
+      if (changes.length) {
+        const shown = changes.slice(0, 8).map((c) => c.summary);
+        const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
+        this.orchestrator.push(
+          'definition.applied',
+          `The environment definition was updated to ${pin.name} (${pin.sha.slice(0, 7)}): ${shown.join('; ')}${more}.`,
+        );
+      }
+      this.ensureOrchestrator(next);
+      this.emitCapacity();
+      this.scheduler.request();
+      if (classes.includes('reprovision')) {
+        this.reprovisioning = true;
+        void this.reprovision();
+      }
+      return { classes };
+    } finally {
+      this.applyingDefinition = false;
     }
-    const prevPolicies = tokenPoliciesFrom(prev.policies.github);
-    const nextPolicies = tokenPoliciesFrom(next.policies.github);
-    if (!sameTokenPermissions(prevPolicies, nextPolicies)) {
-      await syncGrantPolicies(this.opts.env, record.envId, nextPolicies);
-    }
-    this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
-    this.definition = next;
-    this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
-    this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
-    if (changes.length) {
-      const shown = changes.slice(0, 8).map((c) => c.summary);
-      const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
-      this.orchestrator.push(
-        'definition.applied',
-        `The environment definition was updated to ${pin.name} (${pin.sha.slice(0, 7)}): ${shown.join('; ')}${more}.`,
-      );
-    }
-    this.ensureOrchestrator(next);
-    this.emitCapacity();
-    this.scheduler.request();
-    if (classes.includes('reprovision')) {
-      this.reprovisioning = true;
-      void this.reprovision();
-    }
-    return { classes };
   }
 
   private async reprovision(): Promise<void> {
