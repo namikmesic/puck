@@ -6,6 +6,7 @@ Versions follow `MAJOR.MINOR.PATCH`, and every release is tagged `v<version>` on
 
 ## Unreleased
 
+- `npm run start:isolated` (`PUCK_ISOLATED=1`, optionally `PUCK_ISOLATED_DIR`) launches Puck for tests and checks with its data in a throwaway folder, Electron's mock keychain, and a window that does not take focus; `npm run test:e2e` now runs this way and never touches the real data folder or Keychain.
 - The Puck server (`src/server/`), not yet used by the app: GitHub web-flow sign-in with PKCE and rotating sessions, custody of users' GitHub tokens, runner registration with one-hour tokens and signed key assertions, runner status, an environment index whose repository grants are checked against the owner's push access, installation tokens scoped per environment, an end-to-end encrypted relay with flow control, runner downloads, and an audit log; it ships as the `puck-server` image and runs locally with `docker compose up`.
 - GitHub sign-in works through the registered "Puck Agents" GitHub App: a default build offers device-flow sign-in and links to <https://github.com/apps/puck-agents/installations/new>; `PUCK_GITHUB_CLIENT_ID` and `PUCK_GITHUB_APP_SLUG` still point a development build at a test app.
 - Providers come in three kinds with one registry: harnesses (Claude Code, Codex), environments (Local Docker, Docker over SSH with a health check that names the SSH problem), and GitHub, signed in through the device flow, with its config repo chosen in **Settings → Providers**; host CLI login files and host environment variables no longer reach containers.

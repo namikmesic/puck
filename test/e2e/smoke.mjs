@@ -1,17 +1,32 @@
 /**
- * Boot smoke test: launches the real app with a debug port, attaches over
- * CDP, and asserts the chat shell renders with a working preload bridge and
- * zero page errors. Needs a desktop session (run locally: npm run test:e2e).
+ * Boot smoke test: launches the real app isolated (`npm run start:isolated`:
+ * a throwaway data dir, the mock keychain, no focus steal) with a debug port,
+ * attaches over CDP, and asserts the chat shell renders with a working
+ * preload bridge and zero page errors. It never reads or writes the real user
+ * data folder or keychain. Needs a desktop session (run locally: npm run test:e2e).
  */
 
 import { spawn, execSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import { createServer } from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 
-const PORT = 9223;
-const app = spawn('npm', ['start', '--', '--', `--remote-debugging-port=${PORT}`], {
+// A free port, so the test never attaches to another Puck's debug port.
+const PORT = await new Promise((resolve, reject) => {
+  const srv = createServer().once('error', reject);
+  srv.listen(0, '127.0.0.1', () => {
+    const { port } = srv.address();
+    srv.close(() => resolve(port));
+  });
+});
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-smoke-'));
+const app = spawn('npm', ['run', 'start:isolated', '--', '--', `--remote-debugging-port=${PORT}`], {
   stdio: 'ignore',
   detached: true,
+  env: { ...process.env, PUCK_ISOLATED: '1', PUCK_ISOLATED_DIR: dataDir },
 });
 
 const kill = () => {
@@ -21,9 +36,19 @@ const kill = () => {
     /* already gone */
   }
   try {
-    execSync('pkill -f "puck.*Electron" || true', { stdio: 'ignore' });
+    execSync(`pkill -f -- "--remote-debugging-port=${PORT}" || true`, { stdio: 'ignore' });
   } catch {
     /* none left */
+  }
+};
+
+/** Whether this run's Electron is still up (its quit drain writes to dataDir). */
+const running = () => {
+  try {
+    execSync(`pgrep -f -- "--remote-debugging-port=${PORT}"`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -53,6 +78,10 @@ try {
 
   const state = await page.evaluate(async () => ({
     bridge: !!window.puck,
+    dataDir: await window.puck
+      .supportInfo()
+      .then((s) => s.dataDir)
+      .catch(() => null),
     composer: !!document.getElementById('prompt'),
     roster: document.querySelectorAll('.recent.agent-row').length,
     // Round-trips a real IPC handler — catches unregistered-channel bugs.
@@ -82,8 +111,14 @@ try {
   if (!state.bridge) throw new Error('preload bridge missing');
   if (!state.composer) throw new Error('composer missing');
   if (!state.status) throw new Error('harness:status round-trip failed');
+  if (state.dataDir !== dataDir) {
+    throw new Error(`app data is not isolated: ${state.dataDir} (expected ${dataDir})`);
+  }
+  if (!fs.existsSync(path.join(dataDir, 'logs', 'puck.log'))) throw new Error('no diagnostic log in the isolated data dir');
   if (errors.length) throw new Error(`page errors: ${errors.join(' | ')}`);
   console.log(`smoke OK — bridge + status up, settings modal and Providers section render, ${state.roster} agents listed`);
 } finally {
   kill();
+  for (let i = 0; i < 20 && running(); i++) await sleep(500);
+  fs.rmSync(dataDir, { recursive: true, force: true });
 }

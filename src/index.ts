@@ -34,6 +34,13 @@ import {
 } from './main/ipcguard';
 import { CHANNELS, ENV_EVENT_CHANNEL, EVENT_CHANNEL } from './harness/channels';
 import { dockerLocation } from './main/docker-client';
+import { applyIsolatedLaunch } from './main/isolation';
+
+// Tests and live checks launch isolated (PUCK_ISOLATED=1): data paths and the
+// keychain switch must be set before anything reads them. Imports run first,
+// which is safe because every module resolves userData lazily, per call.
+const isolated = applyIsolatedLaunch(app);
+if (isolated) console.log(`Puck isolated launch: data in ${isolated.dataDir}, mock keychain`);
 
 // A rejected fire-and-forget promise must never take the process down.
 // Both faults land in the diagnostic log (userData/logs, see main/log.ts).
@@ -84,6 +91,8 @@ const createWindow = (): void => {
     minWidth: 720,
     backgroundColor: '#FFFDF7',
     titleBarStyle: 'hiddenInset',
+    // An isolated launch must not take focus from the person at the desk.
+    show: !isolated,
     webPreferences: {
       preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
       contextIsolation: true,
@@ -108,6 +117,7 @@ const createWindow = (): void => {
     }
   });
 
+  if (isolated) mainWindow.once('ready-to-show', () => mainWindow.showInactive());
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
   log.info('window.created');
 };
@@ -260,6 +270,7 @@ app.on('ready', () => {
     packaged: app.isPackaged,
     electron: process.versions.electron,
     platform: `${process.platform}-${process.arch}`,
+    isolated: !!isolated,
   });
   // Packaged builds get a strict CSP; dev needs webpack's eval sourcemaps,
   // covered by the WebpackPlugin devContentSecurityPolicy instead.

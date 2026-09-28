@@ -10,6 +10,8 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-test-'));
 
 export const app = {
   getPath: (): string => userData,
+  setPath: (): void => undefined,
+  commandLine: { appendSwitch: (): void => undefined },
   getVersion: (): string => '0.0.0-test',
   getName: (): string => 'Puck',
   quit: (): void => undefined,
