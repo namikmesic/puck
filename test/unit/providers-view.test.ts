@@ -80,10 +80,12 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
     integrationCards: document.createElement('div'),
     msg: document.createElement('div'),
   } satisfies ProvidersElements;
+  const scrollIntoView = vi.fn();
+  els.msg.scrollIntoView = scrollIntoView;
   const copy = vi.fn(async () => undefined);
   const onProviders = vi.fn();
   const view = initProvidersView({ bridge, els, copy, onProviders, pollMs: 5 });
-  return { bridge, els, copy, onProviders, view };
+  return { bridge, els, copy, onProviders, view, scrollIntoView };
 }
 
 const card = (host: HTMLElement, id: string): HTMLElement =>
@@ -229,6 +231,20 @@ describe('GitHub card', () => {
     await settle();
     expect(githubSetPat).toHaveBeenCalledWith('github_pat_x');
     expect(input.value).toBe('');
+  });
+
+  it('a rejected token scrolls the section message into view', async () => {
+    const githubSetPat = vi.fn(async () => {
+      throw new Error('GitHub rejected this token.');
+    });
+    const { els, view, scrollIntoView } = mount([gh()], { githubSetPat });
+    await view.render();
+    const form = card(els.integrationCards, 'github').querySelector('form.pv-pat-form') as HTMLFormElement;
+    (form.querySelector('input') as HTMLInputElement).value = 'github_pat_bad';
+    form.dispatchEvent(new Event('submit', { cancelable: true }));
+    await settle();
+    expect(els.msg.textContent).toContain('GitHub rejected this token.');
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
 
   it('signed in: installations with Manage, install link, config repo picker and Open repo', async () => {

@@ -45,6 +45,12 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
   let poll: ReturnType<typeof setInterval> | null = null;
   let rendered = false;
 
+  /** The message line sits at the top of the section, above the card that failed. */
+  function say(text: string): void {
+    els.msg.textContent = text;
+    if (text) els.msg.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
   function stopPolling(): void {
     if (poll) clearInterval(poll);
     poll = null;
@@ -85,7 +91,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     btn.addEventListener('click', async () => {
       if (!bridge) return;
       btn.disabled = true;
-      els.msg.textContent = '';
+      say('');
       try {
         if (info.auth.connected) {
           stopPolling();
@@ -98,7 +104,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
           pollUntilSettled(info.id);
         }
       } catch (err) {
-        els.msg.textContent = errText(err);
+        say(errText(err));
       }
       await view.render();
     });
@@ -113,7 +119,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
       const token = grid.next();
       if (!given) for (const c of [els.harnessCards, els.envCards, els.integrationCards]) loadingInto(c);
       const infos = given ?? (await bridge.providers().catch((err: unknown) => {
-        els.msg.textContent = errText(err);
+        say(errText(err));
         return [] as ProviderInfo[];
       }));
       if (!grid.isCurrent(token)) return;
@@ -121,7 +127,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
       ctx.onProviders?.(infos);
       const shared = {
         bridge,
-        msg: els.msg,
+        say,
         copy: ctx.copy,
         onChange: (next?: ProviderInfo[]) => void view.render(next),
         onSignInStarted: (id: string) => pollUntilSettled(id),

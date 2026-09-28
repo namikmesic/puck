@@ -22,7 +22,8 @@ import { cardShell } from './cards';
 
 export interface GitHubCardContext {
   bridge: PuckBridge;
-  msg: HTMLElement;
+  /** Show text on the section's message line ('' clears it). */
+  say(text: string): void;
   /** Provider state changed: re-render the section (optionally with the new list). */
   onChange(infos?: ProviderInfo[]): void;
   /** A sign-in started: poll until it settles. */
@@ -50,7 +51,7 @@ function codeBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo, code: 
   const cancel = button('btn-ghost', 'Cancel');
   cancel.addEventListener('click', async () => {
     cancel.disabled = true;
-    await ctx.bridge.providerAuthCancel(info.id).catch((err: unknown) => (ctx.msg.textContent = errText(err)));
+    await ctx.bridge.providerAuthCancel(info.id).catch((err: unknown) => (ctx.say(errText(err))));
     ctx.onChange();
   });
   foot.append(open, cancel);
@@ -86,13 +87,13 @@ function patForm(ctx: GitHubCardContext, info: IntegrationProviderInfo, open: bo
     e.preventDefault();
     if (!input.value.trim()) return input.focus();
     save.disabled = true;
-    ctx.msg.textContent = '';
+    ctx.say('');
     try {
       const infos = await ctx.bridge.githubSetPat(input.value);
       input.value = '';
       ctx.onChange(infos);
     } catch (err) {
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
       save.disabled = false;
     }
   });
@@ -182,17 +183,17 @@ function configRepoBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo):
     })
     .catch((err: unknown) => {
       placeholder.textContent = current ?? 'Repositories unavailable';
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
     });
 
   select.addEventListener('change', async () => {
     if (!select.value || select.value === current) return;
     select.disabled = true;
-    ctx.msg.textContent = '';
+    ctx.say('');
     try {
       ctx.onChange(await ctx.bridge.githubSetConfigRepo(select.value));
     } catch (err) {
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
       select.disabled = false;
     }
   });
@@ -220,12 +221,12 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
     signIn.disabled = !github.appConfigured;
     signIn.addEventListener('click', async () => {
       signIn.disabled = true;
-      ctx.msg.textContent = '';
+      ctx.say('');
       try {
         await ctx.bridge.providerAuthStart(info.id);
         ctx.onSignInStarted(info.id);
       } catch (err) {
-        ctx.msg.textContent = errText(err);
+        ctx.say(errText(err));
       }
       ctx.onChange();
     });
@@ -246,11 +247,11 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
   const signOut = button('btn-ghost', 'Sign out');
   signOut.addEventListener('click', async () => {
     signOut.disabled = true;
-    ctx.msg.textContent = '';
+    ctx.say('');
     try {
       await ctx.bridge.providerAuthLogout(info.id);
     } catch (err) {
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
     }
     ctx.onChange();
   });

@@ -33,8 +33,8 @@ export const SSH_REQUIREMENTS = [
 
 export interface EnvProvidersContext {
   bridge: PuckBridge;
-  /** Where failures are shown (the section's message line). */
-  msg: HTMLElement;
+  /** Show text on the section's message line ('' clears it). */
+  say(text: string): void;
   /** The provider list changed (a host was added or removed): re-render with it. */
   onChange(infos: ProviderInfo[]): void;
   copy(text: string): Promise<void>;
@@ -102,7 +102,7 @@ function targetRow(
         lastHealth.delete(key);
         ctx.onChange(await ctx.bridge.sshHostRemove(target.id));
       } catch (err) {
-        ctx.msg.textContent = errText(err);
+        ctx.say(errText(err));
         remove.disabled = false;
       }
     });
@@ -130,11 +130,11 @@ function addHostForm(ctx: EnvProvidersContext): HTMLElement {
     e.preventDefault();
     if (!host.value.trim()) return host.focus();
     add.disabled = true;
-    ctx.msg.textContent = '';
+    ctx.say('');
     try {
       ctx.onChange(await ctx.bridge.sshHostAdd({ label: label.value.trim(), host: host.value.trim() }));
     } catch (err) {
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
       add.disabled = false;
     }
   });
@@ -156,7 +156,7 @@ function requirements(ctx: EnvProvidersContext): HTMLElement {
       copy.textContent = 'Copied ✓';
       setTimeout(() => (copy.textContent = 'Copy'), 1600);
     } catch (err) {
-      ctx.msg.textContent = errText(err);
+      ctx.say(errText(err));
     }
   });
   const foot = el('div', 'card-foot');
