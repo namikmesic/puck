@@ -108,7 +108,7 @@ export class Daemon {
     reportWriteErrors((file, err) => log.error('store.write', err, { file }));
 
     const migrated = migrateState(paths.state, { daemonVersion: this.opts.identity.daemonVersion, now: this.now() });
-    this.events = new EventLog(paths.events, { now: this.now });
+    this.events = new EventLog(paths.events, { now: this.now, log });
     this.credentials = new Credentials({
       paths,
       log,
@@ -236,7 +236,7 @@ export class Daemon {
   }
 
   private emit(ev: DaemonEvent): void {
-    this.events.append(ev);
+    if (!this.events.append(ev)) throw new Error('The event log could not record an event.');
   }
 
   /* ---------- Agents, env, notices ---------- */

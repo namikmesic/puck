@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '../../src/harness/daemon-protocol';
 import { EventLog } from '../../src/daemon/eventlog';
+import { nullLogger } from '../../src/daemon/log';
 import { defined } from './daemon-fakes';
 
 let dir: string;
@@ -88,6 +89,50 @@ describe('event log', () => {
       { kind: 'turn.end', sessionId: 'ses_A', turnId: 'trn_1', stats: { inputTokens: 0, outputTokens: 0, durationMs: 0 } },
       delta('other', undefined, 'ses_B'),
     ]);
+  });
+
+  it('a throwing listener does not escape, and the other listeners still see the event', () => {
+    const logged: string[] = [];
+    const log = new EventLog(dir, { log: { ...nullLogger, error: (message) => logged.push(message) } });
+    const seen: number[] = [];
+    log.subscribe(() => {
+      throw new Error('bad client');
+    });
+    log.subscribe((e) => seen.push(e.seq));
+    expect(() => log.append(status(1))).not.toThrow();
+    expect(log.append(status(2))).toBe(false);
+    expect(log.head()).toBe(2);
+    expect(seen).toEqual([1, 2]);
+    expect(defined(log.since(0)).map((e) => e.seq)).toEqual([1, 2]);
+    expect(logged).toEqual(['eventlog.write', 'eventlog.write']);
+  });
+
+  it('a failed write drops that event and the next append still lands', () => {
+    const log = new EventLog(dir);
+    fs.chmodSync(dir, 0o500);
+    try {
+      expect(() => log.append(status(1))).not.toThrow();
+      expect(log.head()).toBe(0);
+      expect(log.since(0)).toEqual([]);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+    expect(log.append(status(2))).toBe(true);
+    expect(log.head()).toBe(1);
+    expect(defined(log.since(0)).map((e) => e.ev)).toEqual([status(2)]);
+  });
+
+  it('a failed segment prune does not drop the new event', () => {
+    const log = new EventLog(dir, { segmentSize: 1, retention: 1 });
+    expect(log.append(status(1))).toBe(true);
+    expect(log.append(status(2))).toBe(true);
+    const stale = path.join(dir, '1.ndjson');
+    fs.rmSync(stale);
+    fs.mkdirSync(stale);
+    fs.writeFileSync(path.join(stale, 'blocked'), 'x');
+    expect(() => log.append(status(3))).not.toThrow();
+    expect(log.head()).toBe(3);
+    expect(defined(log.since(2)).map((e) => e.seq)).toEqual([3]);
   });
 
   it('a window closes after the coalescing interval', () => {

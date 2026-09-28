@@ -181,6 +181,14 @@ export class Turns {
     this.deps.emit({ kind: 'session.upsert', session: this.summary(session) });
   }
 
+  private emitSafe(ev: DaemonEvent): void {
+    try {
+      this.deps.emit(ev);
+    } catch (err) {
+      this.deps.log.error('turn.event-failed', err, { kind: ev.kind });
+    }
+  }
+
   /**
    * Boot reconciliation: a session whose turn was in flight when the daemon
    * stopped becomes `interrupted`, and its unfinished turn entry is closed
@@ -328,7 +336,7 @@ export class Turns {
     this.asks.delete(askId);
     const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
     if (entry && recordAskAnswer(entry, askId, answers)) this.deps.transcripts.saveSoon(ask.sessionId);
-    this.deps.emit({ kind: 'ask.closed', sessionId: ask.sessionId, askId, answers, by });
+    this.emitSafe({ kind: 'ask.closed', sessionId: ask.sessionId, askId, answers, by });
     ask.resolve(answers);
   }
 
@@ -373,7 +381,13 @@ export class Turns {
         this.active.delete(session.id);
         const next = this.queues.get(session.id);
         if (turn.started && next?.length && this.accepting && session.status !== 'closed') this.startTurn(session);
-        else this.upsert(session);
+        else {
+          try {
+            this.upsert(session);
+          } catch (err) {
+            this.deps.log.error('turn.event-failed', err, { sessionId: session.id });
+          }
+        }
       });
     return turnId;
   }
@@ -386,25 +400,27 @@ export class Turns {
     this.commitStarted(session, turn.turnId, inputs, at);
 
     const prompt = [...(notices.length ? [noticePrompt(notices)] : []), ...inputs.map((i) => i.text)].join('\n\n');
+    const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
+    const failStart = (err: unknown): void => {
+      this.abortUnhanded(session, inputs);
+      log.error('turn.start-failed', err, { sessionId: session.id });
+    };
     try {
       this.recordDurable(session, inputs, notices, at);
-      if (notices.length) this.deps.commitNotices(notices.length);
+      transcripts.append(session.id, record);
+      this.upsert(session);
+      emit({ kind: 'turn.start', sessionId: session.id, turnId: turn.turnId });
+      log.info('turn.start', {
+        sessionId: session.id,
+        turnId: turn.turnId,
+        agent: session.agent,
+        harness: session.harness,
+        resume: !!session.resumeId,
+      });
     } catch (err) {
-      this.abortUnhanded(session, inputs);
-      throw err;
+      failStart(err);
+      return;
     }
-    const record: TurnEntry = { kind: 'turn', turnId: turn.turnId, ts: at, events: [] };
-    transcripts.append(session.id, record);
-
-    this.upsert(session);
-    emit({ kind: 'turn.start', sessionId: session.id, turnId: turn.turnId });
-    log.info('turn.start', {
-      sessionId: session.id,
-      turnId: turn.turnId,
-      agent: session.agent,
-      harness: session.harness,
-      resume: !!session.resumeId,
-    });
 
     let ended = false;
     let thinking = false;
@@ -419,10 +435,9 @@ export class Turns {
       }
       const stamped: HarnessEvent = event.kind === 'thinking' ? event : { ...event, ts: now };
       if (recordEvent(record, event, now)) transcripts.saveSoon(session.id);
-      emit({ kind: 'turn.event', sessionId: session.id, turnId: turn.turnId, event: stamped });
+      this.emitSafe({ kind: 'turn.event', sessionId: session.id, turnId: turn.turnId, event: stamped });
     };
 
-    let startFailed = false;
     try {
       const agent = this.deps.agentFor(session);
       const adapter = this.deps.adapters[session.harness];
@@ -503,13 +518,8 @@ export class Turns {
           signal: aborter.signal,
         };
         if (i === 0) {
-          try {
-            this.markHandedOff(session);
-          } catch (err) {
-            startFailed = true;
-            this.abortUnhanded(session, inputs);
-            throw err;
-          }
+          this.markHandedOff(session);
+          if (notices.length) this.deps.commitNotices(notices.length);
           turn.started = true;
         }
         try {
@@ -520,9 +530,10 @@ export class Turns {
         if (!stale) break;
       }
     } catch (err) {
-      if (startFailed) throw err;
-      forward({ kind: 'error', message: errText(err) });
+      if (!turn.started) failStart(err);
+      else forward({ kind: 'error', message: errText(err) });
     } finally {
+      if (!turn.started) return;
       this.cancelAsks(session.id);
       if (!ended) {
         if (thinking) forward({ kind: 'thinking', active: false });
@@ -544,7 +555,7 @@ export class Turns {
       } catch (err) {
         log.error('turn.end-failed', err, { sessionId: session.id });
       }
-      emit({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
+      this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
       log.info('turn.end', {
         sessionId: session.id,
         turnId: turn.turnId,
@@ -654,7 +665,7 @@ export class Turns {
     return new Promise((resolve) => {
       this.asks.set(askId, { sessionId: session.id, turnId: turn.turnId, questions, resolve });
       forward({ kind: 'ask', askId, questions });
-      this.deps.emit({ kind: 'ask.routed', sessionId: session.id, askId, to: 'user' });
+      this.emitSafe({ kind: 'ask.routed', sessionId: session.id, askId, to: 'user' });
     });
   }
 }

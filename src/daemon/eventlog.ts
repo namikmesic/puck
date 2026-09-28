@@ -17,6 +17,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EVENT_LOG, type DaemonEvent } from '../harness/daemon-protocol';
+import { nullLogger, type Logger } from './log';
 
 export interface LoggedEvent {
   seq: number;
@@ -29,6 +30,7 @@ export interface EventLogOptions {
   retention?: number;
   coalesceMs?: number;
   now?: () => number;
+  log?: Logger;
 }
 
 interface Segment {
@@ -72,6 +74,7 @@ export class EventLog {
   private readonly retention: number;
   private readonly coalesceMs: number;
   private readonly now: () => number;
+  private readonly log: Logger;
   private segments: Segment[] = [];
   private seq = 0;
   private readonly listeners = new Set<(e: LoggedEvent) => void>();
@@ -82,6 +85,7 @@ export class EventLog {
     this.retention = opts.retention ?? EVENT_LOG.retention;
     this.coalesceMs = opts.coalesceMs ?? EVENT_LOG.coalesceMs;
     this.now = opts.now ?? Date.now;
+    this.log = opts.log ?? nullLogger;
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.open();
   }
@@ -129,33 +133,34 @@ export class EventLog {
   /**
    * Append an event. Text-deltas may be held briefly for coalescing; every
    * other event is written (after its session's held delta) immediately.
+   * Returns false when this event was not written, or a listener failed.
    */
-  append(ev: DaemonEvent): void {
+  append(ev: DaemonEvent): boolean {
     const sessionId = 'sessionId' in ev && typeof ev.sessionId === 'string' ? ev.sessionId : null;
     if (sessionId && ev.kind === 'turn.event' && ev.event.kind === 'text-delta' && this.coalesceMs > 0) {
       const key = `${ev.turnId}\u0000${ev.event.parentId ?? ''}`;
       const held = this.pending.get(sessionId);
       if (held && held.key === key) {
         held.ev.event.text += ev.event.text;
-        return;
+        return true;
       }
-      if (held) this.flushSession(sessionId);
+      const flushed = held ? this.flushSession(sessionId) : true;
       const copy = { ...ev, event: { ...ev.event } } as PendingDelta['ev'];
       const timer = setTimeout(() => this.flushSession(sessionId), this.coalesceMs);
       timer.unref?.();
       this.pending.set(sessionId, { key, ev: copy, timer });
-      return;
+      return flushed;
     }
-    if (sessionId) this.flushSession(sessionId);
-    this.write(ev);
+    const flushed = sessionId ? this.flushSession(sessionId) : true;
+    return this.write(ev) && flushed;
   }
 
-  private flushSession(sessionId: string): void {
+  private flushSession(sessionId: string): boolean {
     const held = this.pending.get(sessionId);
-    if (!held) return;
+    if (!held) return true;
     clearTimeout(held.timer);
     this.pending.delete(sessionId);
-    this.write(held.ev);
+    return this.write(held.ev);
   }
 
   /** Write every held delta now (shutdown, snapshots). */
@@ -163,18 +168,47 @@ export class EventLog {
     for (const sessionId of [...this.pending.keys()]) this.flushSession(sessionId);
   }
 
-  private write(ev: DaemonEvent): void {
+  private write(ev: DaemonEvent): boolean {
     const entry: LoggedEvent = { seq: this.seq + 1, at: this.now(), ev };
     let segment = this.segments[this.segments.length - 1];
+    let added = false;
     if (!segment || segment.last - segment.first + 1 >= this.segmentSize) {
       segment = { first: entry.seq, last: entry.seq - 1, file: segmentFile(this.dir, entry.seq) };
       this.segments.push(segment);
-      this.prune();
+      added = true;
+      try {
+        this.prune();
+      } catch (err) {
+        this.report(err);
+      }
     }
-    fs.appendFileSync(segment.file, JSON.stringify(entry) + '\n', { mode: 0o600 });
+    try {
+      fs.appendFileSync(segment.file, JSON.stringify(entry) + '\n', { mode: 0o600 });
+    } catch (err) {
+      this.report(err);
+      if (added && this.segments[this.segments.length - 1] === segment) this.segments.pop();
+      return false;
+    }
     segment.last = entry.seq;
     this.seq = entry.seq;
-    for (const fn of this.listeners) fn(entry);
+    let ok = true;
+    for (const fn of [...this.listeners]) {
+      try {
+        fn(entry);
+      } catch (err) {
+        ok = false;
+        this.report(err);
+      }
+    }
+    return ok;
+  }
+
+  private report(err: unknown): void {
+    try {
+      this.log.error('eventlog.write', err);
+    } catch {
+      // ignore
+    }
   }
 
   /** Drop whole segments that hold only events older than the retention window. */
