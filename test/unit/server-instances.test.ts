@@ -34,7 +34,6 @@ async function setup() {
   const r = await registerRunner(h, s);
   const sock = await connectRunner(h, r.accessToken);
   sockets.push(sock);
-  await sock.next('none', 100).catch(() => undefined);
   return { s, r, sock };
 }
 
@@ -83,8 +82,7 @@ describe('POST /v1/instances', () => {
     const { s, r, sock } = await setup();
     h.github.addRepo('namik/web', { pushers: ['namik'] });
     sock.send({ type: 'status', version: '0.1.0', docker: { ok: true }, maxEnvironments: 1, instances: [] });
-    await sock.next('none', 100).catch(() => undefined);
-    await call(h, 'PATCH', `/v1/runners/${r.runnerId}`, { token: s.accessToken, body: {} });
+    await sock.sync();
     const first = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
     expect(first.status).toBe(201);
     const full = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });

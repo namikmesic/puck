@@ -219,6 +219,10 @@ export class Relay implements Hub {
         this.ctx.log.error('runner frame failed', { runnerId: runner.id, error: err instanceof Error ? err.name : 'unknown' });
       });
     });
+    // WebSocket-level pings count as frames too, so a runner may heartbeat either way.
+    ws.on('ping', () => {
+      if (this.runners.get(runner.id) === conn) this.touch(runner.id);
+    });
     ws.on('close', () => {
       if (this.runners.get(runner.id) !== conn) return;
       this.detachRunner(conn, 'runner-offline');

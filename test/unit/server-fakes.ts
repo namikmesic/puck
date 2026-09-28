@@ -368,6 +368,7 @@ export class Socket {
   private binaries: Buffer[] = [];
   private waiters: (() => void)[] = [];
   closed: { code: number; reason: string } | null = null;
+  private pings = 0;
 
   constructor(url: string, token: string) {
     this.ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -400,6 +401,17 @@ export class Socket {
     this.ws.send(JSON.stringify(frame));
   }
 
+  /**
+   * Waits until the server has handled every frame sent so far: frames are
+   * handled in order, and the store work behind them settles before the
+   * server's next event, so the pong arrives after it.
+   */
+  async sync(): Promise<void> {
+    const t = ++this.pings;
+    this.send({ type: 'ping', t });
+    for (;;) if ((await this.next('pong')).t === t) return;
+  }
+
   sendBinary(data: Buffer): void {
     this.ws.send(data);
   }
@@ -409,6 +421,7 @@ export class Socket {
     for (;;) {
       const got = take();
       if (got !== undefined) return got;
+      if (this.closed && what !== 'close') throw new Error(`socket closed while waiting for ${what}`);
       if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
       await new Promise<void>((resolve) => {
         this.waiters.push(resolve);
@@ -459,6 +472,7 @@ export async function connectRunner(
     instances: [],
     ...status,
   });
+  if (s.ws.readyState === WebSocket.OPEN) await s.sync().catch(() => undefined);
   return s;
 }
 

@@ -114,7 +114,6 @@ describe('register', () => {
     h.github.addRepo('namik/web', { pushers: ['namik'] });
     const old = await registerRunner(h, s);
     const sock = await connectRunner(h, old.accessToken);
-    await sock.next('pong', 50).catch(() => undefined);
     const inst = await call(h, 'POST', '/v1/instances', {
       token: s.accessToken,
       body: { runnerId: old.runnerId, definition: 'web', repos: ['namik/web'] },
@@ -219,13 +218,27 @@ describe('status', () => {
     app.close();
   });
 
+  it('counts WebSocket pings as frames', async () => {
+    const s = await setup();
+    const r = await registerRunner(h, s);
+    const runner = await connectRunner(h, r.accessToken);
+    h.clock.advance(50_000);
+    await new Promise((resolve) => {
+      runner.ws.once('pong', resolve);
+      runner.ws.ping();
+    });
+    h.clock.advance(20_000);
+    const got = await call(h, 'GET', `/v1/runners/${r.runnerId}`, { token: s.accessToken });
+    expect((got.body.runner as { status: string }).status).toBe('idle');
+    runner.close();
+  });
+
   it('reports a Docker problem alongside the status', async () => {
     const s = await setup();
     const r = await registerRunner(h, s);
     const runner = await connectRunner(h, r.accessToken, {
       docker: { ok: false, version: null, problem: 'socket-permission', ncpu: null, memTotal: null },
     });
-    await runner.next('never', 200).catch(() => undefined);
     const got = await call(h, 'GET', '/v1/runners', { token: s.accessToken });
     expect((got.body.runners as { docker: unknown }[])[0].docker).toMatchObject({ ok: false, problem: 'socket-permission' });
     runner.close();
@@ -255,7 +268,6 @@ describe('removal', () => {
     h.github.addRepo('namik/web', { pushers: ['namik'] });
     const r = await registerRunner(h, s);
     const sock = await connectRunner(h, r.accessToken);
-    await sock.next('none', 100).catch(() => undefined);
     const inst = await call(h, 'POST', '/v1/instances', {
       token: s.accessToken,
       body: { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] },

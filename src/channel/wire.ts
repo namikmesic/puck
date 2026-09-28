@@ -31,7 +31,7 @@ export const PROTOCOL = 'puck-relay-v1';
 export const DATA_HEADER_BYTES = 12;
 export const MAX_CIPHERTEXT_BYTES = 64 * 1024;
 export const WINDOW_BYTES = 256 * 1024;
-/** A runner is Offline this long after its last frame. */
+/** A runner is Offline this long after its last frame (control, data, or a WebSocket ping). */
 export const OFFLINE_AFTER_MS = 60_000;
 /** How often a runner reports status. */
 export const STATUS_EVERY_MS = 20_000;

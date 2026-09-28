@@ -22,6 +22,8 @@ docker build -f src/server/Dockerfile -t puck-server .
 docker run -p 8080:8080 -v puck-server-data:/data -e PUCK_SERVER_URL=https://puck.example.com puck-server
 ```
 
+The image's health check uses `--start-interval`, which needs Docker Engine 25 or newer, and `compose.yaml` marks its env file optional, which needs Compose 2.24 or newer.
+
 Without Docker: `npm run build:server && node .webpack/server/puck-server.js`.
 The bundle needs only Node 22 (it uses the built-in `node:sqlite`).
 `node puck-server.js health` probes a running server and exits 0 when it is healthy; the image's health check uses it.
