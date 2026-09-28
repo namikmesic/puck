@@ -405,7 +405,7 @@ export class Turns {
     return true;
   }
 
-  /** Interrupt every running turn and wait for all of them to end. */
+  /** Interrupt every running turn for a shutdown or upgrade, and wait for all of them to end. */
   async interruptAll(): Promise<void> {
     for (const sessionId of [...this.active.keys()]) this.interrupt(sessionId, 'restart');
     await this.idle();

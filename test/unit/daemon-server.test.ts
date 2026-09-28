@@ -506,6 +506,43 @@ describe('upgrade failure restarts instead of rolling back', () => {
     expect(transcript).toContain('The environment restarted during this turn.');
   });
 
+  it('a graceful shutdown mid-turn leaves the conversation to resume through its harness session on the next boot', async () => {
+    deliver(exampleInbox());
+    const honouring: HarnessAdapter = {
+      id: 'claude-code',
+      run: (req, ctx) =>
+        new Promise<void>((resolve) => {
+          ctx.reportSession(req.resumeId ?? 'sess-graceful');
+          ctx.emit({ kind: 'text-delta', text: 'working…' });
+          ctx.signal.addEventListener('abort', () => resolve(), { once: true });
+        }),
+    };
+    await boot({ shutdownGraceMs: 1_000, adapters: { 'claude-code': honouring, codex: { id: 'codex', run: () => Promise.resolve() } } });
+    const c = client();
+    c.hello(null);
+    await c.until(isWelcome);
+    expect(await c.cmd('chat.send', { text: 'long job' })).toMatchObject({ ok: true, result: { queued: false } });
+    await c.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.ev.kind === 'turn.event');
+    await daemon.shutdown();
+    await waitForExit();
+    expect(exit).toHaveBeenCalledWith(0);
+    const sessions = JSON.parse(fs.readFileSync(path.join(root.paths.state, 'sessions.json'), 'utf8')) as Record<string, { status: string; resumeId?: string }>;
+    expect(Object.values(sessions)).toEqual([expect.objectContaining({ status: 'interrupted', resumeId: 'sess-graceful' })]);
+
+    const seen: { prompt: string; resumeId: string | null }[] = [];
+    const completing: HarnessAdapter = {
+      id: 'claude-code',
+      run: async (req, ctx) => {
+        seen.push({ prompt: req.prompt, resumeId: req.resumeId });
+        ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
+      },
+    };
+    await boot({ adapters: { 'claude-code': completing, codex: { id: 'codex', run: () => Promise.resolve() } } });
+    for (let i = 0; i < 50 && !seen.length; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(seen[0].resumeId).toBe('sess-graceful');
+    expect(seen[0].prompt).toContain('Continue.');
+  });
+
   it('refuses an upgrade while boot provisioning is still running', async () => {
     deliver(exampleInbox());
     let releaseProvision: () => void = () => undefined;

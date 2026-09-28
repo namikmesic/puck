@@ -30,6 +30,7 @@ import {
 //   2. create, attach and run a turn through the relay
 //   3. the GitHub token pump
 //   4. restarting the runner mid-turn leaves the turn unaffected
+//      (and a daemon restart mid-turn resumes the conversation by itself)
 //   5. removal keeping the environments
 //   6. removal deleting them
 
@@ -185,6 +186,30 @@ describe('Docker scenarios: puck-runner', () => {
     const snap = await again.cmd<Snapshot>('snapshot.get');
     expect(snap.sessions.find((s) => s.id === snap.orchestratorSessionId)?.status).toBe('idle');
     expect(await containerStart(envId)).toEqual(before);
+    again.channel.close();
+  });
+
+  it('4b. a daemon restart mid-turn resumes the conversation through the harness session, behind the same runner', async () => {
+    const d = await attachReady(runnerAId, runnerKey, envId);
+    const sent = await d.cmd<{ turnId: string }>('chat.send', { text: '!sleep 8000' });
+    await d.untilEvent('turn.start', (ev) => ev.turnId === sent.turnId);
+    await docker(['restart', '-t', '30', `puck-${envId}`], { timeoutMs: 90_000 });
+    await waitFor('the attach channel to close', async () => d.channel.closed !== null, 30_000);
+
+    // The runner never restarted; the daemon comes back and continues the interrupted conversation itself.
+    const again = await attachReady(runnerAId, runnerKey, envId);
+    const snap = await again.cmd<Snapshot>('snapshot.get');
+    const resumed = await waitFor('the resumed turn', async () => {
+      const history = await again.cmd<{ entries: { kind: string; author?: string; text?: string; turnId?: string; events?: { kind: string; text?: string }[] }[] }>(
+        'session.history',
+        { sessionId: snap.orchestratorSessionId },
+      );
+      const i = history.entries.findIndex((e) => e.kind === 'user' && e.author === 'system' && e.text === 'Continue.');
+      const turn = i >= 0 ? history.entries.slice(i + 1).find((e) => e.kind === 'turn') : undefined;
+      return turn?.events?.some((e) => e.kind === 'turn-end') ? turn : undefined;
+    }, 60_000);
+    const text = (resumed.events ?? []).filter((e) => e.kind === 'text-delta').map((e) => e.text).join('');
+    expect(text).toBe('Echo (resumed): Continue.');
     again.channel.close();
   });
 
