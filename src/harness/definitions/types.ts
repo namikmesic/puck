@@ -137,7 +137,7 @@ export interface DefinitionRefs {
   /** Semver tags newest first, then the other tags by name. */
   tags: RefInfo[];
   branches: RefInfo[];
-  /** The highest semver release tag (the default pin), null when there is none. */
+  /** Default pin: the highest semver release, else the highest prerelease. Null when no semver tag exists. */
   defaultTag: string | null;
 }
 

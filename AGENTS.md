@@ -117,6 +117,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 
 - *Agent* = a named provider configuration (`AgentConfig`).
   The Task-tool sub-agents inside a chat are "sub-agents", and the container-side process is "the runner".
+  A `kind: Agent` file in a config repo is a definition (`src/harness/definitions/`), not this record.
 - `AgentConfig.options` = sparse schema-option overrides.
   `TurnRequest.settings` = the *compiled* SDK fragment, whose wire field names are frozen until the next protocol-revision bump.
   The app's Settings modal is UI-level and unrelated.
@@ -129,14 +130,16 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 - `src/index.ts` - main process: window hardening, IPC handler registration, and quit drain wiring.
   Ids, strings, and configs are validated in `src/main/ipcguard.ts`.
   The conversation payload codec lives with its format in `src/main/conversations.ts`: strict `fromIpc` on save, lenient `normalize` on load, one shared field assembly.
-- `src/harness/` - the renderer↔main contract.
+- `src/harness/` - the renderer↔main contract, plus the pure definition library.
   Keep this directory free of node/electron imports.
   `bridge.ts` holds the types and `PuckBridge`, `channels.ts` the IPC channel table, `types.ts` the `HarnessEvent` wire protocol.
   `options.ts` holds the provider option schema and `ipc.ts` the `IpcHarness`.
   `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
+  `definitions/` holds agent and environment definitions: YAML parse, validation, resolution, JSON Schema, and update-class diff.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.
 - `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.
+- `src/main/config-repo.ts` - the GitHub config repo at a pinned ref: tree and file fetch, tag, branch and commit pins, the SHA cache, and `definitionRefs` / `definitionsAt`.
 - `src/main/environments.ts` - Puck lifecycle state, Docker lifecycle, bootstrap, credential and secret injection, credential purge on logout (all registry-driven, no provider names).
 - `src/main/runner.ts` - docker-exec stdio bridge (handshake, watchdog, stderr diagnostics, `WIRE` contract).
 - `src/main/shutdown.ts` - the quit drain (`installQuitDrain`) and the renderer flush request (`flushRenderers`).

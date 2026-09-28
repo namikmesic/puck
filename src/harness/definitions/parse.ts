@@ -1,9 +1,10 @@
 /**
  * YAML to plain objects with source positions. One document per file, the
  * YAML 1.2 core schema, no tags of any kind (`!foo` and `!!binary` alike),
- * and duplicate keys are errors. Every error carries the file, line and
- * column; `locate` maps a field path back to where it was written, so the
- * validator can point at a field without re-walking YAML itself.
+ * and duplicate keys and cyclic anchors are errors. Every error carries the
+ * file, line and column; `locate` maps a field path back to where it was
+ * written, so the validator can point at a field without re-walking YAML
+ * itself.
  */
 
 import { isMap, isPair, isScalar, isSeq, LineCounter, parseDocument, visit, type Node } from 'yaml';

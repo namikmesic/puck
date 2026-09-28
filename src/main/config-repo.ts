@@ -1,16 +1,20 @@
 /**
  * The config repo, read through the GitHub API at a pinned ref.
  *
- *  - Refs: tags (semver newest first; the highest release tag is the
- *    default pin) and branches. A pin resolves to a commit through
+ *  - Refs: tags (semver newest first; the default pin is the highest
+ *    release tag, or the highest prerelease when no release exists) and
+ *    branches. A pin resolves to a commit through
  *    `/commits/tags/<name>`, `/commits/heads/<name>` or the SHA itself, so
  *    a tag and a branch with the same name never shadow each other.
- *  - Load: the tree at the commit, then every definition file
+ *  - Load: the tree at the commit, omitting symlink blobs (mode 120000,
+ *    whose content is the link target), then every definition file
  *    (agents/<name>.yaml, environments/<name>.yaml) and the instructions
  *    files they reference. Files over the limits are never fetched; the
  *    validator reports them from their tree size.
- *  - Cache: a commit's file map never changes, so it is kept by SHA in
- *    memory and in userData/puck-defs-cache/<sha>.json (safe to delete).
+ *  - Cache: kept by commit SHA in memory and in
+ *    userData/puck-defs-cache/<sha>.json (safe to delete). `CACHE_VERSION`
+ *    changes when that snapshot's shape changes, so an older file for the
+ *    same SHA is a miss.
  *  - Updates: tag pins offer a newer semver tag, branch pins a moved head,
  *    commit pins nothing.
  *
