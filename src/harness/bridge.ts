@@ -8,11 +8,11 @@
 
 import type { HarnessEvent } from './types';
 import type { ProviderOption } from './options';
-import type { DefinitionListing, DefinitionRefs, PinSpec } from './definitions/types';
+import type { DefinitionChange, DefinitionListing, DefinitionRefs, PinSpec, UpdateClass } from './definitions/types';
 import type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
 
 export type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
-import type { DaemonEvent, InstanceState, OpArgs, OpResult, RendererOp, Snapshot } from './daemon-protocol';
+import type { DaemonEvent, InstanceState, OpArgs, OpResult, Pin, RendererOp, Snapshot } from './daemon-protocol';
 import type { InstanceStage } from './runner-protocol';
 
 export type {
@@ -332,6 +332,8 @@ export interface InstanceInfo {
   op: InstanceOp | null;
   /** The last daemon event this app applied (replay resumes after it). */
   lastSeq: number | null;
+  /** The attached daemon runs another build than the one this app carries: offer the update. */
+  daemonUpdate?: boolean;
 }
 
 /** What the start flow sends: main resolves the pin, reads the definition, and checks everything first. */
@@ -345,6 +347,17 @@ export interface StartSpec {
 }
 
 export type InstanceEvent = { kind: 'upsert'; instance: InstanceInfo } | { kind: 'removed'; envId: string };
+
+/**
+ * A newer definition for an environment (its branch moved, or a newer tag
+ * exists), and what applying it changes, grouped by how each change
+ * applies: hot (nothing is interrupted), reprovision (the daemon runs its
+ * provisioning again), rebuild (the container is recreated; work is kept).
+ */
+export interface InstanceUpdate {
+  pin: Pin;
+  changes: Record<UpdateClass, DefinitionChange[]>;
+}
 
 /** Pushed main → renderer for the attached environment: each daemon event in seq order, or a resync snapshot. */
 export type DaemonEventPayload =
@@ -466,6 +479,21 @@ export interface PuckBridge {
   instanceDelete(envId: string): Promise<void>;
   /** Forgets an environment whose runner is gone (lost or orphaned): only the index entry goes. */
   instanceForget(envId: string): Promise<void>;
+  /** A newer definition for the environment's pin, or null when it runs the newest. */
+  instanceCheckUpdate(envId: string): Promise<InstanceUpdate | null>;
+  /**
+   * Moves the environment to `pin`: the tag or branch `instanceCheckUpdate`
+   * diffed, with that commit's sha. The definition is resolved at the sha.
+   * Hot and reprovision changes go to the attached daemon (nothing running
+   * is interrupted); a change that needs a rebuild rebuilds the container.
+   */
+  instanceApplyUpdate(envId: string, pin: Pin): Promise<void>;
+  /**
+   * Updates the attached environment's daemon to the build this app
+   * carries: the runner stages it, then the daemon swaps it in after its
+   * running turns finish (`drain`) or at once (`now`), and restarts.
+   */
+  instanceUpgradeDaemon(envId: string, mode: 'drain' | 'now'): Promise<void>;
   onInstanceEvent(cb: (e: InstanceEvent) => void): void;
   /** A command to an environment's daemon (renderer allowlist only). */
   daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>>;

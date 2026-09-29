@@ -53,7 +53,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { IssueSource, ItemPosition, PullChecks, WorkItem } from '../harness/daemon-protocol';
+import type { IssueHit, IssueSource, ItemPosition, PullChecks, PullFeedback, PullView, WorkItem } from '../harness/daemon-protocol';
 import type { GitHubPolicies } from '../harness/definitions/types';
 import { GitHubApiError, GitHubRateLimitError } from '../harness/github';
 import { redact } from '../harness/redact';
@@ -576,7 +576,7 @@ export class GithubSync {
     const repo = def.repos.find((r) => r.github.toLowerCase() === key || r.dir === repoRef);
     if (!repo) throw new WorkError('invalid-args', `${repoRef} is not a repository of this environment (${def.repos.map((r) => r.github).join(', ')}).`);
     const ref = issueRef(repo.github, number);
-    const open = this.deps.backlog.byIssue(repo.github, number).find((i) => !CLOSED.has(i.status));
+    const open = this.openIssueItem(repo.github, number);
     if (open) throw new WorkError('invalid-state', `Issue ${ref} is already ${itemLabel(open)} (${open.status}).`);
     let issue: GhIssue;
     try {
@@ -593,7 +593,7 @@ export class GithubSync {
   }
 
   /** Search the environment's repositories' issues. */
-  async searchIssues(query: string, opts: { repo?: string; state?: 'open' | 'closed' | 'all' } = {}) {
+  async searchIssues(query: string, opts: { repo?: string; state?: 'open' | 'closed' | 'all' } = {}): Promise<{ issues: IssueHit[] }> {
     const def = this.deps.definition();
     if (!def) throw new WorkError('invalid-state', 'This environment has no definition yet.');
     const repos = opts.repo
@@ -603,7 +603,7 @@ export class GithubSync {
     const state = opts.state ?? 'open';
     const byOwner = new Map<string, DaemonRepo[]>();
     for (const r of repos) byOwner.set(r.github.split('/')[0].toLowerCase(), [...(byOwner.get(r.github.split('/')[0].toLowerCase()) ?? []), r]);
-    const out: Array<Record<string, unknown>> = [];
+    const out: IssueHit[] = [];
     for (const group of byOwner.values()) {
       const q = [query.replace(/\s+/g, ' ').trim(), 'is:issue', state === 'all' ? '' : `is:${state}`, ...group.map((r) => `repo:${r.github}`)]
         .filter(Boolean)
@@ -617,12 +617,12 @@ export class GithubSync {
       }
       for (const issue of found) {
         const repo = /\/repos\/([^/]+\/[^/]+)$/.exec((issue as { repository_url?: string }).repository_url ?? '')?.[1] ?? group[0].github;
-        const linked = this.deps.backlog.byIssue(repo, issue.number).pop();
+        const linked = this.openIssueItem(repo, issue.number);
         out.push({
           repo,
           number: issue.number,
           title: oneLine(issue.title ?? '', 200),
-          state: issue.state,
+          state: String(issue.state ?? ''),
           labels: labelNames(issue),
           url: issue.html_url,
           item: linked ? `${itemLabel(linked)} (${linked.status})` : null,
@@ -630,6 +630,10 @@ export class GithubSync {
       }
     }
     return { issues: out };
+  }
+
+  private openIssueItem(repo: string, number: number): ItemRecord | undefined {
+    return this.deps.backlog.byIssue(repo, number).find((i) => !CLOSED.has(i.status));
   }
 
   /** The worker prompt's issue section, fetched fresh at first dispatch. */
@@ -1201,6 +1205,33 @@ export class GithubSync {
       feedback: shown,
       ...(shown.length < trustedFeedback.length ? { omitted: trustedFeedback.length - shown.length } : {}),
       reviewRounds: `${s.reviewRounds} of ${MAX_REVIEW_ROUNDS}`,
+    };
+  }
+
+  /**
+   * An item's pull request for the user (work detail): state, CI, and every
+   * piece of feedback read so far, each marked whether agents may see it.
+   */
+  prView(item: ItemRecord): PullView {
+    const { pr, s } = this.pullOf(item);
+    const feedback: PullFeedback[] = s.feedback.map((f) => ({
+      kind: f.kind,
+      author: f.author,
+      ...(f.state ? { state: f.state } : {}),
+      ...(f.path ? { where: `${f.path}${f.line ? `:${f.line}` : ''}` } : {}),
+      body: f.body.length > 4000 ? `${f.body.slice(0, 3999)}…` : f.body,
+      url: f.url,
+      at: f.at,
+      trusted: f.trusted,
+    }));
+    return {
+      number: pr.number,
+      url: pr.url,
+      state: pr.state ?? s.prState ?? 'open',
+      draft: pr.draft,
+      checks: pr.checks ?? null,
+      feedback,
+      reviewRounds: { used: s.reviewRounds, max: MAX_REVIEW_ROUNDS },
     };
   }
 

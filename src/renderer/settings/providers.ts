@@ -17,7 +17,8 @@ import { initRunnersView } from './runners';
 
 export interface ProvidersElements {
   harnessCards: HTMLElement;
-  envCards: HTMLElement;
+  /** Where the Runners card goes; absent when runners have a section of their own. */
+  envCards?: HTMLElement;
   integrationCards: HTMLElement;
   msg: HTMLElement;
 }
@@ -124,7 +125,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     return card;
   }
 
-  const containers = [els.harnessCards, els.envCards, els.integrationCards];
+  const containers = [els.harnessCards, ...(els.envCards ? [els.envCards] : []), els.integrationCards];
 
   /** In-progress form state, keyed by the `data-keep` tags the cards set. */
   type FormState = Map<string, string>;
@@ -176,7 +177,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
       if (info.kind === 'harness') {
         els.harnessCards.appendChild(harnessCard(info));
       } else if (info.kind === 'environment') {
-        els.envCards.appendChild(runners.card(info));
+        els.envCards?.appendChild(runners.card(info));
       } else {
         els.integrationCards.appendChild(githubCard(shared, info));
       }

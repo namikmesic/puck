@@ -389,7 +389,13 @@ export class Daemon {
       this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
       this.definition = next;
       this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
-      this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
+      this.emit({
+        kind: 'instance.definition',
+        sha: pin.sha,
+        pin,
+        classes,
+        repos: next.repos.map((r) => ({ github: r.github, dir: r.dir })),
+      });
       if (changes.length) {
         const shown = changes.slice(0, 8).map((c) => c.summary);
         const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
@@ -603,7 +609,9 @@ export class Daemon {
     'snapshot.get': () => this.snapshot(),
     'session.history': ({ sessionId, before, limit }) => {
       if (!this.turns?.get(sessionId)) throw new OpError('not-found', `No session ${sessionId}.`);
-      return this.transcripts.page(sessionId, before, limit ?? COMMAND_LIMITS.historyDefault);
+      // Held text-deltas get their seq first, so the page holds exactly the events up to head.
+      this.events.flush();
+      return { ...this.transcripts.page(sessionId, before, limit ?? COMMAND_LIMITS.historyDefault), head: this.events.head() };
     },
     'chat.send': ({ sessionId, text }) => {
       const target = sessionId ?? this.turns.orchestrator()?.id;
@@ -645,6 +653,11 @@ export class Daemon {
       if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
       return publicItem(await this.github.importIssue(repo, number, { agent, position }, 'user'));
     },
+    'issue.search': async ({ query, repo, state }) => {
+      if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
+      return this.github.searchIssues(query, { ...(repo ? { repo } : {}), ...(state ? { state } : {}) });
+    },
+    'item.pr': ({ itemId }) => this.github.prView(this.items.item(itemId)),
     'github.nudge': ({ repo, kind, number }) => {
       this.github?.nudge(repo, kind, number);
       return {};
@@ -711,6 +724,7 @@ export class Daemon {
       capacity: capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false),
       inflight: this.turns ? this.turns.inflight() : [],
       asks: this.turns ? this.turns.openAsks() : [],
+      repos: this.definition ? this.definition.repos.map((r) => ({ github: r.github, dir: r.dir })) : [],
     };
   }
 

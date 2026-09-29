@@ -15,8 +15,13 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
+/** Electron's ipc invoke wraps a thrown Error as
+ *  `Error invoking remote method 'channel': Error: <sentence>`. The UI
+ *  shows the sentence the handler threw. */
 export function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  const raw = err instanceof Error ? err.message : String(err);
+  const wrapped = /^Error invoking remote method '[^']*': (?:Error: )?([\s\S]+)$/.exec(raw);
+  return wrapped?.[1] ?? raw;
 }
 
 /** Monotonic request token: rapid async re-entries must not land stale content. */

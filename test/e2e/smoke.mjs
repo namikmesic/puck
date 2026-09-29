@@ -5,7 +5,8 @@
  * preload bridge and zero page errors. It never reads or writes the real user
  * data folder or keychain. Needs a desktop session (run locally: npm run test:e2e).
  *
- * A second boot with PUCK_UI=v2 checks the runner shell the same way.
+ * A second boot with PUCK_UI=v2 checks the environment window: the first-run
+ * screen shows, and Settings has exactly Providers, Runners and Support.
  */
 
 import { spawn, execSync } from 'node:child_process';
@@ -85,8 +86,14 @@ async function boot(extraEnv, { windowPath, label }) {
     page.on('pageerror', (e) => errors.push(e.message));
     await sleep(2500); // boot + conversation hydration
 
+    if (label === 'v2') {
+      await page.waitForSelector('#fr:not(.hidden) .fr-step', { timeout: 10_000 }).catch(() => {
+        throw new Error('v2: the first-run screen did not show');
+      });
+    }
     const state = await page.evaluate(async () => ({
       bridge: !!window.puck,
+      firstRun: document.querySelectorAll('#fr:not(.hidden) .fr-step').length,
       dataDir: await window.puck
         .supportInfo()
         .then((s) => s.dataDir)
@@ -111,9 +118,23 @@ async function boot(extraEnv, { windowPath, label }) {
     const groups = await page.evaluate(() => ({
       harness: document.querySelectorAll('#pv-harness-cards [data-provider]').length,
       runners: document.querySelectorAll('#pv-env-cards [data-provider="runner"]').length,
+      sections: [...document.querySelectorAll('#settings-nav .nav-item')].map((n) => n.dataset.section),
     }));
-    if (groups.harness !== 2 || groups.runners !== 1) throw new Error(`${label}: providers grouped wrong: ${JSON.stringify(groups)}`);
+    if (label === 'v1' && (groups.harness !== 2 || groups.runners !== 1)) throw new Error(`v1: providers grouped wrong: ${JSON.stringify(groups)}`);
+    if (label === 'v2') {
+      if (groups.harness !== 2 || groups.runners !== 0) throw new Error(`v2: providers grouped wrong: ${JSON.stringify(groups)}`);
+      if (groups.sections.join(',') !== 'providers,runners,support') throw new Error(`v2: settings sections are ${groups.sections.join(', ')}`);
+      await page.click('.nav-item[data-section="runners"]');
+      await page.waitForSelector('#rn-cards [data-provider="runner"]', { timeout: 5000 }).catch(() => {
+        throw new Error('v2: the Runners section did not render');
+      });
+    }
     await page.keyboard.press('Escape');
+    const closed = await page
+      .waitForSelector('#settings-overlay.hidden', { state: 'attached', timeout: 2000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!closed) throw new Error(`${label}: Esc did not close Settings`);
     await browser.close();
 
     if (!state.bridge) throw new Error(`${label}: preload bridge missing`);
@@ -124,9 +145,12 @@ async function boot(extraEnv, { windowPath, label }) {
     if (!fs.existsSync(path.join(dataDir, 'logs', 'puck.log'))) throw new Error(`${label}: no diagnostic log in the isolated data dir`);
     if (errors.length) throw new Error(`${label}: page errors: ${errors.join(' | ')}`);
     if (label === 'v1' && !state.composer) throw new Error('composer missing');
-    if (label === 'v2' && !state.v2) throw new Error('v2 shell missing');
+    if (label === 'v2' && !state.v2) throw new Error('v2 window missing');
     if (label === 'v2' && state.composer) throw new Error('v2 booted the legacy composer');
-    console.log(`smoke ${label} OK — bridge + status up, settings modal and Providers section render${label === 'v1' ? `, ${state.roster} agents listed` : ''}`);
+    if (label === 'v2' && state.firstRun !== 6) throw new Error(`v2: first run shows ${state.firstRun} steps`);
+    console.log(
+      `smoke ${label} OK — bridge + status up, settings modal and its sections render${label === 'v1' ? `, ${state.roster} agents listed` : ', first run shows'}`,
+    );
   } finally {
     kill();
     for (let i = 0; i < 20 && running(); i++) await sleep(500);

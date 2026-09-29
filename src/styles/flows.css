@@ -1,0 +1,454 @@
+/* Flows of the environment window: the start flow, first run, and the
+   update dialog. */
+
+.v2-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  background: rgba(28, 28, 26, 0.45);
+  animation: fade-in 0.15s ease;
+}
+
+/* ---------- Start flow ---------- */
+
+.sf-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: 100%;
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(28, 28, 26, 0.35);
+  overflow: hidden;
+}
+
+.sf-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 8px 24px;
+}
+
+.sf-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 24px 20px;
+}
+
+.sf-step {
+  padding: 14px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.sf-step:first-child {
+  border-top: none;
+}
+
+.sf-step.disabled {
+  opacity: 0.5;
+}
+
+.sf-step-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sf-row {
+  display: flex;
+  gap: 8px;
+}
+
+.sf-ref,
+.sf-sha,
+.sf-secret input,
+.fr-repo {
+  font: 13px var(--font-ui);
+  color: var(--charcoal);
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 10px;
+  outline: none;
+}
+
+.sf-sha {
+  font-family: var(--font-mono);
+  width: 200px;
+}
+
+.sf-note,
+.fr-note {
+  margin: 8px 0;
+  font-size: 12.5px;
+  color: var(--gray);
+}
+
+.sf-error,
+.fr-error {
+  margin: 8px 0;
+  font-size: 12.5px;
+  color: var(--red);
+  white-space: pre-wrap;
+}
+
+.sf-defs,
+.sf-runners,
+.sf-harnesses {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.sf-def,
+.sf-runner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: var(--white);
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  cursor: pointer;
+}
+
+.sf-def input,
+.sf-runner input {
+  margin-top: 4px;
+  accent-color: var(--emerald);
+}
+
+.sf-def.selected,
+.sf-runner.selected {
+  border-color: rgba(46, 94, 78, 0.45);
+  box-shadow: 0 0 0 3px var(--emerald-tint);
+}
+
+.sf-def.invalid,
+.sf-runner.blocked {
+  cursor: default;
+  background: transparent;
+}
+
+.sf-def-text,
+.sf-runner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sf-def-name,
+.sf-runner-name {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.sf-def-desc,
+.sf-def-agents,
+.sf-runner-meta {
+  font-size: 12px;
+  color: var(--gray);
+}
+
+.sf-def-errors {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.sf-def-errors li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sf-err-where {
+  font-family: var(--font-mono);
+  color: var(--red);
+}
+
+.sf-err-msg {
+  color: var(--charcoal);
+}
+
+.sf-runner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sf-runner-cap {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--gray-light);
+}
+
+.sf-runner-why {
+  font-size: 12px;
+  color: var(--red);
+}
+
+.sf-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sf-label {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--gray);
+}
+
+.sf-label.on {
+  background: var(--emerald);
+  border-color: var(--emerald);
+  color: var(--white);
+}
+
+.sf-harness {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sf-harness-name {
+  font-weight: 650;
+}
+
+.sf-harness-state {
+  color: var(--gray);
+  font-size: 12px;
+}
+
+.sf-secrets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sf-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sf-foot {
+  position: sticky;
+  bottom: -20px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px -24px -20px;
+  padding: 12px 24px 16px;
+  background: var(--cream);
+  border-top: 1px solid var(--line-soft);
+}
+
+.sf-why {
+  margin: 0 auto 0 0;
+}
+
+.sf-foot .sf-error {
+  margin: 0 auto 0 0;
+}
+
+.sf-progress {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.sf-progress-line {
+  font-weight: 650;
+}
+
+.sf-progress-detail {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--gray);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- First run ---------- */
+
+.fr {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.fr-wrap {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 40px var(--content-pad) 60px;
+}
+
+.fr-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.fr-sub {
+  margin: 6px 0 22px;
+  color: var(--gray);
+}
+
+.fr-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fr-step {
+  background: var(--white);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+}
+
+.fr-step.current {
+  border-color: rgba(46, 94, 78, 0.35);
+}
+
+.fr-step-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.fr-step-mark {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--emerald-tint);
+  color: var(--emerald);
+}
+
+.fr-step.done .fr-step-mark {
+  background: var(--emerald);
+  color: var(--white);
+}
+
+.fr-step.done .fr-step-title {
+  color: var(--gray);
+}
+
+.fr-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 14px 50px;
+}
+
+.fr-body .fr-note {
+  width: 100%;
+  margin: 0 0 4px;
+}
+
+.fr-harness {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.fr-harness-name {
+  min-width: 110px;
+  font-weight: 650;
+}
+
+.fr-harness-state {
+  color: var(--emerald);
+  font-size: 12px;
+}
+
+/* ---------- Update dialog ---------- */
+
+.tb-dialog {
+  width: min(520px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 20px 22px 16px;
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgba(28, 28, 26, 0.35);
+}
+
+.tb-dialog-title {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+
+.tb-dialog-note {
+  font-size: 13px;
+  color: var(--gray);
+}
+
+.tb-dialog-group h4 {
+  margin: 12px 0 4px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.tb-dialog-group.rebuild h4 {
+  color: var(--red);
+}
+
+.tb-dialog-group ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.tb-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

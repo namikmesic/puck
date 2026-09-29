@@ -184,6 +184,46 @@ export interface PullChecks {
   failing: { name: string; url: string; summary: string }[];
 }
 
+/** One issue from a search of the environment's repositories. */
+export interface IssueHit {
+  /** `owner/name`. */
+  repo: string;
+  number: number;
+  title: string;
+  state: string;
+  labels: string[];
+  url: string;
+  /** "W-3 (review)" when an open work item is already on it. Done and cancelled items are omitted. */
+  item: string | null;
+}
+
+/** One review, inline comment or conversation comment on an item's pull request. */
+export interface PullFeedback {
+  kind: 'review' | 'inline' | 'comment';
+  author: string;
+  /** Reviews: APPROVED, CHANGES_REQUESTED, COMMENTED. */
+  state?: string;
+  /** Inline comments: `path:line`. */
+  where?: string;
+  body: string;
+  url: string;
+  at: number;
+  /** From someone with write access. Anything else is never sent to agents. */
+  trusted: boolean;
+}
+
+/** An item's pull request as work detail shows it: state, CI, and the feedback read so far. */
+export interface PullView {
+  number: number;
+  url: string;
+  state: 'open' | 'closed' | 'merged';
+  draft: boolean;
+  checks: PullChecks | null;
+  /** Oldest first. */
+  feedback: PullFeedback[];
+  reviewRounds: { used: number; max: number };
+}
+
 export interface PullRequestRef {
   number: number;
   url: string;
@@ -264,6 +304,8 @@ export interface Snapshot {
   capacity: Capacity;
   inflight: InflightTurn[];
   asks: OpenAsk[];
+  /** The definition's repositories (`owner/name` and their directory); absent from older daemons. */
+  repos?: { github: string; dir: string }[];
 }
 
 /* ---------- Commands ---------- */
@@ -273,7 +315,12 @@ export interface OpMap {
   'snapshot.get': { args: Record<string, never>; result: Snapshot };
   'session.history': {
     args: { sessionId: string; before?: number; limit?: number };
-    result: { entries: TranscriptEntry[]; total: number; hasMore: boolean };
+    /**
+     * `before` is an entry index (a page ends there). `head` is the last event
+     * seq the page reflects: later events for the session are not in it.
+     * Daemons before it was added leave it out.
+     */
+    result: { entries: TranscriptEntry[]; total: number; hasMore: boolean; head?: number };
   };
   'chat.send': { args: { sessionId?: string; text: string }; result: { queued: boolean; turnId?: string } };
   'session.interrupt': { args: { sessionId: string }; result: Record<string, never> };
@@ -298,6 +345,13 @@ export interface OpMap {
     args: { repo: string; number: number; agent?: string; position?: ItemPosition };
     result: WorkItem;
   };
+  /** Search the open (or closed, or all) issues of the environment's repositories. */
+  'issue.search': {
+    args: { query: string; repo?: string; state?: 'open' | 'closed' | 'all' };
+    result: { issues: IssueHit[] };
+  };
+  /** An item's pull request with its CI and review feedback, including feedback agents never see. */
+  'item.pr': { args: { itemId: string }; result: PullView };
   /** From the runner: something changed on GitHub; poll it now instead of at the next interval. */
   'github.nudge': {
     args: { repo: string; kind: 'issue' | 'pull' | 'checks'; number?: number };
@@ -337,6 +391,8 @@ const OP_TABLE: Record<Op, true> = {
   'item.publish': true,
   'item.delete': true,
   'issue.import': true,
+  'issue.search': true,
+  'item.pr': true,
   'github.nudge': true,
   'definition.apply': true,
   'credentials.put': true,
@@ -367,6 +423,7 @@ export type RendererOp =
   | 'ask.answer'
   | Extract<Op, `item.${string}`>
   | 'issue.import'
+  | 'issue.search'
   | 'scheduler.pause'
   | 'scheduler.resume'
   | 'logs.tail';
@@ -381,6 +438,7 @@ export const RENDERER_OPS: readonly RendererOp[] = OPS.filter(
       'session.interrupt',
       'ask.answer',
       'issue.import',
+      'issue.search',
       'scheduler.pause',
       'scheduler.resume',
       'logs.tail',
@@ -399,7 +457,7 @@ export function daemonCommandFrom(op: unknown, args: unknown): { op: RendererOp;
 
 export type DaemonEvent =
   | ({ kind: 'instance.status' } & InstanceState)
-  | { kind: 'instance.definition'; sha: string; pin: Pin; classes: string[] }
+  | { kind: 'instance.definition'; sha: string; pin: Pin; classes: string[]; repos?: { github: string; dir: string }[] }
   | ({ kind: 'github.auth' } & GithubAuth)
   | { kind: 'session.upsert'; session: SessionSummary }
   | { kind: 'turn.user'; sessionId: string; entry: UserEntry }

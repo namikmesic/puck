@@ -77,6 +77,12 @@ const btn = (root: HTMLElement, text: string): HTMLButtonElement =>
   [...root.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement;
 
 describe('providers view', () => {
+  it('when signed out, the Runners card points at Integrations below it', async () => {
+    const { els, view } = mount([runnersCard({ signedIn: false, runners: [] })]);
+    await view.render();
+    expect(els.envCards.textContent).toContain('Sign in to Puck with GitHub (Integrations below) to add runners.');
+  });
+
   it('groups cards by kind and shares the list with the harness cache', async () => {
     const infos = [harness(), harness({ id: 'codex', label: 'Codex' }), runnersCard(), gh()];
     const { els, view, onProviders } = mount(infos);

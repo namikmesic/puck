@@ -21,7 +21,7 @@ describe('daemon protocol', () => {
 
   it('the op table is total: every op has a daemon-side validator, and nothing else does', () => {
     expect(Object.keys(VALIDATORS).sort()).toEqual([...OPS].sort());
-    expect(OPS).toHaveLength(25);
+    expect(OPS).toHaveLength(27);
     for (const op of OPS) expect(isOp(op)).toBe(true);
     expect(isOp('toString')).toBe(false);
     expect(isOp('item.explode')).toBe(false);
@@ -42,6 +42,8 @@ describe('daemon protocol', () => {
         'item.retry',
         'item.update',
         'issue.import',
+        'issue.search',
+        'item.pr',
         'logs.tail',
         'scheduler.pause',
         'scheduler.resume',
@@ -82,6 +84,10 @@ describe('daemon command validation', () => {
     expect(invalid('chat.send', { text: 'hi', sessionId: '../../etc' })).toBe('invalid-args');
     expect(VALIDATORS['session.history']({ sessionId: ses, limit: 200 })).toMatchObject({ limit: 200 });
     expect(invalid('session.history', { sessionId: ses, limit: 201 })).toBe('invalid-args');
+    expect(VALIDATORS['issue.search']({ query: 'bug', repo: 'octo/app', state: 'all' })).toEqual({ query: 'bug', repo: 'octo/app', state: 'all' });
+    expect(invalid('issue.search', { query: 'bug', state: 'merged' })).toBe('invalid-args');
+    expect(invalid('issue.search', { query: 'x'.repeat(300) })).toBe('limit');
+    expect(invalid('item.pr', { itemId: 'nope' })).toBe('invalid-args');
     expect(VALIDATORS['ask.answer']({ sessionId: ses, askId: 'ask_01J0000000000000000000000A', answers: null })).toMatchObject({
       answers: null,
     });

@@ -72,7 +72,16 @@ function handle(f) {
   const ok = (result) => out({ t: 'res', id: f.id, ok: true, result });
   switch (f.op) {
     case 'snapshot.get':
-      return ok({ envId, name: 'example', head: state.events.length, instance: { status: 'ready', pin: null, sha: null }, sessions: [], items: [], order: [] });
+      return ok({
+        envId,
+        name: 'example',
+        head: state.events.length,
+        instance: { status: 'ready', pin: null, sha: null },
+        sessions: [],
+        items: [],
+        order: [],
+        repos: Array.isArray(state.repos) ? state.repos : [],
+      });
     case 'chat.send': {
       const sessionId = 'ses_orchestrator';
       const turnId = `t${state.events.length}`;

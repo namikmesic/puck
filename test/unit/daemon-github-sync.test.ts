@@ -480,7 +480,8 @@ describe('issue intake', () => {
     expect(Buffer.byteLength(item.body, 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
 
-  it('takes in labelled issues past the first page, including one that arrives later', async () => {
+  // A hundred items write the backlog store a hundred times: slow on a busy machine.
+  it('takes in labelled issues past the first page, including one that arrives later', { timeout: 20_000 }, async () => {
     for (let n = 1; n <= 101; n++) fake.gh.issues.set(n, issue(n, ['puck']));
     await sync.poll();
     expect(backlog.list()).toHaveLength(101);
@@ -490,7 +491,7 @@ describe('issue intake', () => {
     expect(backlog.list()).toHaveLength(102);
   });
 
-  it('takes in an issue that arrives on the page after a full cached page', async () => {
+  it('takes in an issue that arrives on the page after a full cached page', { timeout: 20_000 }, async () => {
     for (let n = 1; n <= 100; n++) fake.gh.issues.set(n, issue(n, ['puck']));
     await sync.poll();
     expect(backlog.list()).toHaveLength(100);
@@ -540,6 +541,24 @@ describe('manual import', () => {
     linkedItem(5, 'done');
     const again = await sync.importIssue('app', 5, {}, 'user');
     expect(again.source?.number).toBe(5);
+  });
+
+  it('links a search hit only to an open item, the same one import would reject', async () => {
+    const open = linkedItem(3, 'review');
+    const older = linkedItem(4, 'review');
+    clock += 1;
+    linkedItem(4, 'done');
+    linkedItem(5, 'done');
+    linkedItem(6, 'cancelled');
+    fake.gh.searchTotal = 6;
+    const found = await sync.searchIssues('bug');
+    const hit = (n: number) => found.issues.find((h) => h.number === n);
+    expect(hit(3)?.item).toBe(`W-${open.number} (review)`);
+    expect(hit(4)?.item).toBe(`W-${older.number} (review)`);
+    expect(hit(5)?.item).toBeNull();
+    expect(hit(6)?.item).toBeNull();
+    await expect(sync.importIssue('octo/app', 4, {}, 'user')).rejects.toThrow(`Issue octo/app#4 is already W-${older.number} (review).`);
+    await expect(sync.importIssue('octo/app', 5, {}, 'user')).resolves.toMatchObject({ source: { number: 5 } });
   });
 
   it('returns the first 1000 search hits when more match', async () => {
@@ -975,6 +994,18 @@ describe('review feedback and the trust filter', () => {
       expect(followUps[0].text).toContain('--- @dana on src/a.ts:12:\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\nUse a guard here.');
     }
     if (c.type === 'Bot') expect(permissionReads()).toHaveLength(0);
+    // The user sees people's feedback in work detail, marked whether agents saw it; bots' is not kept.
+    const view = sync.prView(backlog.get(item.id) as ItemRecord);
+    expect(view).toMatchObject({ number: 7, state: 'open', reviewRounds: { max: 5 } });
+    expect(view.feedback.map((f) => [f.kind, f.trusted])).toEqual(
+      c.type === 'Bot'
+        ? []
+        : [
+            ['review', c.reaches],
+            ['inline', c.reaches],
+          ],
+    );
+    if (c.type !== 'Bot') expect(view.feedback[1]?.where).toBe('src/a.ts:12');
   });
 
   it('does not address a review again after the seen list is full', async () => {

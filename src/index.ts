@@ -30,6 +30,7 @@ import {
   envConfigFrom,
   instanceIdFrom,
   objArgs,
+  appliedPinFrom,
   pinFrom,
   repoNameFrom,
   requireId,
@@ -114,10 +115,15 @@ declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_V2_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY: string;
 
-/** PUCK_UI=v2 loads the runner shell. The legacy window stays the default until cutover. */
-function windowAssets(): { url: string; preload: string } {
-  if (process.env.PUCK_UI === 'v2') return { url: MAIN_WINDOW_V2_WEBPACK_ENTRY, preload: MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY };
-  return { url: MAIN_WINDOW_WEBPACK_ENTRY, preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY };
+/**
+ * PUCK_UI=v2 loads the environment window (three panes, so a larger
+ * minimum size). The legacy window stays the default until cutover.
+ */
+function windowAssets(): { url: string; preload: string; minWidth: number; minHeight: number } {
+  if (process.env.PUCK_UI === 'v2') {
+    return { url: MAIN_WINDOW_V2_WEBPACK_ENTRY, preload: MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY, minWidth: 960, minHeight: 600 };
+  }
+  return { url: MAIN_WINDOW_WEBPACK_ENTRY, preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY, minWidth: 720, minHeight: 520 };
 }
 
 const createWindow = (): void => {
@@ -125,8 +131,8 @@ const createWindow = (): void => {
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
-    minHeight: 520,
-    minWidth: 720,
+    minHeight: assets.minHeight,
+    minWidth: assets.minWidth,
     backgroundColor: '#FFFDF7',
     titleBarStyle: 'hiddenInset',
     // An isolated launch must not take focus from the person at the desk.
@@ -237,6 +243,16 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.instanceRebuild]: (_event, envId) => instances.rebuild(instanceIdFrom(envId)),
   [CHANNELS.instanceDelete]: (_event, envId) => instances.remove(instanceIdFrom(envId)),
   [CHANNELS.instanceForget]: (_event, envId) => instances.forget(instanceIdFrom(envId)),
+  [CHANNELS.instanceCheckUpdate]: (_event, envId) => instances.checkUpdate(instanceIdFrom(envId)),
+  [CHANNELS.instanceApplyUpdate]: (_event, args) => {
+    const a = objArgs(args);
+    return instances.applyUpdate(instanceIdFrom(a.envId), appliedPinFrom(a.pin));
+  },
+  [CHANNELS.instanceUpgradeDaemon]: (_event, args) => {
+    const a = objArgs(args);
+    if (a.mode !== 'drain' && a.mode !== 'now') throw new Error('mode must be "drain" or "now".');
+    return instances.upgradeDaemon(instanceIdFrom(a.envId), a.mode);
+  },
   [CHANNELS.daemon]: (_event, args) => {
     const { envId, op, args: opArgs } = daemonCallFrom(args);
     return instances.daemon(envId, op, opArgs as never);

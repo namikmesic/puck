@@ -4,6 +4,7 @@ import {
   askAnswersFrom,
   envConfigFrom,
   objArgs,
+  appliedPinFrom,
   pinFrom,
   repoNameFrom,
   requireId,
@@ -199,5 +200,19 @@ describe('pinFrom', () => {
     ]) {
       expect(() => pinFrom(bad), JSON.stringify(bad)).toThrow();
     }
+  });
+});
+
+describe('appliedPinFrom', () => {
+  const sha = 'b'.repeat(40);
+
+  it('keeps the tag or branch together with the commit the check diffed', () => {
+    expect(appliedPinFrom({ kind: 'branch', name: 'release/1', sha: sha.toUpperCase() })).toEqual({ kind: 'branch', name: 'release/1', sha });
+    expect(appliedPinFrom({ kind: 'tag', name: 'v1.1.0', sha })).toEqual({ kind: 'tag', name: 'v1.1.0', sha });
+  });
+
+  it('rejects a pin that has no full commit, so a branch is not applied by name', () => {
+    expect(() => appliedPinFrom({ kind: 'branch', name: 'main' })).toThrow(/commit SHA/);
+    expect(() => appliedPinFrom({ kind: 'tag', name: 'v1', sha: 'abc1234' })).toThrow(/commit SHA/);
   });
 });

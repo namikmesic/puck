@@ -34,11 +34,17 @@ import { relTime } from '../format';
 import { button, errText } from '../util';
 import { cardShell } from './cards';
 
+/** The Providers page: Integrations is the card under Runners. */
+const SIGNED_OUT_ON_PROVIDERS =
+  'Sign in to Puck with GitHub (Integrations below) to add runners. Runners belong to your Puck account.';
+
 export interface RunnersContext {
   bridge: PuckBridge;
   say(text: string): void;
   copy(text: string): Promise<void>;
   now?(): number;
+  /** Signed-out note. Defaults to the Providers-page sentence. */
+  signedOutNote?: string;
 }
 
 export interface RunnersView {
@@ -487,7 +493,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     list.textContent = '';
     if (!state) return;
     if (!state.signedIn) {
-      list.appendChild(el('p', 'pv-note', 'Sign in to Puck with GitHub (Integrations below) to add runners. Runners belong to your Puck account.'));
+      list.appendChild(el('p', 'pv-note', ctx.signedOutNote ?? SIGNED_OUT_ON_PROVIDERS));
       return;
     }
     if (state.connection === 'offline') {

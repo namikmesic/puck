@@ -4,7 +4,7 @@
  * conversation payload codec lives with its format in conversations.ts.)
  */
 
-import type { AgentConfig, EnvironmentConfig, PinSpec, StartSpec } from '../harness/bridge';
+import type { AgentConfig, EnvironmentConfig, Pin, PinSpec, StartSpec } from '../harness/bridge';
 import { daemonCommandFrom, type RendererOp } from '../harness/daemon-protocol';
 import { COMMIT_RE, isValidRefName } from '../harness/definitions/validate';
 import { NAME_RE } from '../harness/env-definition';
@@ -196,4 +196,12 @@ export function pinFrom(raw: unknown): PinSpec {
     default:
       throw new Error('Invalid pin: kind must be tag, branch or commit.');
   }
+}
+
+/** The pin a definition update applies: the tag or branch, at the commit the check diffed. */
+export function appliedPinFrom(raw: unknown): Pin {
+  const spec = pinFrom(raw);
+  const sha = str(objArgs(raw).sha).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid commit SHA.');
+  return { kind: spec.kind, name: spec.name, sha };
 }
