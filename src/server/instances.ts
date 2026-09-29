@@ -60,6 +60,7 @@ export function parsePolicies(body: Record<string, unknown>): GitHubPolicies {
     statusComment: pick('statusComment', [true, false] as const, DEFAULT_POLICIES.statusComment),
     ci: pick('ci', ['notify', 'fix'] as const, DEFAULT_POLICIES.ci),
     allowWorkflowEdits: pick('allowWorkflowEdits', [true, false] as const, DEFAULT_POLICIES.allowWorkflowEdits),
+    allowCiRerun: pick('allowCiRerun', [true, false] as const, DEFAULT_POLICIES.allowCiRerun),
   };
 }
 

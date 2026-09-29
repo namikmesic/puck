@@ -4,7 +4,8 @@
  * The status comment's id and last text; the pull request's state and head;
  * which comments and reviews were already seen; feedback kept for
  * `pr_read` (and, marked untrusted, for the user only); CI results and
- * their redacted log tails; and the follow-up counters that stop loops.
+ * their redacted log tails, with the check runs a re-run replaced; and the
+ * follow-up counters that stop loops.
  * ETags are not stored: after a restart the first poll of each URL is a
  * full request.
  */
@@ -56,6 +57,13 @@ export interface CiWatch {
   observed: string | null;
   /** A `ci: fix` follow-up was already queued for this sha. */
   fixSent: boolean;
+  /**
+   * Check run ids a `ci_rerun` replaced (a job's id is its check run id).
+   * They no longer count, so a re-run never reports the result it replaced.
+   */
+  superseded: number[];
+  /** Check names a re-run replaced: pending until a kept run of that name has a higher check run id than every superseded run of that name. */
+  awaiting: string[];
 }
 
 /** Identity of a delivered outcome. The same failing names in any order are one result. */
@@ -120,6 +128,8 @@ function normalizeCi(raw: CiWatch): CiWatch {
     reported: typeof raw.reported === 'string' ? raw.reported : legacy && (raw.state === 'success' || raw.state === 'failure') ? ciOutcome(raw.state, failing) : null,
     observed: typeof raw.observed === 'string' ? raw.observed : null,
     fixSent: raw.fixSent === true || (raw.fixSent == null && legacy && raw.state === 'failure'),
+    superseded: nums(raw.superseded),
+    awaiting: Array.isArray(raw.awaiting) ? raw.awaiting.filter((n): n is string => typeof n === 'string') : [],
   };
 }
 

@@ -220,6 +220,7 @@ function readGithubPolicies(raw: unknown): GitHubPolicies {
     maxCiFixAttempts: int(g.maxCiFixAttempts, d.maxCiFixAttempts, 1, 5),
     reviews: g.reviews === 'address' ? 'address' : 'notify',
     allowWorkflowEdits: g.allowWorkflowEdits === true,
+    allowCiRerun: g.allowCiRerun === true,
   };
 }
 

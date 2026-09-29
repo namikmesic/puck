@@ -98,8 +98,10 @@ export type PublishPolicy = 'manual' | 'orchestrator';
  * `intakeLabel` become work items, and `<intakeLabel>:<agent>` also assigns
  * them (when `agentLabels`). One status comment per linked issue. CI and
  * review results reach the orchestrator as notices; `fix` and `address`
- * also queue follow-ups to the item's worker. Installation tokens carry
- * the Workflows permission only with `allowWorkflowEdits`.
+ * also queue follow-ups to the item's worker. `allowCiRerun` lets the
+ * orchestrator re-run failed CI jobs. Installation tokens carry the
+ * Workflows permission only with `allowWorkflowEdits`, and Actions write
+ * only with `allowCiRerun`.
  */
 export interface GitHubPolicies {
   intake: 'off' | 'label';
@@ -110,6 +112,7 @@ export interface GitHubPolicies {
   maxCiFixAttempts: number;
   reviews: 'notify' | 'address';
   allowWorkflowEdits: boolean;
+  allowCiRerun: boolean;
 }
 
 export const DEFAULT_GITHUB_POLICIES: Readonly<GitHubPolicies> = {
@@ -121,6 +124,7 @@ export const DEFAULT_GITHUB_POLICIES: Readonly<GitHubPolicies> = {
   maxCiFixAttempts: 2,
   reviews: 'notify',
   allowWorkflowEdits: false,
+  allowCiRerun: false,
 };
 
 /**
