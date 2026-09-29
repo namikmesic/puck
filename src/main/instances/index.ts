@@ -14,12 +14,11 @@
  *   runner's (control channel); the app never runs docker.
  */
 
-import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, StartSpec } from '../../harness/bridge';
+import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, InstanceUpdate, PinSpec, StartSpec } from '../../harness/bridge';
 import type { DaemonEvent, InstanceState, Op, OpArgs, OpResult, RendererOp } from '../../harness/daemon-protocol';
+import type { ResolvedEnvironment } from '../../harness/definitions/types';
 import type { InstanceStage } from '../../harness/runner-protocol';
 import { app } from 'electron';
-import type { ResolvedEnvironment } from '../../harness/definitions/types';
-import type { InstanceUpdate, PinSpec } from '../../harness/bridge';
 import { checkDefinitionUpdate, resolveDefinition } from '../config-repo';
 import { DAEMON_META, DAEMON_SOURCE } from '../daemon-source';
 import { log } from '../log';
