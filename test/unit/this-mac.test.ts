@@ -2,8 +2,9 @@
  * The This Mac runner install and uninstall, against the real Puck server
  * (fake GitHub) serving a runner release, with the runner's own commands
  * recorded instead of run: download and sha256 check, unpack, register
- * with a token read from a 0600 file (then revoked), LaunchAgent install
- * and start; uninstall keeps the environments and removes the directory.
+ * with a token read from a 0600 file (then revoked), LaunchAgent install,
+ * start and kickstart; uninstall keeps the environments and removes the
+ * directory. An isolated launch refuses the install.
  */
 
 import { createHash } from 'node:crypto';
@@ -11,6 +12,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import forgeConfig from '../../forge.config';
+import { launchdPlist, launcherPath } from '../../src/harness/launch-agent';
 import * as thisMac from '../../src/main/runners/this-mac';
 import { localRunner, setLocalRunner } from '../../src/main/runners/store';
 import { useServerDeps } from '../../src/main/server/http';
@@ -32,25 +35,42 @@ interface Call {
 
 function fakeExec(
   calls: Call[],
-  opts: { failConfig?: string; pauseTar?: () => Promise<void>; svc?: (sub: string, nth: number) => { code: number; stderr: string } | null } = {},
+  opts: {
+    failConfig?: string;
+    pauseTar?: () => Promise<void>;
+    svc?: (sub: string, nth: number) => { code: number; stderr: string } | null;
+    onSvc?: (sub: string) => void;
+    kickstart?: { code: number; stderr: string };
+    bootstrap?: { code: number; stderr: string };
+    print?: { stdout: string };
+  } = {},
 ): thisMac.Exec {
   const svcCount = new Map<string, number>();
   return async (file, args) => {
     if (file === '/usr/bin/tar' && opts.pauseTar) await opts.pauseTar();
     calls.push({ file, args });
+    if (file === '/bin/launchctl') {
+      if (args[0] === 'kickstart' && opts.kickstart) return { code: opts.kickstart.code, stdout: '', stderr: opts.kickstart.stderr };
+      if (args[0] === 'bootstrap' && opts.bootstrap) return { code: opts.bootstrap.code, stdout: '', stderr: opts.bootstrap.stderr };
+      if (args[0] === 'print') return { code: 0, stdout: opts.print?.stdout ?? '', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    }
     const socketAt = args.indexOf('--local-socket');
     const dir = file === '/usr/bin/tar' ? args[args.indexOf('-C') + 1] : socketAt === -1 ? '' : path.dirname(args[socketAt + 1]);
     if (file === '/usr/bin/tar') {
       fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
       return { code: 0, stdout: '', stderr: '' };
     }
-    const [, command, ...rest] = args;
-    if (command === 'svc' && opts.svc) {
+    const [, , command, ...rest] = args;
+    if (command === 'svc') {
       const sub = rest[0] ?? '';
-      const n = (svcCount.get(sub) ?? 0) + 1;
-      svcCount.set(sub, n);
-      const failed = opts.svc(sub, n);
-      if (failed) return { code: failed.code, stdout: '', stderr: failed.stderr };
+      if (opts.svc) {
+        const n = (svcCount.get(sub) ?? 0) + 1;
+        svcCount.set(sub, n);
+        const failed = opts.svc(sub, n);
+        if (failed) return { code: failed.code, stdout: '', stderr: failed.stderr };
+      }
+      opts.onSvc?.(sub);
     }
     if (command === 'config' && rest[0] !== 'remove') {
       if (opts.failConfig) return { code: 1, stdout: '', stderr: opts.failConfig };
@@ -64,7 +84,20 @@ function fakeExec(
 }
 
 function deps(exec: thisMac.Exec, hostname: string, waitForSocket: () => Promise<void> = async () => undefined): void {
-  thisMac.useThisMacDeps({ exec, platform: 'darwin', arch: 'arm64', hostname: () => hostname, dataDir: () => data, waitForSocket });
+  thisMac.useThisMacDeps({ exec, platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => hostname, dataDir: () => data, waitForSocket });
+}
+
+/** Each call as its runner command (`svc start`), or `launchctl …` in full. */
+function steps(calls: Call[]): string[][] {
+  return calls.map((c) => (c.file === '/bin/launchctl' ? ['launchctl', ...c.args] : c.args.slice(2)));
+}
+
+function kickstartOf(accountId: string): string[] {
+  return ['launchctl', 'kickstart', `gui/501/${thisMac.serviceLabelFor(accountId)}`];
+}
+
+function bootoutOf(name: string): string[] {
+  return ['launchctl', 'bootout', `gui/501/${name}`];
 }
 
 function configName(args: string[]): string {
@@ -114,7 +147,7 @@ afterEach(async () => {
 describe('This Mac runner', () => {
   it('downloads, checks, unpacks, registers, and starts the LaunchAgent', async () => {
     const calls: Call[] = [];
-    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'feynman-mbp.local', dataDir: () => data, waitForSocket: async () => undefined });
+    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => 'feynman-mbp.local', dataDir: () => data, waitForSocket: async () => undefined });
     const record = await thisMac.install([]);
     const dir = macDir();
     const node = path.join(dir, 'bin', 'node');
@@ -124,14 +157,12 @@ describe('This Mac runner', () => {
     expect(calls[0]).toEqual({ file: '/usr/bin/tar', args: ['-xzf', path.join(dir, TARBALL), '-C', dir] });
     const config = calls[1];
     expect(config.file).toBe(node);
-    expect(config.args.slice(0, 3)).toEqual([bundle, 'config', '--unattended']);
+    expect(config.args.slice(0, 4)).toEqual(['--disable-warning=ExperimentalWarning', bundle, 'config', '--unattended']);
     expect(config.args).toEqual(expect.arrayContaining(['--url', h.base, '--name', 'This Mac (feynman-mbp)', '--labels', 'local', '--local-socket', path.join(dir, 'local.sock'), '--service-label', thisMac.serviceLabelFor(current()?.user.id ?? '')]));
+    expect(config.args).toEqual(expect.arrayContaining(['--app-bundle-id', 'com.namikmesic.puck']));
     expect(config.args).not.toContain('--replace');
     expect(config.args.join(' ')).not.toMatch(/PRT_/); // the token travels in a file, never argv
-    expect(calls.slice(2).map((c) => c.args.slice(1))).toEqual([
-      ['svc', 'install'],
-      ['svc', 'start'],
-    ]);
+    expect(steps(calls.slice(2))).toEqual([['svc', 'install'], ['svc', 'start'], kickstartOf(current()?.user.id ?? '')]);
     // Nothing secret or temporary is left behind, and the token is revoked.
     expect(fs.existsSync(path.join(dir, '.registration-token'))).toBe(false);
     expect(fs.existsSync(path.join(dir, TARBALL))).toBe(false);
@@ -200,19 +231,119 @@ describe('This Mac runner', () => {
     const record = await thisMac.install([]);
     expect(record.runnerId).toBe(RUNNER_ID);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
-    expect(calls.map((c) => c.args.slice(1))).toEqual([
-      ['svc', 'start'],
-      ['svc', 'install'],
-      ['svc', 'start'],
-    ]);
+    expect(steps(calls)).toEqual([['svc', 'start'], ['svc', 'install'], ['svc', 'start'], kickstartOf(current()?.user.id ?? '')]);
     expect(waited).toBe(1);
     expect(thisMac.localState()).toMatchObject({ installed: true, error: null });
   });
 
-  it('treats an already-running LaunchAgent as up', async () => {
+  it('rewrites a LaunchAgent an older install left on run.sh when none was recorded', async () => {
     const dir = macDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    const file = path.join(dir, 'LaunchAgents', `${label}.plist`);
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub, n) => (sub === 'start' && n === 1 ? { code: 1, stderr: 'No service is installed. Install it first: ./svc.sh install' } : null),
+        onSvc: (sub) => {
+          if (sub !== 'install') return;
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(
+            file,
+            `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${path.join(dir, 'run.sh')}</string>\n  </array>\n</dict></plist>\n`,
+          );
+          fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: label, file }));
+        },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
+    expect(steps(calls)).toEqual([
+      ['svc', 'start'],
+      ['svc', 'install'],
+      bootoutOf(label),
+      ['launchctl', 'bootstrap', 'gui/501', file],
+      ['launchctl', 'kickstart', `gui/501/${label}`],
+    ]);
+    expectRewritten(dir, file);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  const OLD_LABEL = 'com.puck.runner.0ld0ld0l';
+
+  function writeAgent(dir: string, program: string): string {
+    const file = path.join(dir, 'LaunchAgents', `${OLD_LABEL}.plist`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n  </array>\n</dict></plist>\n`,
+    );
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    return file;
+  }
+
+  function expectRewritten(dir: string, file: string): void {
+    const plist = fs.readFileSync(file, 'utf8');
+    expect(plist).toContain(`<string>${launcherPath(dir)}</string>`);
+    expect(plist).toContain('<key>AssociatedBundleIdentifiers</key>');
+    expect(plist).toContain('<string>com.namikmesic.puck</string>');
+    expect(plist).not.toContain('run.sh');
+    expect(fs.readFileSync(launcherPath(dir), 'utf8')).toContain('run.sh');
+    expect(fs.statSync(launcherPath(dir)).mode & 0o777).toBe(0o755);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, '.service'), 'utf8'))).toMatchObject({ launcher: launcherPath(dir) });
+    expect(JSON.parse(fs.readFileSync(path.join(dir, '.runner'), 'utf8')).appBundleId).toBe('com.namikmesic.puck');
+  }
+
+  it('rewrites an older LaunchAgent that still runs run.sh, then bootstraps and kickstarts it', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(fakeExec(calls), 'mbp', async () => {
+      waited += 1;
+    });
+    await thisMac.install([]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'install'],
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', `gui/501`, file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expectRewritten(dir, file);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('rewrites a LaunchAgent whose plist names no app', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, launcherPath(dir));
+    const calls: Call[] = [];
+    deps(fakeExec(calls), 'mbp');
+    await thisMac.install([]);
+    expect(steps(calls)[0]).toEqual(['svc', 'install']);
+    expect(steps(calls).map((s) => s[1] ?? s[0])).toEqual(['install', 'bootout', 'bootout', 'bootstrap', 'kickstart']);
+    expectRewritten(dir, file);
+  });
+
+  it('reloads an already-current LaunchAgent without reinstalling it', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const before = fs.readFileSync(file, 'utf8');
     const calls: Call[] = [];
     let waited = 0;
     deps(
@@ -225,9 +356,83 @@ describe('This Mac runner', () => {
       },
     );
     await thisMac.install([]);
-    expect(calls.map((c) => c.args.slice(1))).toEqual([['svc', 'start']]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'start'],
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', `gui/501`, file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
     expect(waited).toBe(1);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('reinstalls when the runner refuses to rewrite an existing LaunchAgent', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(
+      fakeExec(calls, {
+        svc: (sub, n) => (sub === 'install' && n === 1 ? { code: 1, stderr: 'A service is already installed. Uninstall it first: ./svc.sh uninstall' } : null),
+      }),
+      'mbp',
+    );
+    await thisMac.install([]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'install'],
+      ['svc', 'uninstall'],
+      ['svc', 'install'],
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', `gui/501`, file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expectRewritten(dir, file);
+  });
+
+  it('names the rewritten login item when kickstart fails', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { kickstart: { code: 1, stderr: 'Operation not permitted' } }), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/Check that puck-runner is allowed in System Settings → General → Login Items & Extensions/);
+    expect(steps(calls).map((s) => (s[0] === 'launchctl' ? s[1] : s[0]))).toEqual(['svc', 'bootout', 'bootout', 'bootstrap', 'kickstart', 'print']);
+    expectRewritten(dir, file);
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+  });
+
+  it('names the login item launchd loaded when kickstart fails', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    deps(
+      fakeExec([], {
+        kickstart: { code: 1, stderr: 'Operation not permitted' },
+        print: { stdout: 'gui/501/x = {\n\tprogram = /var/folders/ab/T/puck-isolated-1/run.sh\n}\n' },
+      }),
+      'mbp',
+    );
+    await expect(thisMac.install([])).rejects.toThrow(/Check that run\.sh is allowed in System Settings → General → Login Items & Extensions/);
+    const plist = fs.readFileSync(file, 'utf8');
+    expect(plist).toContain(`<string>${launcherPath(dir)}</string>`);
+    expect(plist).not.toContain('run.sh');
+  });
+
+  it('does not mark This Mac installed when the rewritten LaunchAgent does not load', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { bootstrap: { code: 5, stderr: 'Bootstrap failed: 5: Input/output error' } }), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/launchctl bootstrap failed: Bootstrap failed: 5/);
+    expect(steps(calls).flat()).not.toContain('kickstart');
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+    expect(thisMac.localState().installed).toBe(false);
   });
 
   it('surfaces a LaunchAgent start failure and does not mark This Mac installed', async () => {
@@ -250,7 +455,7 @@ describe('This Mac runner', () => {
       },
     );
     await expect(thisMac.install([])).rejects.toThrow(/Operation not permitted/);
-    expect(calls.map((c) => c.args.slice(1))).toEqual([
+    expect(steps(calls)).toEqual([
       ['svc', 'start'],
       ['svc', 'install'],
       ['svc', 'start'],
@@ -279,9 +484,31 @@ describe('This Mac runner', () => {
     expect(thisMac.localState().installed).toBe(false);
   });
 
+  it('does not mark This Mac installed when launchd does not start the runner', async () => {
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(fakeExec(calls, { kickstart: { code: 1, stderr: 'Operation not permitted' } }), 'mbp', async () => {
+      waited += 1;
+    });
+    await expect(thisMac.install([])).rejects.toThrow(/launchd did not start the runner \(Operation not permitted\)\. .*Login Items/);
+    expect(waited).toBe(0);
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+    expect(thisMac.localState()).toMatchObject({ installed: false, error: expect.stringMatching(/launchd did not start/) });
+  });
+
+  it('refuses to set up This Mac in an isolated launch', async () => {
+    const calls: Call[] = [];
+    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', uid: 501, isolated: true, hostname: () => 'mbp', dataDir: () => data });
+    expect(thisMac.localState()).toMatchObject({ supported: false, unsupported: expect.stringMatching(/isolated launch/) });
+    await expect(thisMac.install([])).rejects.toThrow(/cannot be set up in an isolated launch.*LaunchAgents/);
+    expect(calls).toEqual([]);
+    expect(fs.existsSync(macDir())).toBe(false);
+    expect(localRunner()).toBeNull();
+  });
+
   it('refuses a download that does not match its sha256 and leaves nothing behind', async () => {
     const calls: Call[] = [];
-    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
+    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
     const real = globalThis.fetch;
     useServerDeps(
       {
@@ -302,7 +529,7 @@ describe('This Mac runner', () => {
 
   it('cleans up when registration fails', async () => {
     const calls: Call[] = [];
-    thisMac.useThisMacDeps({ exec: fakeExec(calls, { failConfig: 'Docker is not running on this machine.' }), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
+    thisMac.useThisMacDeps({ exec: fakeExec(calls, { failConfig: 'Docker is not running on this machine.' }), platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
     await expect(thisMac.install([])).rejects.toThrow(/Registering the runner failed: Docker is not running/);
     expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
@@ -311,6 +538,7 @@ describe('This Mac runner', () => {
   it('needs macOS on Apple silicon', async () => {
     thisMac.useThisMacDeps({ exec: fakeExec([]), platform: 'linux', arch: 'x64', dataDir: () => data });
     expect(thisMac.supported()).toBe(false);
+    expect(thisMac.localState()).toMatchObject({ supported: false, unsupported: expect.stringMatching(/Apple silicon/) });
     await expect(thisMac.install([])).rejects.toThrow(/macOS on Apple silicon/);
   });
 
@@ -331,14 +559,18 @@ describe('This Mac runner', () => {
 
   it('uninstall deregisters keeping the environments, then removes the directory', async () => {
     const calls: Call[] = [];
-    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
+    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
     await thisMac.install([]);
     calls.length = 0;
     await thisMac.uninstall();
-    expect(calls.map((c) => c.args.slice(1))).toEqual([['config', 'remove', '--unattended', '--keep-environments']]);
+    expect(steps(calls)).toEqual([['config', 'remove', '--unattended', '--keep-environments']]);
     expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
     expect(thisMac.localState()).toMatchObject({ installed: false, runnerId: null });
+  });
+
+  it('names the app bundle id the Electron build uses', () => {
+    expect(thisMac.APP_BUNDLE_ID).toBe(forgeConfig.packagerConfig?.appBundleId);
   });
 
   it('names This Mac after the host, safely', () => {

@@ -192,10 +192,16 @@ describe('config.sh --local-socket', { timeout: 20_000 }, () => {
     const session = await signIn(h, 'octo');
     const socket = path.join(dir, 'runner', 'local.sock');
     await configure(
-      { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: socket, labels: 'local', serviceLabel: 'com.puck.runner.abcd1234' },
+      { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: socket, labels: 'local', serviceLabel: 'com.puck.runner.abcd1234', appBundleId: 'com.namikmesic.puck' },
       { paths, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' }, hostname: 'mbp' },
     );
-    expect(readConfig(paths)).toMatchObject({ localSocket: socket, labels: ['macos', 'arm64', 'local'], serviceLabel: 'com.puck.runner.abcd1234' });
+    expect(readConfig(paths)).toMatchObject({ localSocket: socket, labels: ['macos', 'arm64', 'local'], serviceLabel: 'com.puck.runner.abcd1234', appBundleId: 'com.namikmesic.puck' });
+    await expect(
+      configure(
+        { url: h.base, token: `PRT_${'a'.repeat(16)}`, unattended: true, replace: false, disableUpdate: false, appBundleId: 'not a bundle id' },
+        { paths: runnerPaths(path.join(dir, 'bad-bundle')), docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' }, hostname: 'mbp' },
+      ),
+    ).rejects.toThrow('--app-bundle-id must be a bundle identifier');
 
     const other = runnerPaths(path.join(dir, 'other'));
     await expect(

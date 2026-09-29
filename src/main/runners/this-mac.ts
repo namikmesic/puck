@@ -10,10 +10,22 @@
  * downloaded and checked against its sha256, unpacked with /usr/bin/tar into
  * `<userData>/r/<account>`, one directory per Puck account, then driven by its own scripts' entry point with its
  * own Node runtime: `config --unattended … --labels local --local-socket
- * <dir>/local.sock` with a registration token read from a 0600 file (then
- * revoked), and `svc install` + `svc start`. The app's Electron binary is not
- * used as a Node runtime: packaged builds switch that off (the RunAsNode
- * fuse), and the runner updates itself from the server like any other.
+ * <dir>/local.sock --app-bundle-id <Puck's>` with a registration token read
+ * from a 0600 file (then revoked), and `svc install` + `svc start`. Then the
+ * app kickstarts the LaunchAgent itself: launchd may hold a freshly loaded
+ * job back, and an older runner release's `svc start` only loads it. That
+ * kickstart unloads the recorded agent when one is loaded and bootstraps
+ * its plist, so the job that runs is the plist on disk. A LaunchAgent left
+ * from an older install — its program is not the puck-runner launcher, or
+ * its plist names no app — is rewritten first, including one an older
+ * `svc install` just wrote. The
+ * app's Electron binary is not used as a Node runtime: packaged builds
+ * switch that off (the RunAsNode fuse), and the runner updates itself from
+ * the server like any other.
+ *
+ * An isolated launch (PUCK_ISOLATED=1) refuses the install: the LaunchAgent
+ * is a login item in the real ~/Library/LaunchAgents, and it would outlive
+ * the launch's temporary data folder that holds the runner.
  *
  * Uninstall: `config remove --unattended --keep-environments` (which stops
  * and removes the LaunchAgent and deregisters with the runner's own signed
@@ -30,12 +42,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LocalRunnerState } from '../../harness/bridge';
+import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdNotLoaded, launchdPlist, launchdPrintedProgram, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
 import type { ServerRunner } from '../../harness/server-api';
+import { ISOLATED_ENV } from '../isolation';
 import { log } from '../log';
 import * as api from '../server/api';
 import { serverDeps } from '../server/http';
 import { current, onSessionChange } from '../server/session';
 import { forgetLocalRunner, localRunner, setLocalRunner, type LocalRunnerRecord } from './store';
+
+/** Puck's bundle id (forge.config.ts `appBundleId`): the LaunchAgent names it as its app. */
+export const APP_BUNDLE_ID = 'com.namikmesic.puck';
 
 /** Unix socket paths are limited to 104 bytes on macOS. */
 const MAX_SOCKET_PATH_BYTES = 103;
@@ -72,6 +89,10 @@ export interface ThisMacDeps {
   arch: string;
   hostname(): string;
   dataDir(): string;
+  /** The user's id: the LaunchAgent lives in the gui/<uid> launchd domain. */
+  uid: number;
+  /** An isolated launch (PUCK_ISOLATED=1), which must leave no LaunchAgent behind. */
+  isolated: boolean;
   /** Resolves once the local socket accepts connections, or rejects. */
   waitForSocket(socket: string, timeoutMs: number): Promise<void>;
 }
@@ -90,6 +111,8 @@ function defaultDeps(): ThisMacDeps {
     arch: process.arch,
     hostname: () => os.hostname(),
     dataDir: () => app.getPath('userData'),
+    uid: process.getuid?.() ?? -1,
+    isolated: process.env[ISOLATED_ENV] === '1',
     waitForSocket,
   };
 }
@@ -117,10 +140,22 @@ export function supported(): boolean {
   return d().platform === 'darwin' && d().arch === 'arm64';
 }
 
+const ISOLATED_REFUSAL =
+  'This Mac cannot be set up in an isolated launch: its LaunchAgent would be a login item in your real ~/Library/LaunchAgents running a runner from this launch\'s temporary data folder. Launch Puck normally, or add a runner by hand.';
+
+/** Why the one-click runner cannot be set up here, or null when it can. */
+function unsupported(): string | null {
+  if (!supported()) return 'The one-click runner needs macOS on Apple silicon. Pick a platform above and run the commands on this Mac instead.';
+  if (d().isolated) return ISOLATED_REFUSAL;
+  return null;
+}
+
 export function localState(): LocalRunnerState {
   const record = localRunner();
+  const reason = unsupported();
   return {
-    supported: supported(),
+    supported: !reason,
+    unsupported: reason,
     installed: !!record?.runnerId,
     runnerId: record?.runnerId ?? null,
     busy,
@@ -191,24 +226,171 @@ function registrationTarget(existing: ServerRunner[], recordedId: string | null,
   return { name: base, replace: false };
 }
 
+/** For runner releases whose `svc start` only bootstraps and fails when the agent is already loaded. */
 function serviceAlreadyUp(message: string): boolean {
   return /already (bootstrapped|loaded|running)/i.test(message) || /Bootstrap failed: (5|17|37)\b/.test(message);
 }
 
-async function startRecorded(dir: string, socket: string, gate: () => void): Promise<void> {
+interface InstalledService {
+  name: string;
+  file: string;
+}
+
+/** The installed LaunchAgent, from the runner's `.service` record. */
+function installedService(dir: string, fallback: string): InstalledService | null {
   try {
-    await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
+    const r = JSON.parse(fs.readFileSync(path.join(dir, '.service'), 'utf8')) as { kind?: unknown; name?: unknown; file?: unknown };
+    if (r.kind !== 'launchd' || typeof r.file !== 'string' || r.file === '') return null;
+    const name = typeof r.name === 'string' && /^com\.puck\.runner\.[a-z0-9-]{1,48}$/.test(r.name) ? r.name : fallback;
+    return { name, file: r.file };
+  } catch {
+    return null;
+  }
+}
+
+/** The name Login Items shows for the job launchd has loaded, or for the plist on disk. */
+async function shownItemName(dir: string, label: string): Promise<string> {
+  const rec = installedService(dir, label);
+  const name = rec?.name ?? label;
+  const printed = await d().exec('/bin/launchctl', ['print', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  const fromJob = launchdPrintedProgram(printed.stdout);
+  if (fromJob) return fromJob;
+  if (!rec) return LAUNCHER;
+  try {
+    return loginItemName(fs.readFileSync(rec.file, 'utf8')) ?? LAUNCHER;
+  } catch {
+    return LAUNCHER;
+  }
+}
+
+/** An older LaunchAgent still runs run.sh, or its plist names no app. */
+function recordedAgentStale(dir: string, label: string): boolean {
+  const rec = installedService(dir, label);
+  if (!rec) return false;
+  let text: string;
+  try {
+    text = fs.readFileSync(rec.file, 'utf8');
+  } catch {
+    return true;
+  }
+  return launchAgentProgram(text) !== launcherPath(dir) || !launchAgentNamesApp(text, APP_BUNDLE_ID);
+}
+
+function ensureAppBundleId(dir: string): void {
+  const file = path.join(dir, '.runner');
+  let c: Record<string, unknown>;
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+    c = v as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (c.appBundleId === APP_BUNDLE_ID) return;
+  c.appBundleId = APP_BUNDLE_ID;
+  fs.writeFileSync(file, JSON.stringify(c, null, 2) + '\n');
+}
+
+/** Writes the launcher and plist `svc install` writes, over an older agent. */
+function placeLaunchAgent(dir: string, rec: InstalledService): void {
+  const launcher = launcherPath(dir);
+  fs.mkdirSync(path.join(dir, '_diag'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(launcher, launcherScript(), { mode: 0o755 });
+  fs.chmodSync(launcher, 0o755);
+  fs.mkdirSync(path.dirname(rec.file), { recursive: true });
+  fs.writeFileSync(rec.file, launchdPlist({ label: rec.name, root: dir, appBundleId: APP_BUNDLE_ID }), { mode: 0o644 });
+  try {
+    const serviceFile = path.join(dir, '.service');
+    const r = JSON.parse(fs.readFileSync(serviceFile, 'utf8')) as Record<string, unknown>;
+    r.launcher = launcher;
+    fs.writeFileSync(serviceFile, JSON.stringify(r, null, 2) + '\n');
+  } catch {
+    // `.service` is the runner's record; the plist is already rewritten.
+  }
+}
+
+/** Unloads `name`. A label that is not loaded is fine; any other failure is not. */
+async function bootoutLabel(name: string): Promise<void> {
+  const r = await d().exec('/bin/launchctl', ['bootout', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  if (r.code === 0 || launchdNotLoaded(r.code, `${r.stderr}\n${r.stdout}`)) return;
+  const why = (r.stderr || r.stdout).trim().slice(-300) || `exit ${r.code}`;
+  throw new Error(`launchctl bootout failed: ${why}`);
+}
+
+/** Unloads the recorded agent and bootstraps its plist, so kickstart runs that plist. */
+async function loadRecorded(dir: string, label: string): Promise<void> {
+  const rec = installedService(dir, label);
+  if (!rec) return;
+  await bootoutLabel(rec.name);
+  if (rec.name !== label) await bootoutLabel(label);
+  const boot = await d().exec('/bin/launchctl', ['bootstrap', `gui/${d().uid}`, rec.file], { timeoutMs: 30_000 });
+  if (boot.code !== 0) {
+    const why = (boot.stderr || boot.stdout).trim().slice(-300) || `exit ${boot.code}`;
+    throw new Error(`launchctl bootstrap failed: ${why}`);
+  }
+}
+
+/** Loads the recorded plist and kickstarts that job. */
+async function kickstart(dir: string, label: string): Promise<void> {
+  await loadRecorded(dir, label);
+  const name = installedService(dir, label)?.name ?? label;
+  const r = await d().exec('/bin/launchctl', ['kickstart', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  if (r.code !== 0) {
+    const why = (r.stderr || r.stdout).trim().slice(-300) || `exit ${r.code}`;
+    throw new Error(`launchd did not start the runner (${why}). Check that ${await shownItemName(dir, label)} is allowed in System Settings → General → Login Items & Extensions.`);
+  }
+}
+
+/** Rewrites a stale LaunchAgent through `svc install`. Kickstart then loads that plist. */
+async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => void): Promise<void> {
+  const previous = installedService(dir, label);
+  if (!previous) throw new Error('No LaunchAgent is installed.');
+  ensureAppBundleId(dir);
+  try {
+    await runner(dir, ['svc', 'install'], 'Updating the LaunchAgent', 60_000);
   } catch (err) {
     gate();
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('No service is installed')) {
-      await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+    if (!/already installed/i.test(message)) throw err;
+    await runner(dir, ['svc', 'uninstall'], 'Updating the LaunchAgent', 60_000);
+    gate();
+    await runner(dir, ['svc', 'install'], 'Updating the LaunchAgent', 60_000);
+  }
+  gate();
+  const next = installedService(dir, label) ?? previous;
+  placeLaunchAgent(dir, next);
+  if (previous.name !== next.name) await bootoutLabel(previous.name);
+  gate();
+}
+
+async function startRecorded(dir: string, socket: string, label: string, gate: () => void): Promise<void> {
+  if (recordedAgentStale(dir, label)) {
+    await replaceStaleLaunchAgent(dir, label, gate);
+  } else {
+    try {
+      await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
+    } catch (err) {
       gate();
-      await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
-    } else if (!serviceAlreadyUp(message)) {
-      throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('No service is installed')) {
+        await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+        gate();
+        if (recordedAgentStale(dir, label)) {
+          const rec = installedService(dir, label);
+          if (rec) {
+            ensureAppBundleId(dir);
+            placeLaunchAgent(dir, rec);
+          }
+        } else {
+          await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+        }
+      } else if (!serviceAlreadyUp(message)) {
+        throw err;
+      }
     }
   }
+  gate();
+  await kickstart(dir, label);
   gate();
   progress('Waiting for the runner…');
   await d().waitForSocket(socket, 60_000);
@@ -226,7 +408,8 @@ function runnerJs(dir: string): { node: string; bundle: string } {
 
 async function runner(dir: string, args: string[], what: string, timeoutMs = 120_000): Promise<string> {
   const { node, bundle } = runnerJs(dir);
-  const r = await d().exec(node, [bundle, ...args], { timeoutMs, cwd: dir });
+  // The runner's lock is node:sqlite; its experimental warning would crowd the error text below.
+  const r = await d().exec(node, ['--disable-warning=ExperimentalWarning', bundle, ...args], { timeoutMs, cwd: dir });
   if (r.code !== 0) {
     const why = (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ').slice(-400);
     throw new Error(`${what} failed: ${why || `exit ${r.code}`}`);
@@ -278,6 +461,7 @@ async function exclusive<T>(kind: 'installing' | 'uninstalling', fn: () => Promi
 export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
   return exclusive('installing', async () => {
     if (!supported()) throw new Error('The This Mac runner needs macOS on Apple silicon. Add this Mac as a runner by hand instead.');
+    if (d().isolated) throw new Error(ISOLATED_REFUSAL);
     const id = accountId();
     const generation = sessionGeneration;
     const switched = (): boolean => sessionGeneration !== generation || current()?.user.id !== id;
@@ -293,7 +477,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     if (already) {
       // A registration from an earlier install that the record lost: keep it, make sure it runs.
       progress('Starting the runner…');
-      await startRecorded(dir, socket, gate);
+      await startRecorded(dir, socket, serviceLabelFor(id), gate);
       gate();
       const record = { runnerId: already, dir, socket, accountId: id };
       setLocalRunner(record);
@@ -332,7 +516,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       gate();
       fs.writeFileSync(tokenFile, reg.token, { mode: 0o600 });
       const target = registrationTarget(existing, recordedId, d().hostname());
-      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket, '--service-label', serviceLabelFor(id)];
+      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket, '--service-label', serviceLabelFor(id), '--app-bundle-id', APP_BUNDLE_ID];
       if (target.replace) args.push('--replace');
       await runner(dir, args, 'Registering the runner');
       gate();
@@ -345,6 +529,8 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
       gate();
       await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+      gate();
+      await kickstart(dir, serviceLabelFor(id));
       gate();
       progress('Waiting for the runner…');
       await d().waitForSocket(socket, 60_000);

@@ -51,6 +51,7 @@ Options:
   --local-socket <path>       Also listen on this unix socket for Puck on this machine
                               (the This Mac runner Puck installs uses it)
   --service-label <label>     LaunchAgent label (com.puck.runner.<name>); This Mac sets one per account
+  --app-bundle-id <id>        The app the LaunchAgent belongs to (macOS background items); This Mac sets Puck's
   -h, --help                  Show this help
 
 Remove options:
@@ -72,7 +73,7 @@ background, install it as a service with ./svc.sh.
 Commands:
   install [user]   Install the service (Linux: a systemd unit, run with sudo, for [user]
                    or the user who ran sudo; macOS: a LaunchAgent for you, without sudo)
-  start            Start it
+  start            Start it (macOS: unload the LaunchAgent if it is loaded, then load and start it)
   stop             Stop it (environments keep running)
   status           Show its status
   uninstall        Stop and remove it
@@ -116,6 +117,7 @@ async function config(argv: string[]): Promise<number> {
       disableupdate: { type: 'boolean' },
       'local-socket': { type: 'string' },
       'service-label': { type: 'string' },
+      'app-bundle-id': { type: 'string' },
       'keep-environments': { type: 'boolean' },
       'delete-environments': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -162,6 +164,7 @@ async function config(argv: string[]): Promise<number> {
         disableUpdate: !!values.disableupdate,
         localSocket: values['local-socket'],
         serviceLabel: values['service-label'],
+        appBundleId: values['app-bundle-id'],
       },
       { paths, docker: realDocker, io, version: RUNNER_VERSION, platform },
     );

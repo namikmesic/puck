@@ -31,6 +31,7 @@ import type { DockerRunner } from './docker/client';
 import { dockerHealth } from './docker/health';
 import { DockerOps } from './docker/ops';
 import {
+  BUNDLE_ID_RE,
   forgetRegistration,
   isConfigured,
   readConfig,
@@ -106,6 +107,8 @@ export interface ConfigureOptions {
   localSocket?: string;
   /** LaunchAgent label, when this install must not share the name-derived one. */
   serviceLabel?: string;
+  /** The app's bundle id, which the LaunchAgent names as its owner (This Mac). */
+  appBundleId?: string;
 }
 
 export interface ConfigureDeps {
@@ -134,6 +137,9 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
   if (opts.localSocket !== undefined) {
     const problem = checkSocketPath(opts.localSocket);
     if (problem) throw new ConfigureError(problem);
+  }
+  if (opts.appBundleId !== undefined && (opts.appBundleId.length > 255 || !BUNDLE_ID_RE.test(opts.appBundleId))) {
+    throw new ConfigureError('--app-bundle-id must be a bundle identifier, like com.example.app.');
   }
 
   io.print(`Puck runner ${deps.version} (${deps.platform.os}-${deps.platform.arch})`);
@@ -187,6 +193,7 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
       owner: res.owner?.login ?? null,
       localSocket: opts.localSocket ?? null,
       serviceLabel: opts.serviceLabel || null,
+      appBundleId: opts.appBundleId || null,
     });
     writeCredentials(paths, { runnerId: res.runnerId, keyFile: '.runner_key', keyFingerprint: key.fingerprint });
   } catch (err) {

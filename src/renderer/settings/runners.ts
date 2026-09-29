@@ -254,7 +254,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     const box = el('div', 'rn-this-mac');
     const local = state?.local;
     if (!local?.supported) {
-      box.appendChild(el('p', 'pv-note', 'The one-click runner needs macOS on Apple silicon. Pick a platform above and run the commands on this Mac instead.'));
+      box.appendChild(el('p', 'pv-note', local?.unsupported ?? 'The one-click runner needs macOS on Apple silicon. Pick a platform above and run the commands on this Mac instead.'));
       return box;
     }
     if (local.installed) {

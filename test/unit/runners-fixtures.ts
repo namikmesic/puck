@@ -34,7 +34,7 @@ export function runnersState(over: Partial<RunnersState> = {}): RunnersState {
     server: 'http://localhost:8765',
     connection: 'connected',
     runners: [runnerRow()],
-    local: { supported: true, installed: false, runnerId: null, busy: null, detail: '', error: null },
+    local: { supported: true, unsupported: null, installed: false, runnerId: null, busy: null, detail: '', error: null },
     ...over,
   };
 }

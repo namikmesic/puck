@@ -6,12 +6,13 @@
 # it (RestartPreventExitStatus), and under launchd, which has no such
 # setting, it is reported as a clean exit so the LaunchAgent stays down.
 # TERM and INT are passed on to the runner, which closes its connections
-# and exits; environments keep running.
+# and exits; environments keep running. Node's warning that SQLite (the
+# runner's lock) is experimental is silenced, as in the server image.
 DIR=$(cd "$(dirname "$0")" && pwd)
 child=
 trap 'if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; fi' TERM INT
 while :; do
-  "$DIR/bin/node" "$DIR/bin/puck-runner.cjs" run "$@" &
+  "$DIR/bin/node" --disable-warning=ExperimentalWarning "$DIR/bin/puck-runner.cjs" run "$@" &
   child=$!
   wait "$child"
   code=$?
