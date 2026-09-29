@@ -410,6 +410,10 @@ const permissionReads = (login?: string) =>
 /* ---------- Intake ---------- */
 
 describe('issue intake', () => {
+  // A full page of issues creates over a hundred items, each saved with an
+  // fsync and polled; that takes seconds on a loaded machine, not a hang.
+  const PAGE_OF_ITEMS_MS = 30_000;
+
   it.each([
     {
       name: 'the intake label makes a backlog item',
@@ -525,7 +529,7 @@ describe('issue intake', () => {
     await pollAll();
     expect(backlog.list().map((i) => i.source?.number)).toContain(102);
     expect(backlog.list()).toHaveLength(102);
-  });
+  }, PAGE_OF_ITEMS_MS);
 
   it('takes in an issue that arrives on the page after a full cached page', async () => {
     for (let n = 1; n <= 100; n++) fake.gh.issues.set(n, issue(n, ['puck']));
@@ -535,7 +539,7 @@ describe('issue intake', () => {
     await pollAll();
     expect(backlog.list().map((i) => i.source?.number)).toContain(101);
     expect(backlog.list()).toHaveLength(101);
-  });
+  }, PAGE_OF_ITEMS_MS);
 
   it('agentFromLabels picks the first assigned agent a label names', () => {
     expect(agentFromLabels(['bug', 'puck:ghost', 'puck:reviewer'], 'puck', ['implementer', 'reviewer'])).toEqual({ agent: 'reviewer', unknown: ['ghost'] });
