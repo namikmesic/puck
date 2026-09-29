@@ -1,6 +1,6 @@
 /**
- * Agent and environment definitions: the versioned YAML files in the config
- * repo (agents/<name>.yaml, environments/<name>.yaml, optional prompts/**),
+ * Agent and environment definitions: the versioned YAML files in the Puck
+ * home (agents/<name>.yaml, environments/<name>.yaml, optional prompts/**),
  * the repo snapshot they are read from, and the resolved environment an
  * instance runs. Pure types and constants - no node:* or electron imports,
  * so the app, the renderer and the code inside environments share them.
@@ -33,7 +33,7 @@ export const LIMITS = {
 
 export type DefinitionKind = 'Agent' | 'Environment';
 
-/** Where each kind lives in the config repo (one file per definition). */
+/** Where each kind lives in the Puck home (one file per definition). */
 export const DEFINITION_DIRS: Readonly<Record<DefinitionKind, string>> = {
   Agent: 'agents',
   Environment: 'environments',
@@ -192,7 +192,7 @@ export interface TreeBlob {
   sha: string;
 }
 
-/** One commit of the config repo. `tree` omits symlink entries; `files` holds the texts Puck read. */
+/** One commit of the Puck home. `tree` omits symlink entries; `files` holds the texts Puck read. */
 export interface RepoSnapshot {
   sha: string;
   tree: Record<string, TreeBlob>;
@@ -296,7 +296,7 @@ export interface ListedError extends DefinitionError {
 }
 
 export interface DefinitionListing {
-  /** `owner/name` of the config repo. */
+  /** `owner/name` of the Puck home. */
   repo: string;
   pin: Pin;
   sha: string;

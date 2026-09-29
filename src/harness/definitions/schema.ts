@@ -1,15 +1,15 @@
 /**
  * The JSON Schema (draft-07) for definition files, generated from the field
- * tables and the registered harness descriptors. Editors and config-repo CI
- * validate single files against it; the cross-file rules (names equal file
+ * tables and the registered harness descriptors. Editors and the Puck home's
+ * CI validate single files against it; the cross-file rules (names equal file
  * names, references exist, the orchestrator's harness, sizes in bytes) run
  * only in Puck. Per-harness `effort` and `options` sit under if/then on
  * `harness`, so editors autocomplete option ids.
  *
- * `npm run schema` writes schemaText() to schema/puck.schema.json and the
- * example config repo; a unit test and CI fail when a committed copy drifts.
+ * `npm run schema` (`scripts/gen-schema.mjs`) writes schemaText() to the
+ * committed copies; a unit test and CI fail when one drifts.
  * The `$id` ends in a hash of the schema body, so it changes exactly when
- * the schema does and a stale copy in a config repo is detectable.
+ * the schema does and a stale copy in a Puck home is detectable.
  */
 
 import type { ProviderOption } from '../options';
