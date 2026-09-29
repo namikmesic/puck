@@ -21,32 +21,39 @@ repo's first commit — the colors earned their keep; the bag spa did not.)
 | `--emerald-edge`  | `rgba(46,94,78,0.18)`  | Signed-in harness chip border           |
 | `--gold`          | `#D4AF37`              | Live activity: thinking dots, running   |
 | `--gold-muted`    | `rgba(212,175,55,0.15)`| Gold chip fills, the waiting halo       |
+| `--gold-ink`      | `#6F5716`              | Text on gold fills (gold is never text) |
 | `--charcoal`      | `#1C1C1A`              | Body text                               |
-| `--gray`          | `#6B6B66`              | Secondary text                          |
-| `--gray-light`    | `#78786F`              | Timestamps, hints (AA on cream)         |
+| `--gray`          | `#5F5F59`              | Secondary text                          |
+| `--gray-light`    | `#6F6F66`              | Timestamps, hints (AA on cream)         |
 | `--red`           | `#A03C32`              | Errors, destructive, stop               |
 
 Hairlines are emerald at low alpha (`--line`, `--line-soft`) rather than
-neutral gray — everything on the page leans slightly emerald.
+neutral gray — everything on the page leans slightly emerald. Spacing sits
+on a 4px grid (`--space-*`); radii (`--radius-*`), shadows (`--shadow-*`)
+and the type scale (`--text-*`) are tokens in `shell.css` too.
 
 ## Type
 
 - UI: system stack (`-apple-system`, SF Pro)
 - Display (logo, avatar glyphs): `Playfair Display` / `Didot` / Georgia
-- Mono (tool summaries, stats, timestamps): `ui-monospace` / SF Mono
+- Mono (code, and identifiers in a code context: branches, SHAs, the
+  commands and paths in tool calls): `ui-monospace` / SF Mono. Metadata,
+  ids like `W-12`, counts and times are UI font with tabular figures.
+- One clock ("8:42 PM"), one currency to the cent ("$0.27"), one duration
+  style ("4.2s", "1m 05s"): `src/renderer/format.ts`.
 
 ## Layout
 
 One window, one environment on screen: a 48px top bar (the environment
-switcher and status) over a three-pane grid — the backlog on the left
-(`--bl-w`, 220–420px, default 280), the orchestrator chat or a work item's
-detail in the center, and work in progress on the right (`--wp-w`,
-240–460px, default 300). Side panes resize on their handles and collapse
-(⌘[ and ⌘]); below 1,100px the right pane becomes a drawer over the center.
-`--content-col` (940px max) still caps the chat column inside the center
-pane, and `--content-pad` scales gutters with the window. Chat is
-Slack-shaped: avatar-gutter message rows, day dividers, grouped consecutive
-messages — never bubbles.
+switcher and status on the left, the Chat | Board switch centered) over
+one of two views. Chat is the orchestrator conversation in a centered
+reading column (`--chat-col`, 760px) with the composer pinned under it;
+it is Slack-shaped: 28px avatar-gutter message rows, day dividers,
+grouped consecutive messages — never bubbles. Board is one column per
+stage (Backlog, Ready, In progress, Review, Done, and Closed as a rail
+until expanded); five columns and the rail fit from 1,024px, and the
+board scrolls sideways below that. An item's detail is a side sheet
+(`clamp(520px, 50vw, 780px)`) over either view.
 
 ## Signals
 

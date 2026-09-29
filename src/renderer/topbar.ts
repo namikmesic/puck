@@ -4,9 +4,11 @@
  *
  * - The current environment's name opens the switcher menu (see
  *   instance-menu.ts).
- * - The status chip: the runner, a lifecycle dot, and the pin with its
- *   short SHA; while the app or the daemon works on the environment it
- *   shows the stage and the elapsed time. Hover shows the details.
+ * - The status pill: the runner, a lifecycle dot, the status, and the
+ *   pinned tag or branch; while the app or the daemon works on the
+ *   environment it shows the stage and the elapsed time. A click opens
+ *   the details (the pin with its commit, the daemon build, the
+ *   connection) in a popover.
  * - Chips: "Update available" (the apply dialog, with the changes grouped
  *   by how they apply), a GitHub warning when the environment's GitHub
  *   access is not ok, a reconnecting spinner, "Daemon update" when this
@@ -25,13 +27,14 @@ import type { InstanceStore } from './instance-store';
 import type { AttachView } from './instance-sync';
 import { renderInstanceMenu } from './instance-menu';
 import { pinText, progressLine, statusWord, toneOf } from './instance-progress';
+import { closePopup, openPopover, popupAnchor } from './popup';
 import { button, errText } from './util';
 
 export interface TopbarElements {
   env: HTMLButtonElement;
   envName: HTMLElement;
   menu: HTMLElement;
-  status: HTMLElement;
+  status: HTMLButtonElement;
   chips: HTMLElement;
   banner: HTMLElement;
   /** The apply dialog's host (a small modal). */
@@ -49,6 +52,13 @@ export interface TopbarContext {
   say(text: string): void;
   now?(): number;
 }
+
+/** The pill shows a tag or branch by name; a commit pin (a raw SHA) stays in the details. */
+export function pinLabel(pin: { kind: string; name: string } | null | undefined): string {
+  return pin && pin.kind !== 'commit' ? pin.name : '';
+}
+
+const upper = (text: string): string => (text ? text[0]?.toUpperCase() + text.slice(1) : text);
 
 const CLASS_TITLE: Record<UpdateClass, string> = {
   hot: 'Applies now, interrupting nothing',
@@ -209,6 +219,37 @@ export function initTopbar(ctx: TopbarContext) {
     return c;
   }
 
+  /** The facts behind the pill, as label and value rows. */
+  function details(): [string, string][] {
+    const info = current();
+    if (!info) return [];
+    const live = store.state();
+    const daemon = live?.instance ?? null;
+    const pin = pinText(live?.instance.pin ?? null);
+    const rows: [string, string][] = [
+      ['Environment', info.name || info.id],
+      ['Runner', info.runnerName],
+      ['Status', upper(statusWord(info, daemon))],
+    ];
+    if (live?.instance.detail) rows.push(['Detail', live.instance.detail]);
+    if (live?.instance.error) rows.push(['Error', live.instance.error]);
+    if (pin) rows.push(['Definition', pin]);
+    if (live) rows.push(['Daemon', `${live.daemon.version} (${live.daemon.build.slice(0, 7)})`]);
+    if (info.attachDetail) rows.push(['Connection', info.attachDetail]);
+    return rows;
+  }
+
+  function showDetails(): void {
+    if (popupAnchor() === els.status) {
+      closePopup();
+      return;
+    }
+    const facts = el('dl', 'tb-facts');
+    for (const [k, v] of details()) facts.append(el('dt', '', k), el('dd', '', v));
+    openPopover(els.status, facts, { label: 'Environment details', className: 'tb-details' });
+  }
+  els.status.addEventListener('click', showDetails);
+
   function renderStatus(): void {
     const info = current();
     const live = store.state();
@@ -224,20 +265,11 @@ export function initTopbar(ctx: TopbarContext) {
     const daemon = live?.instance ?? null;
     const tone = toneOf(info, daemon);
     const line = progressLine(info, now(), daemon);
-    els.status.append(el('span', 'tb-where', info.runnerName), el('span', `tb-dot tone-${tone}`), el('span', 'tb-word', line || statusWord(info, daemon)));
-    const pin = pinText(live?.instance.pin ?? null);
+    const word = upper(line || statusWord(info, daemon));
+    els.status.append(el('span', 'tb-where', info.runnerName), el('span', `tb-dot tone-${tone}`), el('span', 'tb-word', word));
+    const pin = pinLabel(live?.instance.pin ?? null);
     if (pin && !line) els.status.appendChild(el('span', 'tb-pin', pin));
-    els.status.title = [
-      `${info.name} on ${info.runnerName}`,
-      `Status: ${statusWord(info, daemon)}`,
-      live?.instance.detail ? `Detail: ${live.instance.detail}` : '',
-      live?.instance.error ? `Error: ${live.instance.error}` : '',
-      pin ? `Definition: ${pin}` : '',
-      live ? `Daemon ${live.daemon.version} (${live.daemon.build})` : '',
-      info.attachDetail ? `Connection: ${info.attachDetail}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    els.status.setAttribute('aria-label', `${info.runnerName}: ${word}${pin && !line ? `, ${pin}` : ''}. Environment details`);
   }
 
   function renderChips(): void {

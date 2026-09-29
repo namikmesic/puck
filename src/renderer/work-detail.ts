@@ -1,9 +1,8 @@
 /**
- * Work detail: one work item in the center, in place of the orchestrator.
+ * Work detail: one work item in the side sheet over the Chat or Board view.
  *
- * - Breadcrumb "Orchestrator / W-12 Fix login redirect" (Back and Esc
- *   return; a dot says the orchestrator got something meanwhile).
- * - Header: status, agent, `repo@branch`, attempts, the pull request.
+ * - Header: `W-12`, the status, Close (Esc also closes), the title, and
+ *   the agent, `repo@branch`, attempts and the pull request.
  * - Actions by status, as the item state machine allows: running → Stop;
  *   review → Accept, Request changes (focuses the composer), Publish
  *   (always offered to the user); failed and cancelled → Retry; Cancel and
@@ -16,6 +15,8 @@
  *   pickers, timestamps, creator, last error).
  * - A pending question shows a banner: "Waiting on the orchestrator" with
  *   "Answer myself", or the question card when it is routed to the user.
+ *   On the Conversation tab, where the thread already shows the card, the
+ *   banner is one line that scrolls to it.
  *
  * Context in, controller out; no DOM lookups.
  */
@@ -23,10 +24,11 @@
 import type { ItemStatus, OpArgs, OpResult, PullView, RendererOp, WorkItem } from '../harness/daemon-protocol';
 import { askCard } from './ask-card';
 import { armDelete, el } from './dom';
-import { fmtClock, relTime } from './format';
+import { fmtTime, relTime } from './format';
 import type { InstanceStore } from './instance-store';
 import { renderMd } from './markdown';
 import type { SessionView } from './session-view';
+import { statusIcon } from './status-icons';
 import type { WorkTab } from './view-nav';
 import { button, errText } from './util';
 
@@ -59,6 +61,17 @@ const ACTION_LABEL: Record<ItemAction, string> = {
   delete: 'Delete',
 };
 
+const STATUS_LABEL: Record<ItemStatus, string> = {
+  backlog: 'Backlog',
+  queued: 'Ready',
+  running: 'Running',
+  'needs-input': 'Needs input',
+  review: 'In review',
+  done: 'Done',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
 /** Which statuses the item's title and body may be edited in. */
 const EDITABLE: ReadonlySet<ItemStatus> = new Set(['backlog', 'queued', 'review', 'failed', 'cancelled', 'done']);
 
@@ -88,9 +101,10 @@ export function compareUrl(item: WorkItem, github: string | null): string | null
 }
 
 export interface WorkDetailElements {
-  back: HTMLButtonElement;
-  unread: HTMLElement;
-  crumbTitle: HTMLElement;
+  close: HTMLButtonElement;
+  /** `W-12`. */
+  id: HTMLElement;
+  title: HTMLElement;
   status: HTMLElement;
   meta: HTMLElement;
   actions: HTMLElement;
@@ -112,7 +126,8 @@ export interface WorkDetailContext {
   daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<OpResult<K>>;
   openExternal(url: string): void;
   say(text: string): void;
-  back(): void;
+  /** Close the sheet (Close, and after Delete). */
+  close(): void;
   /** The user picked another tab. */
   onTab(tab: WorkTab): void;
   /** Refresh and focus the follow-up composer. */
@@ -126,10 +141,12 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   let mountedSession: string | null = null;
   let pull: { itemId: string; key: string; view: PullView | null; error: string | null; loading: boolean } | null = null;
   let answering = false;
+  /** The thread has no card for the question (not loaded): answer in the banner instead. */
+  let inline = false;
   /** What each part was last built from: an unrelated event does not rebuild it (and lose typing or a selection). */
   const built = { actions: '', banner: '', changes: '', details: '' };
 
-  els.back.addEventListener('click', () => ctx.back());
+  els.close.addEventListener('click', () => ctx.close());
   for (const b of els.tabs.querySelectorAll<HTMLButtonElement>('[data-tab]')) {
     b.addEventListener('click', () => ctx.onTab(b.dataset.tab as WorkTab));
   }
@@ -171,7 +188,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
           return;
         case 'delete':
           await ctx.daemon('item.delete', { itemId: it.id });
-          ctx.back();
+          ctx.close();
           return;
       }
     } catch (err) {
@@ -180,18 +197,29 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   }
 
   function renderHeader(it: WorkItem): void {
-    els.crumbTitle.textContent = `W-${it.number} ${it.title}`;
+    els.id.textContent = `W-${it.number}`;
+    els.title.textContent = it.title;
     els.status.className = `wd-status tone-${statusTone(it.status)}`;
     els.status.textContent = '';
-    els.status.append(el('span', 'dot'), document.createTextNode(it.status));
+    els.status.append(el('span', 'dot'), document.createTextNode(STATUS_LABEL[it.status]));
     els.meta.textContent = '';
-    els.meta.appendChild(el('span', `wd-agent${it.agent ? '' : ' none'}`, it.agent ?? 'Unassigned'));
+    const agent = el('span', `wd-agent${it.agent ? '' : ' none'}`);
+    if (it.agent) agent.appendChild(el('span', 'bd-agent-mark', it.agent[0]?.toUpperCase() ?? '?'));
+    agent.appendChild(document.createTextNode(it.agent ?? 'Unassigned'));
+    els.meta.appendChild(agent);
     const repo = it.repo ?? repoOf(it)?.dir ?? null;
-    if (repo || it.branch) els.meta.appendChild(el('span', 'wd-branch', [repo, it.branch].filter(Boolean).join('@')));
-    if (it.attempts > 1) els.meta.appendChild(el('span', 'wd-attempts', `attempt ${it.attempts}`));
+    if (repo) els.meta.appendChild(el('span', 'wd-repo', repo));
+    if (it.branch) {
+      const branch = el('code', 'wd-branch', it.branch);
+      branch.title = `Branch ${it.branch}`;
+      els.meta.appendChild(branch);
+    }
+    if (it.attempts > 1) els.meta.appendChild(el('span', 'wd-attempts', `Attempt ${it.attempts}`));
     if (it.pr) {
       const url = it.pr.url;
-      const pr = button('wd-pr', `PR #${it.pr.number}${it.pr.state && it.pr.state !== 'open' ? ` · ${it.pr.state}` : it.pr.draft ? ' · draft' : ''}`);
+      const pr = button('wd-pr', `#${it.pr.number}${it.pr.state && it.pr.state !== 'open' ? ` ${it.pr.state}` : it.pr.draft ? ' draft' : ''}`);
+      pr.prepend(statusIcon('pr'));
+      pr.title = `Open pull request #${it.pr.number} on GitHub`;
       pr.addEventListener('click', () => ctx.openExternal(url));
       els.meta.appendChild(pr);
     }
@@ -200,10 +228,11 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     built.actions = actionsKey;
     els.actions.textContent = '';
     for (const action of ITEM_ACTIONS[it.status]) {
-      const b = button(action === 'accept' || action === 'publish' ? 'btn-primary' : action === 'delete' || action === 'cancel' ? 'btn-ghost danger' : 'btn-ghost', ACTION_LABEL[action]);
+      const primary = action === 'accept' || (action === 'retry' && it.status === 'failed');
+      const b = button(primary ? 'btn-primary small' : action === 'delete' || action === 'cancel' ? 'btn-ghost danger' : 'btn-ghost', ACTION_LABEL[action]);
       b.dataset.action = action;
       const run = (): Promise<void> => act(it, action);
-      if (action === 'delete' || (action === 'cancel' && (it.status === 'running' || it.status === 'needs-input'))) armDelete(b, run);
+      if (action === 'delete' || (action === 'cancel' && (it.status === 'running' || it.status === 'needs-input' || it.status === 'review'))) armDelete(b, run);
       else b.addEventListener('click', () => void run());
       els.actions.appendChild(b);
     }
@@ -212,13 +241,14 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   function renderBanner(it: WorkItem): void {
     const pending = it.pendingAsk;
     const ask = pending ? store.ask(pending.askId) : undefined;
-    const key = JSON.stringify([it.id, pending, answering, !!ask]);
+    const key = JSON.stringify([it.id, pending, answering, inline, !!ask, tab]);
     if (built.banner === key) return;
     built.banner = key;
     els.banner.textContent = '';
     els.banner.classList.toggle('hidden', !pending);
     if (!pending) {
       answering = false;
+      inline = false;
       return;
     }
     const submit = async (answers: Record<string, string> | null): Promise<void> => {
@@ -231,16 +261,42 @@ export function initWorkDetail(ctx: WorkDetailContext) {
         throw err;
       }
     };
+    /** The thread's own card for the question, when the Conversation tab shows it. */
+    const inThread = (): HTMLElement | null => (tab === 'conversation' ? els.thread.querySelector<HTMLElement>(`[data-ask-id="${CSS.escape(pending.askId)}"]`) : null);
+    const goToCard = (card: HTMLElement): void => {
+      card.scrollIntoView({ block: 'center' });
+      card.querySelector<HTMLButtonElement>('.ask-option, button')?.focus({ preventScroll: true });
+    };
     if (pending.routedTo === 'orchestrator' && !answering) {
       els.banner.appendChild(el('span', 'wd-banner-text', 'Waiting on the orchestrator to answer a question.'));
       const mine = button('btn-ghost', 'Answer myself');
       mine.disabled = !ask;
       mine.addEventListener('click', () => {
         answering = true;
+        const card = inThread();
+        if (card) goToCard(card);
+        else inline = true;
+        renderBanner(it);
+        if (!card) els.banner.querySelector<HTMLButtonElement>('.ask-option, button')?.focus();
+      });
+      els.banner.appendChild(mine);
+      return;
+    }
+    if (tab === 'conversation' && ask && !inline) {
+      els.banner.appendChild(el('span', 'wd-banner-text', `${it.agent ?? 'The worker'} is waiting on your answer.`));
+      const go = button('btn-ghost', 'Go to the question');
+      go.addEventListener('click', () => {
+        const card = inThread();
+        if (card) {
+          goToCard(card);
+          return;
+        }
+        // Not in the thread (it did not load): answer here instead.
+        inline = true;
         renderBanner(it);
         els.banner.querySelector<HTMLButtonElement>('.ask-option, button')?.focus();
       });
-      els.banner.appendChild(mine);
+      els.banner.appendChild(go);
       return;
     }
     els.banner.appendChild(el('span', 'wd-banner-text', `${it.agent ?? 'The worker'} asks:`));
@@ -358,9 +414,12 @@ export function initWorkDetail(ctx: WorkDetailContext) {
 
     const checks = view?.checks ?? pr.checks ?? null;
     const ci = el('div', 'wd-ci');
-    if (!checks) ci.appendChild(el('span', 'wd-ci-state none', 'Checks: not reported yet'));
+    if (!checks) ci.appendChild(el('span', 'wd-ci-state none', 'Checks not reported yet'));
     else {
-      ci.appendChild(el('span', `wd-ci-state ${checks.state}`, `Checks: ${checks.state === 'failure' ? `${checks.failing.length} failing` : checks.state} · ${checks.sha.slice(0, 7)}`));
+      const word = { success: 'Checks passed', failure: `${checks.failing.length} check${checks.failing.length === 1 ? '' : 's'} failing`, pending: 'Checks running', neutral: 'Checks finished' }[checks.state];
+      const state = el('span', `wd-ci-state ${checks.state}`, word);
+      state.appendChild(el('code', 'wd-sha', checks.sha.slice(0, 7)));
+      ci.appendChild(state);
       if (checks.failing.length) {
         const list = el('ul', 'wd-failing');
         for (const f of checks.failing) {
@@ -536,7 +595,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     const fact = (k: string, v: string): void => {
       facts.append(el('dt', '', k), el('dd', '', v));
     };
-    fact('Created', `${new Date(it.createdAt).toLocaleDateString()} ${fmtClock(it.createdAt)} by ${it.createdBy === 'orchestrator' ? 'the orchestrator' : 'you'}`);
+    const day = new Date(it.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    fact('Created', `${day}, ${fmtTime(it.createdAt)} by ${it.createdBy === 'orchestrator' ? 'the orchestrator' : 'you'}`);
     fact('Updated', relTime(it.updatedAt));
     if (it.source) fact('Issue', `${it.source.repo}#${it.source.number}`);
     if (it.lastError) fact('Last error', it.lastError);
@@ -550,7 +610,9 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   function render(): void {
     const it = item();
     if (!it) {
-      els.crumbTitle.textContent = itemId ? 'This item was deleted' : '';
+      els.title.textContent = itemId ? 'This item was deleted' : '';
+      els.id.textContent = '';
+      els.status.textContent = '';
       els.actions.textContent = '';
       built.actions = '';
       els.meta.textContent = '';
@@ -576,6 +638,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     show(next: string, nextTab: WorkTab): void {
       if (next !== itemId) {
         answering = false;
+        inline = false;
         els.details.dataset.dirty = '0';
         built.actions = built.banner = built.changes = built.details = '';
       }
@@ -589,9 +652,6 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       mountedSession = null;
       pull = null;
       built.banner = built.changes = built.details = '';
-    },
-    setUnread(on: boolean): void {
-      els.unread.classList.toggle('hidden', !on);
     },
     itemId: (): string | null => itemId,
     sessionId: (): string | null => item()?.sessionId ?? null,

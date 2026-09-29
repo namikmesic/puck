@@ -1,9 +1,11 @@
 /**
  * Renderer entry: the environment window. One environment on screen at a
- * time; the backlog on the left, the orchestrator chat (or one work item's
- * detail) in the center, work in progress on the right, the top bar with
- * the environment switcher, and Settings, the start flow and the command
- * palette as modals.
+ * time, in one of two views the top bar switches between (⌘1, ⌘2, and
+ * remembered per environment): Chat, the orchestrator conversation in a
+ * centered reading column, and Board, the work items as a Kanban board.
+ * A work item's detail opens in a side sheet over either view. The top
+ * bar also carries the environment switcher and status; Settings, the
+ * start flow and the command palette are modals.
  *
  * The wiring layer only: DOM lookups, the nav applier, keyboard shortcuts
  * and boot. Every surface is its own module under src/renderer/ (context
@@ -19,23 +21,25 @@ import './styles/chat.css';
 import './styles/overlays.css';
 import type { HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from './harness/bridge';
 import type { OpArgs, OpResult, RendererOp } from './harness/daemon-protocol';
-import { initBacklogPane } from './renderer/backlog-pane';
+import { initBoard } from './renderer/board';
+import { liveWork } from './renderer/board-model';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
 import { initComposer } from './renderer/composer';
-import { showToast } from './renderer/dom';
+import { el, showToast } from './renderer/dom';
 import { initFirstRun } from './renderer/first-run';
-import { fmtTokens } from './renderer/format';
+import { fmtTokens, fmtUsd } from './renderer/format';
 import { composerGate, createTicker, isWorking } from './renderer/instance-progress';
 import { createInstanceStore, type StoreChange } from './renderer/instance-store';
 import { initInstanceSync, type InstanceSync } from './renderer/instance-sync';
-import { initPaneLayout } from './renderer/pane-layout';
+import { closePopup, openPopover, popupAnchor } from './renderer/popup';
 import { initSessionView } from './renderer/session-view';
 import { initSettingsModal } from './renderer/settings/modal';
 import { initStartFlow } from './renderer/start-flow';
 import { initTopbar } from './renderer/topbar';
-import { escapeTarget, INITIAL_NAV, navTransition, type NavState, type NavTarget } from './renderer/view-nav';
+import { button } from './renderer/util';
+import { escapeTarget, INITIAL_NAV, navTransition, readView, saveView, type NavState, type NavTarget, type View } from './renderer/view-nav';
+import { initViewSwitch } from './renderer/view-switch';
 import { initWorkDetail } from './renderer/work-detail';
-import { initWorkPane } from './renderer/work-pane';
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const node = document.getElementById(id);
@@ -54,6 +58,17 @@ const storage = ((): Storage | null => {
 
 const UPDATE_CHECK_MS = 15 * 60_000;
 
+const STATUS_WORD: Record<string, string> = {
+  backlog: 'backlog',
+  queued: 'ready',
+  running: 'running',
+  'needs-input': 'needs input',
+  review: 'in review',
+  done: 'done',
+  failed: 'failed',
+  cancelled: 'cancelled',
+};
+
 function boot(bridge: PuckBridge): void {
   let nav: NavState = INITIAL_NAV;
   let runners: RunnersState | null = null;
@@ -61,8 +76,11 @@ function boot(bridge: PuckBridge): void {
   let login: string | null = null;
   /** An earlier (closed) orchestrator session shown read-only, or null for the current one. */
   let viewing: string | null = null;
-  let childOpen = false;
+  /** The orchestrator said something while the Chat view was not showing. */
+  let unread = false;
   let lastUpdateCheck = 0;
+  /** Where focus goes back to when the sheet closes. */
+  let sheetReturn: HTMLElement | null = null;
 
   const say = (text: string): void => {
     if (text) showToast(text);
@@ -82,18 +100,12 @@ function boot(bridge: PuckBridge): void {
     return bridge.daemon(envId, op, args);
   }
 
-  /* ---------- Layout ---------- */
-
-  const narrow = window.matchMedia?.('(max-width: 1100px)');
-  const panes = initPaneLayout({
-    els: { root: byId('panes'), leftHandle: byId('resize-left'), rightHandle: byId('resize-right') },
-    storage,
-    narrow: () => narrow?.matches ?? false,
-  });
-
   /* ---------- Threads and composers ---------- */
 
   const ocChat = byId('oc-chat');
+  const wdThread = byId('wd-thread');
+  const center = byId('center');
+
   const sessions = initSessionView({
     store,
     history: (sessionId, before) => daemon('session.history', before === undefined ? { sessionId } : { sessionId, before }),
@@ -105,26 +117,34 @@ function boot(bridge: PuckBridge): void {
     capabilities: (harness) => harnesses.find((h) => h.id === harness)?.capabilities,
     openRef: (ref) => {
       const item = store.findItem(ref);
-      if (item) go({ view: 'work', itemId: item.id });
+      if (item) openItem(item.id);
+      else say(`${ref} is no longer on the board.`);
     },
-    onChild: (title) => {
-      childOpen = title !== null;
-      byId('oc-child-back').classList.toggle('hidden', !(childOpen && nav.center === 'orchestrator'));
-      if (title && nav.center === 'orchestrator') byId('oc-title').textContent = `Sub-agent · ${title}`;
-      else renderOrchestrator();
+    describeRef: (ref) => {
+      const item = store.findItem(ref);
+      return item ? `${ref} · ${item.title} · ${STATUS_WORD[item.status] ?? item.status}` : null;
+    },
+    onChild: (title, host) => {
+      if (host === wdThread) {
+        byId('wd-child-back').classList.toggle('hidden', title === null);
+        return;
+      }
+      byId('oc-child-back').classList.toggle('hidden', title === null);
+      renderOrchestrator(title);
     },
     toast: showToast,
     overlay: {
       body: byId('turn-full-body'),
       crumb: byId('turn-full-crumb'),
       title: byId('turn-full-title'),
-      stage: byId('center'),
+      stage: center,
       backButton: byId('turn-full-back'),
     },
     storage,
   });
   byId('turn-full-back').addEventListener('click', () => sessions.closeFullTurn());
-  byId('oc-child-back').addEventListener('click', () => sessions.closeChild());
+  byId('oc-child-back').addEventListener('click', () => sessions.closeChild(ocChat));
+  byId('wd-child-back').addEventListener('click', () => sessions.closeChild(wdThread));
 
   const ocComposer = initComposer({
     els: { form: byId('oc-composer'), input: byId('oc-prompt'), send: byId('oc-send'), stop: byId('oc-stop'), hint: byId('oc-hint') },
@@ -147,11 +167,11 @@ function boot(bridge: PuckBridge): void {
   const wdComposer = initComposer({
     els: { form: byId('wd-composer'), input: byId('wd-prompt'), send: byId('wd-send'), stop: byId('wd-stop'), hint: byId('wd-hint') },
     target: () => {
-      const item = workDetail.itemId() ? store.item(workDetail.itemId() as string) : undefined;
+      const item = nav.itemId ? store.item(nav.itemId) : undefined;
       const s = item?.sessionId ? store.session(item.sessionId) : undefined;
       let gate = composerGate(current(), store.state()?.instance ?? null, item?.agent ?? null);
       if (gate.ready && item && !['running', 'needs-input', 'review', 'queued'].includes(item.status)) {
-        gate = { ready: false, placeholder: `The item is ${item.status}: retry it to work on it again.`, reason: `The item is ${item.status}.` };
+        gate = { ready: false, placeholder: `The item is ${STATUS_WORD[item.status] ?? item.status}: retry it to work on it again.`, reason: `The item is ${item.status}.` };
       }
       return { sessionId: s?.id ?? null, running: s?.status === 'running', gate, who: 'the worker' };
     },
@@ -164,13 +184,21 @@ function boot(bridge: PuckBridge): void {
     say: (text) => (byId('wd-msg').textContent = text),
   });
 
-  /* ---------- Panes ---------- */
+  /* ---------- Views ---------- */
 
-  const backlog = initBacklogPane({
-    els: { list: byId('bl-list'), add: byId('bl-add'), importBtn: byId('bl-import'), finished: byId('bl-finished'), tray: byId('bl-tray') },
+  const board = initBoard({
+    els: {
+      columns: byId('bd-columns'),
+      capacity: byId('bd-capacity'),
+      paused: byId('bd-paused'),
+      newBtn: byId('bd-new'),
+      importBtn: byId('bd-import'),
+    },
     store,
     daemon,
-    openItem: (itemId, tab) => go({ view: 'work', itemId, tab }),
+    openItem: (itemId, tab) => openItem(itemId, tab),
+    selected: () => nav.itemId,
+    toChat: () => pickView('chat'),
     say,
     resync: () => {
       const id = store.envId();
@@ -179,37 +207,18 @@ function boot(bridge: PuckBridge): void {
     prefs: storage,
   });
 
-  const workPane = initWorkPane({
-    els: {
-      needs: byId('wp-needs'),
-      running: byId('wp-running'),
-      review: byId('wp-review'),
-      sections: byId('wp-sections'),
-      empty: byId('wp-empty'),
-      capacity: byId('wp-capacity'),
-      paused: byId('wp-paused'),
-    },
-    store,
-    daemon,
-    openItem: (itemId) => {
-      panes.closeDrawer();
-      go({ view: 'work', itemId });
-    },
-    say,
-  });
-
   const workDetail = initWorkDetail({
     els: {
-      back: byId('wd-back'),
-      unread: byId('wd-unread'),
-      crumbTitle: byId('wd-title'),
+      close: byId('wd-close'),
+      id: byId('wd-id'),
+      title: byId('wd-title'),
       status: byId('wd-status'),
       meta: byId('wd-meta'),
       actions: byId('wd-actions'),
       banner: byId('wd-banner'),
       tabs: byId('wd-tabs'),
       conversation: byId('wd-conversation'),
-      thread: byId('wd-thread'),
+      thread: wdThread,
       composerZone: byId('wd-composer-zone'),
       changes: byId('wd-changes'),
       details: byId('wd-details'),
@@ -219,14 +228,17 @@ function boot(bridge: PuckBridge): void {
     daemon,
     openExternal: (url) => void bridge.openExternal(url),
     say,
-    back: () => {
-      if (!sessions.closeChild()) go({ view: 'orchestrator' });
-    },
+    close: () => go({ view: 'close-item' }),
     onTab: (tab) => {
-      if (nav.itemId) go({ view: 'work', itemId: nav.itemId, tab });
+      if (nav.itemId) go({ view: 'item', itemId: nav.itemId, tab });
     },
     composer: wdComposer,
   });
+
+  const viewSwitch = initViewSwitch(
+    { root: byId('tb-views'), chat: byId('tb-view-chat'), board: byId('tb-view-board'), chatDot: byId('tb-chat-dot'), boardBadge: byId('tb-board-badge') },
+    (view) => pickView(view),
+  );
 
   /* ---------- Top bar, modals ---------- */
 
@@ -284,7 +296,7 @@ function boot(bridge: PuckBridge): void {
     runners: () => runners,
     // The window switches under the dialog, which keeps showing the progress.
     opened: (envId) => {
-      showCenter('orchestrator');
+      showCenter('env');
       void openEnv(envId, false);
     },
     close: () => go({ view: 'close-modal' }),
@@ -301,6 +313,12 @@ function boot(bridge: PuckBridge): void {
     startFlow: () => go({ view: 'start' }),
   });
 
+  function newItem(): void {
+    if (!store.hasSnapshot()) return;
+    pickView('board');
+    board.create();
+  }
+
   const palette = initCommandPalette({
     instances: () => store.instances(),
     currentEnv: () => store.envId(),
@@ -308,10 +326,17 @@ function boot(bridge: PuckBridge): void {
     history: () => [...ocChat.querySelectorAll('.row-body, .notice-text')].map((n) => n.textContent ?? ''),
     commands: () => {
       const cmds: PaletteCommand[] = [
-        { label: 'New item', hint: '⌘N', run: () => backlog.create() },
-        { label: 'Import issue…', run: () => backlog.importIssue() },
+        { label: 'Chat', hint: '⌘1', run: () => pickView('chat') },
+        { label: 'Board', hint: '⌘2', run: () => pickView('board') },
+        { label: 'New item', hint: '⌘N', run: newItem },
+        {
+          label: 'Import issue…',
+          run: () => {
+            pickView('board');
+            board.importIssue();
+          },
+        },
         { label: 'Start environment…', run: () => go({ view: 'start' }) },
-        { label: 'Orchestrator', hint: '⌘1', run: () => go({ view: 'orchestrator' }) },
         { label: 'Settings', hint: '⌘,', run: () => go({ view: 'settings' }) },
         { label: 'Runners', run: () => go({ view: 'settings', section: 'runners' }) },
       ];
@@ -325,54 +350,124 @@ function boot(bridge: PuckBridge): void {
       return cmds;
     },
     openEnv: (envId) => void openEnv(envId),
-    openItem: (itemId) => go({ view: 'work', itemId }),
-    openHistory: () => go({ view: 'orchestrator' }),
+    openItem: (itemId) => openItem(itemId),
+    openHistory: () => pickView('chat'),
   });
   byId('tb-palette').addEventListener('click', () => palette.toggle());
   byId('open-settings').addEventListener('click', () => go({ view: 'settings' }));
   byId('oc-empty-start').addEventListener('click', () => go({ view: 'start' }));
+  byId('oc-live').addEventListener('click', () => pickView('board'));
   byId('oc-resume').addEventListener('click', () => {
     byId('oc-hint').textContent = 'Send a message to resume automatic turns.';
     byId('oc-hint').classList.remove('hidden');
     ocComposer.focus();
   });
-  byId('oc-earlier').addEventListener('change', () => {
-    const value = (byId<HTMLSelectElement>('oc-earlier')).value;
-    viewing = value || null;
+  byId('oc-current').addEventListener('click', () => {
+    viewing = null;
     renderOrchestrator();
   });
+  byId('oc-info').addEventListener('click', showSessionDetails);
+  for (const b of byId('oc-suggest').querySelectorAll<HTMLButtonElement>('.oc-suggestion')) {
+    b.addEventListener('click', () => {
+      const input = byId<HTMLTextAreaElement>('oc-prompt');
+      if (input.disabled) return;
+      input.value = b.textContent ?? '';
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+    });
+  }
+
+  /* ---------- Chat header ---------- */
+
+  function showSessionDetails(): void {
+    const anchor = byId('oc-info');
+    if (popupAnchor() === anchor) {
+      closePopup();
+      return;
+    }
+    const s = viewing ? store.session(viewing) : store.orchestrator();
+    const box = el('div', 'oc-details');
+    const facts = el('dl', 'oc-facts');
+    const fact = (k: string, v: string): void => {
+      facts.append(el('dt', '', k), el('dd', '', v));
+    };
+    if (s) {
+      const harness = harnesses.find((h) => h.id === s.harness)?.label ?? s.harness;
+      fact('Agent', `${s.agent} · ${harness}`);
+      fact('Turns', s.turns.toLocaleString());
+      fact('Last turn', `${fmtTokens(s.lastTurnTokens)} tokens`);
+      fact('Session cost', fmtUsd(s.costUsd));
+    }
+    box.appendChild(facts);
+    const earlier = store.closedOrchestrators();
+    if (earlier.length) {
+      box.appendChild(el('p', 'oc-details-label', 'Sessions'));
+      const list = el('div', 'oc-sessions');
+      const option = (id: string | null, label: string, sub: string): void => {
+        const b = button('oc-session');
+        b.setAttribute('aria-pressed', String((viewing ?? null) === id));
+        b.append(el('span', 'oc-session-label', label), el('span', 'oc-session-sub', sub));
+        b.addEventListener('click', () => {
+          viewing = id;
+          closePopup(true);
+          renderOrchestrator();
+        });
+        list.appendChild(b);
+      };
+      const now = store.orchestrator();
+      option(null, 'Current session', now ? `${now.turns} turns` : '');
+      for (const e of earlier) option(e.id, new Date(e.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }), `${e.turns} turns · read-only`);
+      box.appendChild(list);
+    }
+    openPopover(anchor, box, { label: 'Session details', align: 'start', className: 'oc-details-pop' });
+  }
 
   /* ---------- Rendering ---------- */
 
-  function renderOrchestrator(): void {
+  let childTitle: string | null = null;
+
+  function renderOrchestrator(child: string | null | undefined = childTitle): void {
+    childTitle = child ?? null;
     const envId = store.envId();
     const s = store.orchestrator();
     const hasEnv = !!envId;
+    const oc = byId('oc');
+    oc.classList.toggle('no-env', !hasEnv);
     byId('oc-empty').classList.toggle('hidden', hasEnv);
     ocChat.classList.toggle('hidden', !hasEnv);
     byId('oc-composer-zone').classList.toggle('hidden', !hasEnv);
-    if (!childOpen) byId('oc-title').textContent = s ? `Orchestrator · ${s.agent}` : 'Orchestrator';
-    byId('oc-stats').textContent = s && s.turns ? `${fmtTokens(s.lastTurnTokens)} tokens last turn${s.costUsd ? ` · $${s.costUsd.toFixed(2)}` : ''}` : '';
+    const shown = viewing ? store.session(viewing) : s;
+    const agent = shown?.agent ?? 'Orchestrator';
+    byId('oc-title').textContent = childTitle ? childTitle : agent;
+    byId('oc-role').textContent = childTitle ? 'Sub-agent' : shown ? 'Orchestrator' : '';
+    byId('oc-info').classList.toggle('hidden', !shown || !!childTitle);
+    byId('oc-intro-avatar').textContent = (s?.agent[0] ?? 'P').toUpperCase();
+    byId('oc-intro-title').textContent = s ? `${s.agent} is ready when you are` : 'Your orchestrator is ready';
     byId('oc-paused').classList.toggle('hidden', !s?.autoWakePaused);
-    const earlier = store.closedOrchestrators();
-    const select = byId<HTMLSelectElement>('oc-earlier');
-    select.classList.toggle('hidden', !earlier.length);
-    if (earlier.length && select.options.length !== earlier.length + 1) {
-      select.textContent = '';
-      const now = document.createElement('option');
-      now.value = '';
-      now.textContent = 'Current session';
-      select.appendChild(now);
-      for (const e of earlier) {
-        const o = document.createElement('option');
-        o.value = e.id;
-        o.textContent = `Earlier: ${new Date(e.createdAt).toLocaleDateString()} (${e.turns} turns)`;
-        select.appendChild(o);
-      }
+    const live = liveWork(store.items());
+    const liveBtn = byId('oc-live');
+    liveBtn.classList.toggle('hidden', !store.hasSnapshot() || !live.text);
+    liveBtn.classList.toggle('needs', live.needs > 0);
+    if (liveBtn.dataset.text !== live.text) {
+      liveBtn.dataset.text = live.text;
+      liveBtn.textContent = '';
+      const [first, ...rest] = live.text.split(' · ');
+      const text = el('span', '');
+      text.appendChild(el('span', live.needs ? 'oc-live-needs' : '', first ?? ''));
+      if (rest.length) text.appendChild(document.createTextNode(` · ${rest.join(' · ')}`));
+      liveBtn.append(el('span', 'oc-live-dot'), text);
+      liveBtn.setAttribute('aria-label', `${live.text}. Show the board`);
     }
-    select.value = viewing ?? '';
+    const earlierBar = byId('oc-earlier-bar');
+    earlierBar.classList.toggle('hidden', !viewing);
+    if (viewing) {
+      const e = store.session(viewing);
+      byId('oc-earlier-text').textContent = e
+        ? `An earlier session from ${new Date(e.createdAt).toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}, read-only.`
+        : 'An earlier session, read-only.';
+    }
     const target = viewing ?? s?.id ?? null;
-    if (nav.center === 'orchestrator' && store.hasSnapshot() && target && sessions.mountedSession() !== target) sessions.mount(target, ocChat);
+    if (nav.view === 'chat' && store.hasSnapshot() && target && sessions.mountedSession(ocChat) !== target) sessions.mount(target, ocChat);
     ocComposer.refresh();
   }
 
@@ -382,14 +477,23 @@ function boot(bridge: PuckBridge): void {
     node.title = login ? `Signed in to Puck as ${login}` : '';
   }
 
+  function renderSwitch(): void {
+    viewSwitch.show({
+      view: nav.view,
+      hidden: nav.center !== 'env' || !store.envId(),
+      needs: liveWork(store.items()).needs,
+      unread: unread && nav.view !== 'chat',
+    });
+  }
+
   let frame = 0;
   function renderAll(): void {
     frame = 0;
     topbar.render();
-    backlog.render();
-    workPane.render();
-    if (nav.center === 'orchestrator') renderOrchestrator();
-    if (nav.center === 'work') {
+    renderSwitch();
+    if (nav.view === 'chat') renderOrchestrator();
+    else board.render();
+    if (nav.itemId) {
       workDetail.render();
       wdComposer.refresh();
     }
@@ -401,33 +505,57 @@ function boot(bridge: PuckBridge): void {
   }
 
   const ticker = createTicker({
-    busy: () => workPane.busy() || isWorking(current()) || startFlow.busy(),
+    busy: () => board.busy() || isWorking(current()) || startFlow.busy(),
     onTick: (now) => {
-      workPane.tick(now);
+      board.tick(now);
       topbar.tick();
       startFlow.tick();
     },
   });
 
-  let shownCenter: NavState['center'] | null = null;
+  let shown: { center: NavState['center']; view: View; itemId: string | null } | null = null;
 
   function applyNav(): void {
-    const { center, modal } = nav;
-    const entered = center !== shownCenter;
-    shownCenter = center;
-    byId('oc').classList.toggle('hidden', center !== 'orchestrator');
-    byId('wd').classList.toggle('hidden', center !== 'work');
-    byId('fr').classList.toggle('hidden', center !== 'first-run');
-    byId('panes').classList.toggle('first-run', center === 'first-run');
-    byId('oc-child-back').classList.toggle('hidden', !(childOpen && center === 'orchestrator'));
-    if (center === 'orchestrator') renderOrchestrator();
-    if (center === 'work' && nav.itemId) {
-      workDetail.setUnread(false);
-      workDetail.show(nav.itemId, nav.tab);
+    const { center: where, view, itemId, modal } = nav;
+    const before = shown;
+    shown = { center: where, view, itemId };
+    const env = where === 'env';
+    const hasEnv = !!store.envId();
+    const chat = env && (view === 'chat' || !hasEnv);
+    byId('oc').classList.toggle('hidden', !chat);
+    byId('board').classList.toggle('hidden', !(env && hasEnv && view === 'board'));
+    byId('fr').classList.toggle('hidden', where !== 'first-run');
+    center.classList.toggle('first-run', where === 'first-run');
+    if (chat) {
+      unread = false;
+      renderOrchestrator();
+    } else if (env) board.render();
+    renderSwitch();
+
+    const sheet = byId('wd');
+    const open = env && hasEnv && !!itemId;
+    sheet.classList.toggle('hidden', !open);
+    center.classList.toggle('sheet-open', open);
+    if (open && itemId) {
+      const opened = before?.itemId !== itemId;
+      if (opened && !before?.itemId) {
+        const active = document.activeElement;
+        sheetReturn = active instanceof HTMLElement && active !== document.body && !sheet.contains(active) ? active : null;
+      }
+      workDetail.show(itemId, nav.tab);
       wdComposer.refresh();
+      if (opened) byId('wd-title').focus({ preventScroll: true });
+    } else if (before?.itemId) {
+      sessions.closeChild(wdThread);
+      const back = sheetReturn?.isConnected ? sheetReturn : null;
+      sheetReturn = null;
+      if (back) back.focus();
+      else if (env && view === 'board') board.focusCard(before.itemId);
     }
-    if (center === 'first-run') {
-      if (entered) void firstRun.show();
+    if (env && view === 'board') board.render();
+
+    if (where === 'first-run') {
+      if (before?.center !== 'first-run') void firstRun.show();
     } else firstRun.hide();
 
     if (modal === 'settings') settings.show(nav.section);
@@ -444,22 +572,35 @@ function boot(bridge: PuckBridge): void {
     }
   }
 
-  /** Change what the center shows without closing a modal over it. */
-  function showCenter(center: 'orchestrator' | 'first-run'): void {
-    nav = { ...nav, center };
+  /** Change what the window shows without closing a modal over it. */
+  function showCenter(where: NavState['center']): void {
+    nav = { ...nav, center: where };
     applyNav();
   }
 
   function go(target: NavTarget): void {
-    if (target.view === 'orchestrator' || target.view === 'work') sessions.closeFullTurn();
+    if (target.view === 'chat' || target.view === 'board' || target.view === 'item' || target.view === 'close-item') sessions.closeFullTurn();
+    closePopup();
     nav = navTransition(nav, target);
     applyNav();
   }
 
+  function pickView(view: View): void {
+    const envId = store.envId();
+    if (envId) saveView(storage, envId, view);
+    go({ view });
+  }
+
+  function openItem(itemId: string, tab?: 'details'): void {
+    go(tab ? { view: 'item', itemId, tab } : { view: 'item', itemId });
+  }
+
   async function openEnv(envId: string, closeModal = true): Promise<void> {
     viewing = null;
-    if (closeModal) go({ view: 'orchestrator' });
-    else if (nav.center !== 'orchestrator') showCenter('orchestrator');
+    unread = false;
+    const view = readView(storage, envId);
+    nav = closeModal ? navTransition({ ...nav, itemId: null }, { view }) : { ...nav, center: 'env', view, itemId: null };
+    applyNav();
     try {
       await sync?.open(envId);
     } catch (err) {
@@ -489,20 +630,19 @@ function boot(bridge: PuckBridge): void {
     if (change.kind === 'event') {
       sessions.apply(change.seq, change.ev);
       const orch = store.state()?.orchestratorSessionId;
-      if (nav.center === 'work' && 'sessionId' in change.ev && change.ev.sessionId === orch && (change.ev.kind === 'turn.notice' || change.ev.kind === 'turn.start')) {
-        workDetail.setUnread(true);
-      }
+      const said = change.ev.kind === 'turn.notice' || change.ev.kind === 'turn.start';
+      if (said && 'sessionId' in change.ev && change.ev.sessionId === orch && !(nav.center === 'env' && nav.view === 'chat')) unread = true;
     } else if (change.kind === 'reset' || change.kind === 'snapshot') {
       const was = sessions.reset();
       workDetail.reset();
       if (change.kind === 'reset') {
-        backlog.reset();
+        board.reset();
         viewing = null;
-        if (nav.center === 'work') go({ view: 'orchestrator' });
+        if (nav.itemId) go({ view: 'close-item' });
       } else {
         maybeCheckUpdate();
-        // A resync keeps the view: mount the same thread again.
-        if (was && nav.center === 'work') workDetail.render();
+        // A resync keeps the view: mount the same threads again.
+        if (was && nav.itemId) workDetail.render();
       }
     }
     schedule();
@@ -528,7 +668,7 @@ function boot(bridge: PuckBridge): void {
 
   bridge.onInstanceEvent((event) => {
     // A first environment: leave first run for it (a start dialog stays open).
-    if (event.kind === 'upsert' && nav.center === 'first-run') showCenter('orchestrator');
+    if (event.kind === 'upsert' && nav.center === 'first-run') showCenter('env');
   });
 
   // Quit waits for the renderer; everything here is already saved.
@@ -539,46 +679,40 @@ function boot(bridge: PuckBridge): void {
   document.addEventListener('keydown', (ev) => {
     const mod = ev.metaKey || ev.ctrlKey;
     if (ev.key === 'Escape') {
-      if (palette.close() || topbar.closeMenu() || workPane.closeMenu() || topbar.closeDialog()) {
+      if (palette.close() || topbar.closeMenu() || closePopup(true) || topbar.closeDialog()) {
         ev.preventDefault();
         return;
       }
-      const fullOpen = byId('center').classList.contains('turn-full-open');
       if (nav.modal) {
         ev.preventDefault();
         go({ view: 'close-modal' });
         return;
       }
-      if (fullOpen) {
+      if (center.classList.contains('turn-full-open')) {
         ev.preventDefault();
         sessions.closeFullTurn();
         return;
       }
-      if (panes.closeDrawer()) return;
-      if (childOpen && sessions.closeChild()) return;
+      if (nav.itemId && sessions.closeChild(wdThread)) return;
       const next = escapeTarget(nav);
       if (next) {
         ev.preventDefault();
         go(next);
+        return;
       }
+      if (nav.view === 'chat') sessions.closeChild(ocChat);
       return;
     }
-    if (!mod) return;
+    if (!mod || ev.altKey) return;
     if (ev.key === 'k') {
       ev.preventDefault();
       palette.toggle();
-    } else if (ev.key === 'n' && !nav.modal) {
+    } else if (ev.key === 'n' && !nav.modal && nav.center === 'env') {
       ev.preventDefault();
-      backlog.create();
-    } else if (ev.key === '1') {
+      newItem();
+    } else if ((ev.key === '1' || ev.key === '2') && !nav.modal && nav.center === 'env' && store.envId()) {
       ev.preventDefault();
-      go({ view: 'orchestrator' });
-    } else if (ev.key === '[') {
-      ev.preventDefault();
-      panes.toggleLeft();
-    } else if (ev.key === ']') {
-      ev.preventDefault();
-      panes.toggleRight();
+      pickView(ev.key === '1' ? 'chat' : 'board');
     } else if (ev.key === ',') {
       ev.preventDefault();
       go({ view: 'settings' });
@@ -587,7 +721,6 @@ function boot(bridge: PuckBridge): void {
   document.addEventListener('click', (ev) => {
     const target = ev.target as HTMLElement;
     if (!target.closest('.tb-switch')) topbar.closeMenu();
-    if (!target.closest('.wp-row')) workPane.closeMenu();
   });
   byId('tb-dialog').addEventListener('click', (ev) => {
     if (ev.target === ev.currentTarget) topbar.closeDialog();
@@ -621,7 +754,7 @@ function boot(bridge: PuckBridge): void {
     }
     showCenter('first-run');
     await firstRun.loaded();
-    if (firstRun.ready() && nav.center === 'first-run') showCenter('orchestrator');
+    if (firstRun.ready() && nav.center === 'first-run') showCenter('env');
   })();
   applyNav();
 }

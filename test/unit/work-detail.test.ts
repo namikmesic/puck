@@ -27,7 +27,7 @@ const RESULT = {
 
 function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: string; dir: string }[] } = {}) {
   document.body.innerHTML = `
-    <button id="back"></button><span id="unread" class="hidden"></span><span id="crumb"></span>
+    <button id="close"></button><span id="wid"></span><h2 id="title"></h2>
     <span id="status"></span><div id="meta"></div><div id="actions"></div><div id="banner" class="hidden"></div>
     <div id="tabs"><button data-tab="conversation"></button><button data-tab="changes"></button><button data-tab="details"></button></div>
     <div id="conv"><div id="thread"></div><div id="cz"></div></div><div id="changes"></div><div id="details"></div>`;
@@ -61,14 +61,14 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
   });
   const composer = { refresh: vi.fn(), focus: vi.fn() };
   const onTab = vi.fn();
-  const back = vi.fn();
+  const close = vi.fn();
   const openExternal = vi.fn();
   const say = vi.fn();
   const wd = initWorkDetail({
     els: {
-      back: byId('back'),
-      unread: byId('unread'),
-      crumbTitle: byId('crumb'),
+      close: byId('close'),
+      id: byId('wid'),
+      title: byId('title'),
       status: byId('status'),
       meta: byId('meta'),
       actions: byId('actions'),
@@ -85,13 +85,13 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
     daemon: daemon as never,
     openExternal,
     say,
-    back,
+    close,
     onTab,
     composer,
   });
   const actions = () => [...byId('actions').querySelectorAll<HTMLButtonElement>('button')].map((b) => b.dataset.action);
   const action = (a: string) => byId('actions').querySelector<HTMLButtonElement>(`[data-action="${a}"]`) as HTMLButtonElement;
-  return { store, wd, daemon, composer, onTab, back, openExternal, say, byId, actions, action, history };
+  return { store, wd, daemon, composer, onTab, close, openExternal, say, byId, actions, action, history };
 }
 
 const TRIGGER: Partial<Record<ItemAction, ItemTrigger>> = {
@@ -124,10 +124,13 @@ describe('work detail', () => {
     const it0 = item({ number: 12, title: 'Fix login redirect', status: 'review', agent: 'implementer', repo: 'web', branch: 'puck/W-12-fix-login', attempts: 2, sessionId: WORKER, result: RESULT });
     const { wd, byId, actions, action, daemon, composer, onTab, say } = setup([it0]);
     wd.show(it0.id, 'conversation');
-    expect(byId('crumb').textContent).toBe('W-12 Fix login redirect');
+    expect(byId('wid').textContent).toBe('W-12');
+    expect(byId('title').textContent).toBe('Fix login redirect');
     expect(byId('status').className).toBe('wd-status tone-on');
-    expect(byId('meta').textContent).toContain('web@puck/W-12-fix-login');
-    expect(byId('meta').textContent).toContain('attempt 2');
+    expect(byId('status').textContent).toBe('In review');
+    expect(byId('meta').querySelector('.wd-repo')?.textContent).toBe('web');
+    expect(byId('meta').querySelector('.wd-branch')?.textContent).toBe('puck/W-12-fix-login');
+    expect(byId('meta').textContent).toContain('Attempt 2');
     expect(actions()).toEqual(['accept', 'request-changes', 'publish', 'cancel']);
     action('request-changes').click();
     expect(onTab).toHaveBeenCalledWith('conversation');
@@ -143,7 +146,7 @@ describe('work detail', () => {
 
   it('stops a running item, and arms cancel and delete', async () => {
     const running = item({ number: 1, status: 'running', sessionId: WORKER });
-    const { wd, action, daemon, store, back } = setup([running, item({ number: 2, status: 'failed' })]);
+    const { wd, action, daemon, store, close, byId } = setup([running, item({ number: 2, status: 'failed' })]);
     wd.show(running.id, 'conversation');
     action('stop').click();
     await flush();
@@ -162,7 +165,9 @@ describe('work detail', () => {
     action('delete').click();
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.delete', { itemId: 'itm_2' });
-    expect(back).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+    byId('close').click();
+    expect(close).toHaveBeenCalledTimes(2);
   });
 
   it('keeps an armed cancel or delete across a render while a turn streams', async () => {
@@ -232,7 +237,8 @@ describe('work detail', () => {
     expect(host.querySelector('.wd-commits')?.textContent).toContain('abcdef1docs: add usage');
     expect(host.querySelector('.wd-diffstat')?.textContent).toContain('README.md | 12');
     expect(host.querySelector('.wd-uncommitted')?.textContent).toBe('notes.txt');
-    expect(host.querySelector('.wd-ci-state')?.textContent).toBe('Checks: 1 failing · c1c1c1c');
+    expect(host.querySelector('.wd-ci-state')?.firstChild?.textContent).toBe('1 check failing');
+    expect(host.querySelector('.wd-ci-state .wd-sha')?.textContent).toBe('c1c1c1c');
     expect(host.querySelector('.wd-failing')?.textContent).toContain('test2 failed');
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.pr', { itemId: it0.id });
@@ -318,10 +324,37 @@ describe('work detail', () => {
     expect(daemon).toHaveBeenCalledWith('ask.answer', { sessionId: WORKER, askId: 'a1', answers: { 'Which file?': 'README' } });
     store.applyEvent(4, { kind: 'item.upsert', item: { ...waiting, pendingAsk: { askId: 'a1', routedTo: 'user' } } }, ENV);
     wd.render();
+    // The thread has no card for it, so the banner keeps answering in place.
     expect(banner.querySelector('.ask')).not.toBeNull();
     store.applyEvent(5, { kind: 'item.upsert', item: { ...waiting, status: 'running', pendingAsk: null } }, ENV);
     wd.render();
     expect(banner.classList.contains('hidden')).toBe(true);
+  });
+
+  it('keeps the banner to one line on Conversation, where the thread shows the question', async () => {
+    const q = [{ question: 'Which file?', header: '', options: [{ label: 'README', description: '' }], multiSelect: false }];
+    const waiting = item({ number: 6, status: 'needs-input', agent: 'implementer', sessionId: WORKER, pendingAsk: { askId: 'a2', routedTo: 'user' } });
+    const { wd, byId, store } = setup([waiting]);
+    store.applyEvent(2, { kind: 'turn.start', sessionId: WORKER, turnId: 't' }, ENV);
+    store.applyEvent(3, { kind: 'turn.event', sessionId: WORKER, turnId: 't', event: { kind: 'ask', askId: 'a2', questions: q } }, ENV);
+    wd.show(waiting.id, 'conversation');
+    const banner = byId('banner');
+    expect(banner.querySelector('.ask')).toBeNull();
+    expect(banner.textContent).toContain('implementer is waiting on your answer.');
+    // A card in the thread: Go to the question focuses it.
+    const card = document.createElement('div');
+    card.dataset.askId = 'a2';
+    const option = document.createElement('button');
+    option.className = 'ask-option';
+    card.appendChild(option);
+    byId('thread').appendChild(card);
+    card.scrollIntoView = vi.fn();
+    (banner.querySelector('button') as HTMLButtonElement).click();
+    expect(card.scrollIntoView).toHaveBeenCalled();
+    expect(document.activeElement).toBe(option);
+    // Elsewhere the banner carries the card itself.
+    wd.show(waiting.id, 'details');
+    expect(banner.querySelector('.ask')).not.toBeNull();
   });
 
   it('builds compare links only once published', () => {

@@ -31,7 +31,8 @@ Environments run in Docker on your runners: this Mac, or any machine you registe
 - **Harness sign-in** for Claude Code and Codex happens in the system browser with a loopback callback, RFC 8252 style.
   Tokens are encrypted via the OS keychain, and Puck keeps the environments' copies in sync.
 
-The window shows one environment at a time: the backlog on the left, the orchestrator chat (or one item's detail) in the center, and work in progress on the right.
+The window shows one environment at a time, in two views you switch between (⌘1 and ⌘2): Chat, the conversation with the orchestrator, and Board, the work items in one column per stage from Backlog to Done.
+An item's detail opens in a side sheet over either view.
 Turns stream live: text renders as markdown, tool calls collapse into a per-turn card, sub-agents get their own nested chats, and questions render as answerable cards.
 
 ## Requirements

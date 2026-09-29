@@ -15,6 +15,9 @@
  * - A turn still running when its page loaded keeps streaming into the
  *   same row; its open questions get live cards.
  * - Sub-agent chats open in place of their parent, with Back.
+ * - Threads mount in hosts: the orchestrator's in the Chat view and a
+ *   worker's in the item sheet over it, both live at once. Each host keeps
+ *   its own scroll position and its own sub-agent chat.
  * - Composer drafts are per environment and session, in localStorage
  *   (`puck.draft.<envId>.<sessionId>`), a per-machine convenience.
  *
@@ -44,8 +47,9 @@ export interface SessionViewContext {
   orchestratorName(): string;
   capabilities?(harness: string): ProviderCapabilities | undefined;
   openRef?(ref: string): void;
-  /** A sub-agent chat opened (its title) or closed (null): the host shows Back. */
-  onChild?(title: string | null): void;
+  describeRef?(ref: string): string | null;
+  /** A sub-agent chat opened in `host` (its title) or closed there (null): the host shows Back. */
+  onChild?(title: string | null, host: HTMLElement): void;
   toast(message: string): void;
   overlay: {
     body: HTMLElement;
@@ -70,6 +74,15 @@ interface ThreadNode {
   hasMore: boolean;
   status: HTMLLIElement | null;
   earlier: HTMLLIElement | null;
+}
+
+/** One place threads show: a scroller, its thread and sub-agent chat, and whether it follows new output. */
+interface Host {
+  scroller: HTMLElement;
+  mounted: ThreadNode | null;
+  child: Session | null;
+  attached: HTMLElement | null;
+  stick: boolean;
 }
 
 function freshSession(id: number, title: string): Session {
@@ -100,18 +113,40 @@ export function initSessionView(ctx: SessionViewContext) {
   const turnSession = new Map<string, string>();
   let nextId = 1;
   let gen = 0;
-  let scroller: HTMLElement | null = null;
-  let mounted: ThreadNode | null = null;
-  let mountedChild: Session | null = null;
-  let stick = true;
+  const hosts = new Map<HTMLElement, Host>();
 
-  function onScroll(): void {
-    if (scroller) stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+  function hostFor(scroller: HTMLElement): Host {
+    let host = hosts.get(scroller);
+    if (!host) {
+      const made: Host = { scroller, mounted: null, child: null, attached: null, stick: true };
+      scroller.addEventListener('scroll', () => {
+        made.stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+      });
+      hosts.set(scroller, made);
+      host = made;
+    }
+    return host;
   }
 
-  function scrollChat(force = false): void {
-    if (!scroller || (!force && !stick)) return;
-    scroller.scrollTop = scroller.scrollHeight;
+  /** The host showing `session` (its thread or its sub-agent chat), if any. */
+  function hostShowing(session: Session): Host | undefined {
+    for (const host of hosts.values()) if (host.attached === session.thread) return host;
+    return undefined;
+  }
+
+  function scrollHost(host: Host, force = false): void {
+    if (!force && !host.stick) return;
+    host.scroller.scrollTop = host.scroller.scrollHeight;
+  }
+
+  /** Scroll the host showing `session`; without one, every host (a sticky one only follows). */
+  function scrollChat(force = false, session?: Session): void {
+    if (session) {
+      const host = hostShowing(session);
+      if (host) scrollHost(host, force);
+      return;
+    }
+    for (const host of hosts.values()) scrollHost(host, force);
   }
 
   function summary(sessionId: string): SessionSummary | undefined {
@@ -134,8 +169,8 @@ export function initSessionView(ctx: SessionViewContext) {
     },
     toast: ctx.toast,
     rosterChanged: () => undefined,
-    isCurrent: (session) => session === mountedChild || session === mounted?.session,
-    openSession: (id) => openChild(id),
+    isCurrent: (session) => [...hosts.values()].some((h) => h.child === session || h.mounted?.session === session),
+    openSession: (id, from) => openChild(id, from),
     spawnChild: (parent) => {
       const session = freshSession(nextId++, 'Sub-agent');
       session.parentSessionId = parent.id;
@@ -150,6 +185,7 @@ export function initSessionView(ctx: SessionViewContext) {
     },
     pruneChildren: () => undefined,
     openRef: ctx.openRef,
+    describeRef: ctx.describeRef,
     overlay: ctx.overlay,
   });
 
@@ -213,7 +249,8 @@ export function initSessionView(ctx: SessionViewContext) {
     }
     // A turn the page caught mid-stream keeps taking the events after it.
     if (turns && !hasTurnEnd(entry.events)) turns.set(entry.turnId, turn);
-    turn.setThinking(turns !== null && !!store.inflight(entry.turnId));
+    // Thinking shows while the turn runs, except when it waits on a question.
+    turn.setThinking(turns !== null && !!store.inflight(entry.turnId) && !store.asks().some((a) => a.turnId === entry.turnId));
   }
 
   function applyLive(node: ThreadNode, ev: DaemonEvent): void {
@@ -302,8 +339,9 @@ export function initSessionView(ctx: SessionViewContext) {
     const head = page.head ?? cursorBefore ?? -1;
     const waiting = node.waiting.splice(0);
     node.state = 'loaded';
+    session.thread.dataset.state = 'loaded';
     for (const w of waiting) if (w.seq > head) applyLive(node, w.ev);
-    if (mounted === node) scrollChat(true);
+    for (const host of hosts.values()) if (host.mounted === node && !host.child) scrollHost(host, true);
   }
 
   async function loadEarlier(node: ThreadNode, btn: HTMLButtonElement): Promise<void> {
@@ -316,37 +354,47 @@ export function initSessionView(ctx: SessionViewContext) {
       for (const entry of page.entries) renderEntry(temp, entry, node.sessionId, null);
       const thread = node.session.thread;
       const anchor = node.earlier?.nextSibling ?? thread.firstChild;
-      const keep = scroller && mounted === node ? scroller.scrollHeight - scroller.scrollTop : null;
+      const host = hostShowing(node.session);
+      const keep = host ? host.scroller.scrollHeight - host.scroller.scrollTop : null;
       for (const child of [...temp.thread.children]) thread.insertBefore(child, anchor);
       node.firstIndex = Math.max(0, node.firstIndex - page.entries.length);
       node.hasMore = page.hasMore && node.firstIndex > 0;
       earlierRow(node);
-      if (scroller && keep !== null) scroller.scrollTop = scroller.scrollHeight - keep;
+      if (host && keep !== null) host.scroller.scrollTop = host.scroller.scrollHeight - keep;
     } catch (err) {
       btn.disabled = false;
       ctx.toast(`Couldn't load earlier messages: ${errText(err)}`);
     }
   }
 
-  let attached: HTMLElement | null = null;
-
-  function attach(thread: HTMLElement): void {
-    if (!scroller) return;
-    // A thread shown elsewhere before leaves it, so its events never scroll this one.
-    if (attached && attached !== thread) attached.remove();
-    attached = thread;
-    scroller.textContent = '';
-    scroller.appendChild(thread);
-    stick = true;
-    scrollChat(true);
+  function attach(host: Host, thread: HTMLElement): void {
+    // A thread moves between hosts whole: the one it leaves forgets it.
+    for (const other of hosts.values()) if (other !== host && other.attached === thread) other.attached = null;
+    if (host.attached && host.attached !== thread) host.attached.remove();
+    host.attached = thread;
+    host.scroller.textContent = '';
+    host.scroller.appendChild(thread);
+    host.stick = true;
+    scrollHost(host, true);
   }
 
-  function openChild(id: number): void {
+  /** Open a sub-agent chat in the host showing the session it came from. */
+  function openChild(id: number, from?: Session): void {
     const child = children.get(id);
-    if (!child || !scroller) return;
-    mountedChild = child.session;
-    attach(child.session.thread);
-    ctx.onChild?.(child.session.title);
+    if (!child) return;
+    const host = (from && hostShowing(from)) ?? [...hosts.values()].find((h) => h.mounted === child.parent);
+    if (!host) return;
+    host.child = child.session;
+    attach(host, child.session.thread);
+    ctx.onChild?.(child.session.title, host.scroller);
+  }
+
+  function closeChildIn(host: Host): boolean {
+    if (!host.child || !host.mounted) return false;
+    host.child = null;
+    attach(host, host.mounted.session.thread);
+    ctx.onChild?.(null, host.scroller);
+    return true;
   }
 
   function draftKey(sessionId: string): string | null {
@@ -355,29 +403,37 @@ export function initSessionView(ctx: SessionViewContext) {
   }
 
   return {
-    /** Show a session's thread in `host` (loading it the first time). */
-    mount(sessionId: string, host: HTMLElement): void {
-      if (scroller !== host) {
-        scroller?.removeEventListener('scroll', onScroll);
-        scroller = host;
-        host.addEventListener('scroll', onScroll);
-      }
+    /** Show a session's thread in `scroller` (loading it the first time). */
+    mount(sessionId: string, scroller: HTMLElement): void {
+      const host = hostFor(scroller);
       const node = nodeFor(sessionId);
-      mounted = node;
-      mountedChild = null;
-      ctx.onChild?.(null);
-      attach(node.session.thread);
+      // The thread leaves any other host that showed it.
+      for (const other of hosts.values()) {
+        if (other !== host && other.mounted === node) {
+          other.mounted = null;
+          other.child = null;
+        }
+      }
+      host.mounted = node;
+      host.child = null;
+      ctx.onChild?.(null, scroller);
+      attach(host, node.session.thread);
       if (node.state === 'idle' || node.state === 'failed') void load(node);
     },
-    /** Back from a sub-agent chat to its parent thread. */
-    closeChild(): boolean {
-      if (!mountedChild || !mounted) return false;
-      mountedChild = null;
-      attach(mounted.session.thread);
-      ctx.onChild?.(null);
-      return true;
+    /** Back from a sub-agent chat to its parent thread: in `scroller`, or in whichever host shows one. */
+    closeChild(scroller?: HTMLElement): boolean {
+      if (scroller) {
+        const host = hosts.get(scroller);
+        return host ? closeChildIn(host) : false;
+      }
+      for (const host of hosts.values()) if (closeChildIn(host)) return true;
+      return false;
     },
-    mountedSession: (): string | null => mounted?.sessionId ?? null,
+    /** The session `scroller` shows (the first host's without one). */
+    mountedSession(scroller?: HTMLElement): string | null {
+      const host = scroller ? hosts.get(scroller) : hosts.values().next().value;
+      return host?.mounted?.sessionId ?? null;
+    },
     /** A daemon event, in seq order (the store already applied it). */
     apply(seq: number, ev: DaemonEvent): void {
       if (ev.kind === 'session.upsert') {
@@ -398,13 +454,17 @@ export function initSessionView(ctx: SessionViewContext) {
     reset(): string | null {
       gen++;
       chat.closeFullTurn();
-      const was = mounted?.sessionId ?? null;
+      let was: string | null = null;
+      for (const host of hosts.values()) {
+        was = was ?? host.mounted?.sessionId ?? null;
+        host.mounted = null;
+        host.child = null;
+        host.attached = null;
+        host.scroller.textContent = '';
+      }
       nodes.clear();
       children.clear();
       turnSession.clear();
-      mounted = null;
-      mountedChild = null;
-      if (scroller) scroller.textContent = '';
       return was;
     },
     closeFullTurn: (): void => chat.closeFullTurn(),

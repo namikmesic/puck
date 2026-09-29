@@ -137,7 +137,7 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
 - `src/main/shutdown.ts` - the quit drain (`installQuitDrain`) and the renderer flush request (`flushRenderers`).
 - `src/renderer.ts` - the window: DOM lookups, the nav applier, keyboard shortcuts, boot.
   Navigation is the pure state machine in `src/renderer/view-nav.ts` (`navTransition`, `escapeTarget`).
-  Element ids follow prefixes: `tb-*` top bar, `bl-*` backlog, `oc-*` orchestrator chat, `wd-*` work detail, `wp-*` work pane, `sf-*` start flow, `fr-*` first run, `sm-*` settings modal, `sec-*` settings sections, `pv-*` provider cards, `rn-*` runners.
+  Element ids follow prefixes: `tb-*` top bar, `oc-*` orchestrator chat, `bd-*` board, `wd-*` work detail (the item sheet), `sf-*` start flow, `fr-*` first run, `sm-*` settings modal, `sec-*` settings sections, `pv-*` provider cards, `rn-*` runners.
   Settings sections are `providers`, `runners`, and `support` (`SettingsSection` in `view-nav.ts`).
 - `src/styles/` - one stylesheet per surface (`shell`, `settings`, `work`, `flows`, `chat`, `overlays`).
   The import order in `renderer.ts` preserves the cascade.

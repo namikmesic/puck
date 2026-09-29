@@ -7,173 +7,181 @@
   <body class="puck">
     <div class="app-shell" id="app-shell">
       <header class="tb" id="tb">
-        <div class="tb-switch">
-          <button class="tb-env" id="tb-env" type="button" aria-haspopup="menu" aria-expanded="false">
-            <span class="logo">P</span>
-            <span class="tb-env-name" id="tb-env-name">Puck</span>
-            <svg class="chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
-          </button>
-          <div class="tb-menu hidden" id="tb-menu"></div>
+        <div class="tb-left">
+          <div class="tb-switch">
+            <button class="tb-env" id="tb-env" type="button" aria-haspopup="menu" aria-expanded="false">
+              <span class="logo" aria-hidden="true">P</span>
+              <span class="tb-env-name" id="tb-env-name">Puck</span>
+              <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            <div class="tb-menu hidden" id="tb-menu"></div>
+          </div>
+          <button class="tb-status hidden" id="tb-status" type="button" aria-haspopup="dialog" aria-expanded="false"></button>
+          <div class="tb-chips" id="tb-chips"></div>
         </div>
-        <div class="tb-status hidden" id="tb-status"></div>
-        <div class="tb-chips" id="tb-chips"></div>
-        <span class="tb-spacer"></span>
-        <button class="tb-search" id="tb-palette" type="button" aria-label="Search and commands">
-          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
-          <span>⌘K</span>
-        </button>
-        <span class="tb-user" id="tb-user"></span>
-        <button class="icon-btn" id="open-settings" type="button" aria-label="Settings">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.98 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.98a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09c0 .68.4 1.3 1.03 1.56a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01c.26.62.88 1.03 1.56 1.03H21a2 2 0 1 1 0 4h-.09c-.68 0-1.3.4-1.56 1.03Z" /></svg>
-        </button>
+        <div class="tb-views hidden" id="tb-views">
+          <button class="tb-view" id="tb-view-chat" type="button" aria-controls="oc" title="Chat (⌘1)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2Z" /></svg>
+            <span>Chat</span>
+            <span class="tb-view-dot hidden" id="tb-chat-dot"></span>
+          </button>
+          <button class="tb-view" id="tb-view-board" type="button" aria-controls="board" title="Board (⌘2)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1.5" /><rect x="10" y="4" width="5" height="11" rx="1.5" /><rect x="17" y="4" width="4" height="7" rx="1.5" /></svg>
+            <span>Board</span>
+            <span class="tb-view-badge hidden" id="tb-board-badge"></span>
+          </button>
+        </div>
+        <div class="tb-right">
+          <button class="tb-search" id="tb-palette" type="button" aria-label="Search and commands (⌘K)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+            <span>Search</span>
+            <kbd>⌘K</kbd>
+          </button>
+          <span class="tb-user" id="tb-user"></span>
+          <button class="icon-btn" id="open-settings" type="button" aria-label="Settings (⌘,)" title="Settings (⌘,)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.98 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.98a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09c0 .68.4 1.3 1.03 1.56a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01c.26.62.88 1.03 1.56 1.03H21a2 2 0 1 1 0 4h-.09c-.68 0-1.3.4-1.56 1.03Z" /></svg>
+          </button>
+        </div>
       </header>
 
-      <div class="panes" id="panes">
-        <aside class="bl" id="bl" aria-label="Backlog">
-          <div class="pane-head">
-            <span class="pane-title">Backlog</span>
-            <span class="tb-spacer"></span>
-            <button class="pane-btn" id="bl-import" type="button">Import issue…</button>
-            <button class="icon-btn small" id="bl-add" type="button" aria-label="New item (⌘N)" title="New item (⌘N)">
-              <svg viewBox="0 0 24 24"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+      <main class="center stage" id="center">
+        <div class="tb-banner hidden" id="tb-banner" role="status"></div>
+        <div class="turn-full" id="turn-full">
+          <div class="turn-full-head">
+            <button class="back-btn" id="turn-full-back" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              <span id="turn-full-crumb">Chat</span>
             </button>
+            <span class="crumb-sep" aria-hidden="true">/</span>
+            <span class="turn-full-title" id="turn-full-title"></span>
           </div>
-          <div class="bl-tray" id="bl-tray"></div>
-          <ul class="bl-list" id="bl-list" aria-label="Backlog items"></ul>
-          <div class="pane-foot">
-            <button class="pane-btn" id="bl-finished" type="button" aria-pressed="false">Show finished</button>
-          </div>
-        </aside>
-        <div class="pane-resize" id="resize-left" role="separator" aria-orientation="vertical" aria-label="Resize the backlog"></div>
+          <div class="turn-full-body" id="turn-full-body"></div>
+        </div>
 
-        <main class="center stage" id="center">
-          <div class="tb-banner hidden" id="tb-banner" role="status"></div>
-          <div class="turn-full" id="turn-full">
-            <div class="turn-full-head">
-              <button class="back-btn" id="turn-full-back" type="button">
-                <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
-                <span id="turn-full-crumb">Chat</span>
-              </button>
-              <span class="crumb-sep">/</span>
-              <span class="turn-full-title" id="turn-full-title"></span>
-            </div>
-            <div class="turn-full-body" id="turn-full-body"></div>
-          </div>
-
-          <section class="oc" id="oc" aria-label="Orchestrator">
-            <header class="oc-head">
-              <button class="back-btn hidden" id="oc-child-back" type="button">
-                <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
-                <span>Orchestrator</span>
-              </button>
+        <section class="oc" id="oc" role="tabpanel" aria-label="Chat">
+          <header class="oc-head">
+            <button class="back-btn hidden" id="oc-child-back" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              <span>Orchestrator</span>
+            </button>
+            <div class="oc-who">
               <span class="oc-title" id="oc-title">Orchestrator</span>
-              <span class="oc-stats" id="oc-stats"></span>
-              <span class="oc-paused hidden" id="oc-paused">
-                <span class="oc-paused-badge">Auto-wake paused</span>
-                <button class="pane-btn" id="oc-resume" type="button">Resume</button>
-              </span>
-              <span class="tb-spacer"></span>
-              <select class="oc-earlier hidden" id="oc-earlier" aria-label="Earlier orchestrator sessions"></select>
-            </header>
-            <div class="chat" id="oc-chat"></div>
-            <div class="oc-empty hidden" id="oc-empty">
-              <span class="hero-avatar">P</span>
-              <h1 class="oc-empty-title">No environment yet</h1>
-              <p class="oc-empty-sub">Start an environment from a definition in your Puck home. Its orchestrator works the backlog with your agents.</p>
-              <button class="btn-primary" id="oc-empty-start" type="button">Start an environment</button>
+              <span class="oc-role" id="oc-role"></span>
             </div>
-            <div class="composer-zone" id="oc-composer-zone">
-              <p class="composer-hint hidden" id="oc-hint"></p>
-              <form class="composer" id="oc-composer">
-                <textarea id="oc-prompt" rows="1" aria-label="Message the orchestrator"></textarea>
+            <button class="icon-btn oc-info hidden" id="oc-info" type="button" aria-label="Session details" aria-haspopup="dialog" aria-expanded="false" title="Session details">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 7.5v.01" /></svg>
+            </button>
+            <span class="oc-paused hidden" id="oc-paused">
+              <span class="badge gold">Auto-wake paused</span>
+              <button class="btn-ghost" id="oc-resume" type="button">Resume</button>
+            </span>
+            <span class="spacer"></span>
+            <button class="oc-live hidden" id="oc-live" type="button" title="Show the board (⌘2)"></button>
+          </header>
+          <div class="oc-earlier-bar hidden" id="oc-earlier-bar" role="status">
+            <span id="oc-earlier-text"></span>
+            <button class="btn-ghost" id="oc-current" type="button">Back to the current session</button>
+          </div>
+          <div class="chat" id="oc-chat"></div>
+          <div class="oc-intro" id="oc-intro">
+            <span class="hero-avatar" id="oc-intro-avatar" aria-hidden="true">P</span>
+            <h1 class="oc-intro-title" id="oc-intro-title">Your orchestrator is ready</h1>
+            <p class="oc-intro-sub">It plans the backlog, assigns agents and reports back here. Ask it anything about the work.</p>
+            <div class="oc-suggest" id="oc-suggest">
+              <button class="oc-suggestion" type="button">Turn the open GitHub issues into work items</button>
+              <button class="oc-suggestion" type="button">What should the agents work on first?</button>
+              <button class="oc-suggestion" type="button">Summarize what is ready for review</button>
+            </div>
+          </div>
+          <div class="oc-empty hidden" id="oc-empty">
+            <span class="hero-avatar" aria-hidden="true">P</span>
+            <h1 class="oc-empty-title">No environment yet</h1>
+            <p class="oc-empty-sub">Start an environment from a definition in your Puck home. Its orchestrator works the backlog with your agents.</p>
+            <button class="btn-primary" id="oc-empty-start" type="button">Start an environment</button>
+          </div>
+          <div class="composer-zone" id="oc-composer-zone">
+            <p class="composer-hint hidden" id="oc-hint"></p>
+            <form class="composer" id="oc-composer">
+              <textarea id="oc-prompt" rows="1" aria-label="Message the orchestrator"></textarea>
+              <div class="composer-tools">
+                <span class="composer-msg" id="oc-msg" role="status"></span>
+                <span class="spacer"></span>
+                <button class="send stop hidden" id="oc-stop" type="button" aria-label="Stop the turn" title="Stop the turn">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
+                </button>
+                <button class="send" id="oc-send" type="submit" aria-label="Send">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="board hidden" id="board" role="tabpanel" aria-label="Board">
+          <header class="bd-head">
+            <div class="bd-capacity" id="bd-capacity"></div>
+            <div class="bd-paused hidden" id="bd-paused"></div>
+            <span class="spacer"></span>
+            <button class="btn-ghost" id="bd-import" type="button" aria-haspopup="dialog" aria-expanded="false">Import issue…</button>
+            <button class="btn-primary small" id="bd-new" type="button" title="New item (⌘N)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+              <span>New item</span>
+            </button>
+          </header>
+          <div class="bd-columns" id="bd-columns"></div>
+        </section>
+
+        <aside class="sheet hidden" id="wd" role="dialog" aria-modal="false" aria-labelledby="wd-title">
+          <header class="wd-head">
+            <div class="wd-bar">
+              <span class="wd-id" id="wd-id"></span>
+              <span class="wd-status" id="wd-status"></span>
+              <span class="spacer"></span>
+              <button class="icon-btn" id="wd-close" type="button" aria-label="Close (Esc)" title="Close (Esc)">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+              </button>
+            </div>
+            <h2 class="wd-title" id="wd-title" tabindex="-1"></h2>
+            <div class="wd-strip">
+              <div class="wd-meta" id="wd-meta"></div>
+              <div class="wd-actions" id="wd-actions"></div>
+            </div>
+          </header>
+          <div class="wd-banner hidden" id="wd-banner" role="status"></div>
+          <nav class="wd-tabs" id="wd-tabs" role="tablist" aria-label="Work item views">
+            <button data-tab="conversation" role="tab" type="button">Conversation</button>
+            <button data-tab="changes" role="tab" type="button">Changes</button>
+            <button data-tab="details" role="tab" type="button">Details</button>
+          </nav>
+          <div class="wd-pane wd-conversation" id="wd-conversation">
+            <button class="back-btn wd-child-back hidden" id="wd-child-back" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              <span>Back to the worker</span>
+            </button>
+            <div class="chat" id="wd-thread"></div>
+            <div class="composer-zone" id="wd-composer-zone">
+              <p class="composer-hint hidden" id="wd-hint"></p>
+              <form class="composer" id="wd-composer">
+                <textarea id="wd-prompt" rows="1" aria-label="Follow-up for the worker"></textarea>
                 <div class="composer-tools">
-                  <span class="composer-msg" id="oc-msg" role="status"></span>
+                  <span class="composer-msg" id="wd-msg" role="status"></span>
                   <span class="spacer"></span>
-                  <button class="send stop hidden" id="oc-stop" type="button" aria-label="Stop">
-                    <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
+                  <button class="send stop hidden" id="wd-stop" type="button" aria-label="Stop the turn" title="Stop the turn">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
                   </button>
-                  <button class="send" id="oc-send" type="submit" aria-label="Send">
-                    <svg viewBox="0 0 24 24"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+                  <button class="send" id="wd-send" type="submit" aria-label="Send">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
                   </button>
                 </div>
               </form>
             </div>
-          </section>
-
-          <section class="wd hidden" id="wd" aria-label="Work item">
-            <header class="wd-crumb">
-              <button class="back-btn" id="wd-back" type="button">
-                <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
-                <span>Orchestrator</span>
-                <span class="wd-unread hidden" id="wd-unread" title="The orchestrator has something new"></span>
-              </button>
-              <span class="crumb-sep">/</span>
-              <span class="wd-title" id="wd-title"></span>
-            </header>
-            <div class="wd-head">
-              <span class="wd-status" id="wd-status"></span>
-              <div class="wd-meta" id="wd-meta"></div>
-              <span class="tb-spacer"></span>
-              <div class="wd-actions" id="wd-actions"></div>
-            </div>
-            <div class="wd-banner hidden" id="wd-banner" role="status"></div>
-            <nav class="wd-tabs" id="wd-tabs" role="tablist" aria-label="Work item views">
-              <button data-tab="conversation" role="tab" type="button">Conversation</button>
-              <button data-tab="changes" role="tab" type="button">Changes</button>
-              <button data-tab="details" role="tab" type="button">Details</button>
-            </nav>
-            <div class="wd-pane wd-conversation" id="wd-conversation">
-              <div class="chat" id="wd-thread"></div>
-              <div class="composer-zone" id="wd-composer-zone">
-                <p class="composer-hint hidden" id="wd-hint"></p>
-                <form class="composer" id="wd-composer">
-                  <textarea id="wd-prompt" rows="1" aria-label="Follow-up for the worker"></textarea>
-                  <div class="composer-tools">
-                    <span class="composer-msg" id="wd-msg" role="status"></span>
-                    <span class="spacer"></span>
-                    <button class="send stop hidden" id="wd-stop" type="button" aria-label="Stop">
-                      <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
-                    </button>
-                    <button class="send" id="wd-send" type="submit" aria-label="Send">
-                      <svg viewBox="0 0 24 24"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-            <div class="wd-pane wd-changes hidden" id="wd-changes"></div>
-            <div class="wd-pane wd-details hidden" id="wd-details"></div>
-          </section>
-
-          <section class="fr hidden" id="fr" aria-label="Get started"></section>
-        </main>
-
-        <div class="pane-resize" id="resize-right" role="separator" aria-orientation="vertical" aria-label="Resize work in progress"></div>
-        <aside class="wp" id="wp" aria-label="In progress">
-          <div class="pane-head">
-            <span class="pane-title">In progress</span>
           </div>
-          <div class="wp-sections" id="wp-sections">
-            <section class="wp-section hidden" data-section="needs">
-              <h4 class="wp-section-title">Needs input</h4>
-              <ul class="wp-list" id="wp-needs"></ul>
-            </section>
-            <section class="wp-section hidden" data-section="running">
-              <h4 class="wp-section-title">Running</h4>
-              <ul class="wp-list" id="wp-running"></ul>
-            </section>
-            <section class="wp-section hidden" data-section="review">
-              <h4 class="wp-section-title">Review</h4>
-              <ul class="wp-list" id="wp-review"></ul>
-            </section>
-            <p class="wp-empty hidden" id="wp-empty">Nothing in progress.</p>
-          </div>
-          <footer class="wp-foot">
-            <span class="wp-capacity" id="wp-capacity"></span>
-            <span class="wp-paused hidden" id="wp-paused"></span>
-          </footer>
+          <div class="wd-pane wd-changes hidden" id="wd-changes"></div>
+          <div class="wd-pane wd-details hidden" id="wd-details"></div>
         </aside>
-      </div>
+
+        <section class="fr hidden" id="fr" aria-label="Get started"></section>
+      </main>
     </div>
 
     <div class="modal-overlay hidden" id="tb-dialog"></div>

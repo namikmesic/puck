@@ -87,7 +87,7 @@ const createWindow = (): void => {
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
-    // Three panes need the room.
+    // The board's five columns and the Closed rail need the room.
     minHeight: 600,
     minWidth: 960,
     backgroundColor: '#FFFDF7',
