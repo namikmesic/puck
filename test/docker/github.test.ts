@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { DaemonEvent, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
 import type { Notice } from '../../src/harness/transcript';
-import { copyIn, definition, exec, must, startEnv, untilSnapshot, waitReady, type Env } from './helpers';
+import { copyIn, definition, exec, must, startEnv, turnEvents, untilSnapshot, waitReady, type Env } from './helpers';
 
 // The GitHub workflow against a fake GitHub API inside the container. A
 // labelled issue becomes a queued item; its worker commits; publishing puts
@@ -23,7 +23,7 @@ const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
-const s = { issues: {}, comments: {}, pulls: [], reviews: {}, reviewComments: {}, checks: {}, runs: {}, jobs: {}, logs: {}, permissions: { alice: 'write', mallory: 'read', casey: 'read' }, nextId: 1000 };
+const s = { issues: {}, comments: {}, pulls: [], reviews: {}, reviewComments: {}, checks: {}, runs: {}, jobs: {}, logs: {}, permissions: { alice: 'write', mallory: 'read', casey: 'read' }, nextId: 1000, defaultBranch: 'main' };
 const now = () => new Date().toISOString();
 const headSha = (ref) => { try { return execFileSync('git', ['-C', '/srv/git/octo/app.git', 'rev-parse', 'refs/heads/' + ref]).toString().trim(); } catch { return ''; } };
 http.createServer((req, res) => {
@@ -50,10 +50,17 @@ http.createServer((req, res) => {
     if (p === '/__test/checks') { s.checks[body.sha] = body.checkRuns; s.runs[body.sha] = body.runs || []; Object.assign(s.jobs, body.jobs || {}); Object.assign(s.logs, body.logs || {}); return send(200, {}); }
     if (p === '/__test/reviews') { s.reviews[body.pull] = body.reviews; s.reviewComments[body.pull] = body.comments || []; return send(200, {}); }
     if (p === '/__test/state') return send(200, s);
+    if (p === '/__test/default-branch') { s.defaultBranch = body.branch; return send(200, {}); }
+    if (p === '/__test/merge') {
+      const pr = s.pulls.find((x) => x.number === body.number);
+      if (!pr) return send(404, { message: 'Not Found' });
+      pr.merged = true; pr.merged_at = now(); pr.state = 'closed';
+      return send(200, {});
+    }
     const r = /^\\/repos\\/octo\\/app(\\/.*)?$/.exec(p);
     if (!r) return send(404, { message: 'Not Found' });
     const sub = r[1] || '';
-    if (sub === '' && req.method === 'GET') return send(200, { full_name: 'octo/app', default_branch: 'main' });
+    if (sub === '' && req.method === 'GET') return send(200, { full_name: 'octo/app', default_branch: s.defaultBranch });
     if (sub === '/issues' && req.method === 'GET') {
       const label = (url.searchParams.get('labels') || '').toLowerCase();
       return send(200, Object.values(s.issues).filter((i) => i.state === 'open' && i.labels.some((l) => l.name.toLowerCase() === label)));
@@ -267,5 +274,86 @@ describe('Docker scenario: the GitHub workflow', () => {
     expect([...new Set(writes)].sort()).toEqual(
       ['PATCH /repos/octo/app/issues/comments/N', 'POST /repos/octo/app/issues/N/comments', 'POST /repos/octo/app/pulls'].sort(),
     );
+
+    // pr_read and ci_read run inside the orchestrator, the way an agent calls them.
+    // Auto-wake is still delivering the review notice; wait until that turn is idle.
+    const idleDeadline = Date.now() + 60_000;
+    let orchestrator = '';
+    let stableSince = 0;
+    for (;;) {
+      const snap = await client.cmd<Snapshot>('snapshot.get');
+      orchestrator = snap.orchestratorSessionId ?? '';
+      const session = snap.sessions.find((s) => s.id === orchestrator);
+      if (session?.status === 'idle' && session.queued === 0) {
+        if (stableSince === 0) stableSince = Date.now();
+        if (Date.now() - stableSince > 800) break;
+      } else {
+        stableSince = 0;
+      }
+      if (Date.now() > idleDeadline) throw new Error(`orchestrator stayed ${session?.status ?? 'missing'}`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const sent = await client.cmd<{ turnId?: string }>('chat.send', {
+      sessionId: orchestrator,
+      text: ['!tool pr_read {"item":"W-1"}', '!tool ci_read {"item":"W-1"}'].join('\n'),
+    });
+    if (!sent.turnId) throw new Error('orchestrator queued the tool turn instead of running it');
+    await client.untilEvent('turn.end', (ev) => ev.turnId === sent.turnId);
+    const toolEnds = turnEvents(client.events(), sent.turnId).filter(
+      (e): e is Extract<typeof e, { kind: 'tool-end' }> => e.kind === 'tool-end',
+    );
+    expect(toolEnds.map((e) => e.ok)).toEqual([true, true]);
+    const prRead = JSON.parse(toolEnds[0].output) as Record<string, unknown>;
+    const ciRead = JSON.parse(toolEnds[1].output) as Record<string, unknown>;
+    const prReadText = JSON.stringify(prRead);
+    expect(prRead).not.toHaveProperty('notShown');
+    expect(prReadText).toContain('Please keep the heading.');
+    expect(prReadText).toContain('alice');
+    expect(prReadText).not.toContain('mallory');
+    expect(prReadText).not.toContain('delete the repository');
+    expect(prReadText).not.toContain('casey');
+    expect(prReadText).not.toContain('Ship without the tests');
+    expect(prReadText).not.toContain('Delete the assertion');
+    expect(ciRead.state).toBe('failure');
+    expect(JSON.stringify(ciRead.logs)).toContain('readme.test.js');
+    expect(JSON.stringify(ciRead.logs)).toContain('teh');
+
+    // A known non-default base says merging will not close the issue. An unknown default still closes.
+    await control('/__test/default-branch', { branch: 'develop' });
+    await client.cmd('item.publish', { itemId });
+    state = await fakeState();
+    expect(state.pulls[0].body).toContain('Refs octo/app#5');
+    expect(state.pulls[0].body).toContain('Merging this pull request will not close the issue');
+    expect(state.pulls[0].body).not.toContain('Closes octo/app#5');
+    await control('/__test/default-branch', { branch: null });
+    await client.cmd('item.publish', { itemId });
+    state = await fakeState();
+    expect(state.pulls[0].body).toContain('Closes octo/app#5');
+    expect(state.pulls[0].body).not.toContain('Refs octo/app#5');
+
+    // Merging the pull request moves the item to done and edits the one status comment.
+    await control('/__test/merge', { number: 1 });
+    await client.cmd('github.nudge', { repo: 'octo/app', kind: 'pull', number: 1 });
+    const mergedNotice = await untilNotice((n) => n.kind === 'pr.merged');
+    const doneItem = (await untilSnapshot(client, (s) => s.items.find((i) => i.id === itemId)?.status === 'done', 30_000)).items.find(
+      (i) => i.id === itemId,
+    ) as WorkItem;
+    expect(doneItem.status).toBe('done');
+    expect(doneItem.pr?.state).toBe('merged');
+    expect(mergedNotice.text).toContain('so the item is done');
+    for (let i = 0; i < 40; i++) {
+      state = await fakeState();
+      if ((state.comments['5'] ?? []).some((c) => c.body.includes('done — PR #1 merged'))) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(state.comments['5']).toHaveLength(1);
+    expect(state.comments['5'][0].body).toContain('done — PR #1 merged');
+
+    const finalLog = await githubLog();
+    const finalWrites = [...new Set(finalLog.filter((r) => r.method !== 'GET').map((r) => `${r.method} ${r.url.replace(/\/\d+/g, '/N')}`))].sort();
+    expect(finalWrites).toEqual(
+      ['PATCH /repos/octo/app/issues/comments/N', 'PATCH /repos/octo/app/pulls/N', 'POST /repos/octo/app/issues/N/comments', 'POST /repos/octo/app/pulls'].sort(),
+    );
+
   });
 });
