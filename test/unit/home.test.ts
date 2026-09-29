@@ -189,6 +189,25 @@ describe('initializing a Puck home', () => {
     expect(w.saved).toEqual([]);
   });
 
+  it('keeps GitHub\'s own error when a home named my.workflow is still empty', async () => {
+    const w = world({ 'me/my.workflow': { root: null }, 'me/app': { root: PROJECT_ROOT } }, { treeConflicts: 4 });
+    await expect(w.home.initialize('me/my.workflow', 'me/app')).rejects.toThrow(
+      /^GitHub 409 on \/repos\/me\/my\.workflow\/git\/trees: Git Repository is empty\.$/,
+    );
+    expect(w.saved).toEqual([]);
+  });
+
+  it('keeps a non-permission ref failure on a home named my.workflow', async () => {
+    const w = world(
+      { 'me/my.workflow': { root: null }, 'me/app': { root: PROJECT_ROOT } },
+      { refError: { status: 422, body: { message: 'Update is not a fast forward' } } },
+    );
+    await expect(w.home.initialize('me/my.workflow', 'me/app')).rejects.toThrow(
+      /^GitHub 422 on \/repos\/me\/my\.workflow\/git\/refs\/heads\/main: Update is not a fast forward$/,
+    );
+    expect(w.saved).toEqual([]);
+  });
+
   it('refuses the home itself as the environment repository', async () => {
     const w = world({ 'me/puck-home': { root: null } });
     await expect(w.home.initialize('me/puck-home', 'Me/Puck-Home')).rejects.toThrow(/not on the Puck home itself/);

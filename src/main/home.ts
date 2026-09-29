@@ -66,6 +66,13 @@ function notReachable(fullName: string): Error {
   return new Error(`${fullName} is not reachable with this GitHub sign-in. Install Puck on its owner, or add it to the installation's repositories.`);
 }
 
+function missingWorkflowsPermission(err: unknown): err is GitHubApiError {
+  if (!(err instanceof GitHubApiError) || (err.status !== 403 && err.status !== 422)) return false;
+  const prefix = `GitHub ${err.status} on ${err.path}: `;
+  const body = err.message.startsWith(prefix) ? err.message.slice(prefix.length) : '';
+  return /create or update workflow/i.test(body) && /`workflows` permission/i.test(body);
+}
+
 export function createHome(deps: HomeDeps) {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
@@ -181,7 +188,7 @@ export function createHome(deps: HomeDeps) {
       log.info('home.initialized', { repo: name, files: entries.length, ms: Date.now() - started });
       return name;
     } catch (err) {
-      if (err instanceof GitHubApiError && /workflow/i.test(err.message)) {
+      if (missingWorkflowsPermission(err)) {
         throw new Error(`GitHub did not let Puck write the validation workflow to ${name}: ${err.message}. Check that the Puck app's installation has the workflows permission.`);
       }
       throw err;
