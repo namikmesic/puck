@@ -6,13 +6,16 @@
  * tool, or the daemon itself). Only `running` and `needs-input` hold one of
  * the assigned agent's slots.
  *
- * Two rows go beyond the plain lifecycle and are deliberate:
+ * Rows that go beyond the plain lifecycle, and are deliberate:
  *   - `restart` also takes `needs-input` back to `queued`: the question
  *     died with the turn that asked it, and the resumed session asks again.
  *   - `assign` from `queued` to `queued` re-assigns a waiting item.
+ *   - `accept` takes every status except `done` to `done`. A merged pull
+ *     request is the work shipped, including after a follow-up, a failure
+ *     or a cancellation. `running` and `needs-input` release their slot.
  */
 
-import type { DaemonEvent, ItemPosition, ItemStatus, WorkItem } from '../harness/daemon-protocol';
+import type { DaemonEvent, IssueSource, ItemPosition, ItemStatus, WorkItem } from '../harness/daemon-protocol';
 import { newId } from '../harness/ulid';
 import type { JsonStore } from './store/store';
 import type { ItemRecord, ItemsFile } from './store/items';
@@ -57,7 +60,8 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: ['running', 'needs-input'], trigger: 'restart', to: 'queued', slot: 'releases' },
   { from: ['running', 'needs-input', 'queued', 'backlog', 'review'], trigger: 'cancel', to: 'cancelled', slot: 'releases' },
   { from: ['review'], trigger: 'follow-up', to: 'queued', slot: null },
-  { from: ['review'], trigger: 'accept', to: 'done', slot: null },
+  { from: ['backlog', 'queued', 'review', 'failed', 'cancelled'], trigger: 'accept', to: 'done', slot: null },
+  { from: ['running', 'needs-input'], trigger: 'accept', to: 'done', slot: 'releases' },
   { from: ['failed', 'cancelled'], trigger: 'retry', to: 'queued', slot: null },
   { from: ['backlog', 'done', 'failed', 'cancelled'], trigger: 'delete', to: 'removed', slot: null },
 ];
@@ -146,6 +150,14 @@ export class Backlog {
     return this.get(ref.trim());
   }
 
+  /** Items linked to a GitHub issue (`owner/name`, number), newest last. */
+  byIssue(repo: string, number: number): ItemRecord[] {
+    const key = repo.toLowerCase();
+    return this.list()
+      .filter((i) => i.source?.number === number && i.source.repo.toLowerCase() === key)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   bySession(sessionId: string): ItemRecord | null {
     return this.list().find((i) => i.sessionId === sessionId) ?? null;
   }
@@ -157,6 +169,7 @@ export class Backlog {
     repo: string | null;
     createdBy: 'user' | 'orchestrator';
     position?: ItemPosition;
+    source?: IssueSource | null;
   }): ItemRecord {
     const pos = init.position;
     if (pos && typeof pos === 'object' && !this.get('before' in pos ? pos.before : pos.after)) {
@@ -181,6 +194,7 @@ export class Backlog {
       base: null,
       result: null,
       pr: null,
+      source: init.source ?? null,
       lastError: null,
       cancelReason: null,
       acceptNote: null,

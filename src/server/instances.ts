@@ -19,8 +19,12 @@
  * access stops new tokens within one token lifetime. The server mints one
  * token per installation, scoped with `repository_ids` and the grant's
  * permissions, audits each mint without its value, and keeps no copy.
+ * A definition update that changes those policies replaces the permission
+ * set (`PUT /v1/instances/:envId/policies`) without re-checking
+ * repositories; the next mint uses the new set.
  */
 
+import { DEFAULT_TOKEN_POLICIES, permissionsFor, type GitHubTokenPolicies } from '../harness/github-permissions';
 import { type ServerContext, requireGitHub, sessionFor } from './context';
 import type { GitHubApp, RepoAccess } from './github';
 import { HttpError, str, type Req, type Router } from './http';
@@ -35,32 +39,11 @@ export const MAX_REPOS = 20;
 const REPO_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
 
 /** The `policies.github` fields that decide an environment's token permissions. */
-export interface GitHubPolicies {
-  intake: 'off' | 'label';
-  statusComment: boolean;
-  ci: 'notify' | 'fix';
-  allowWorkflowEdits: boolean;
-}
+export type GitHubPolicies = GitHubTokenPolicies;
 
-export const DEFAULT_POLICIES: GitHubPolicies = { intake: 'off', statusComment: true, ci: 'notify', allowWorkflowEdits: false };
+export const DEFAULT_POLICIES: GitHubPolicies = DEFAULT_TOKEN_POLICIES;
 
-/**
- * The App permissions an environment's installation tokens carry: always
- * contents and pull requests (write) and metadata (read); issues (write)
- * while intake or the status comment is on; checks, commit statuses and
- * actions (read) to watch CI, with actions write only for automatic CI
- * fixes (re-running jobs); workflows (write) only when the definition allows
- * workflow edits.
- */
-export function permissionsFor(p: GitHubPolicies): Instance['permissions'] {
-  const perms: Instance['permissions'] = { contents: 'write', pull_requests: 'write', metadata: 'read' };
-  if (p.intake === 'label' || p.statusComment) perms.issues = 'write';
-  perms.checks = 'read';
-  perms.statuses = 'read';
-  perms.actions = p.ci === 'fix' ? 'write' : 'read';
-  if (p.allowWorkflowEdits) perms.workflows = 'write';
-  return perms;
-}
+export { permissionsFor };
 
 export function parsePolicies(body: Record<string, unknown>): GitHubPolicies {
   const policies = body.policies as { github?: Record<string, unknown> } | undefined;
@@ -239,6 +222,29 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     });
     ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
     return { body: { instance: view } };
+  });
+
+  router.add('PUT', '/v1/instances/:envId/policies', async (req) => {
+    const { user, instance } = await ownedInstance(req);
+    if (instance.status !== 'active') throw new HttpError(409, 'instance-inactive', 'This environment is no longer on a runner.');
+    const policies = parsePolicies(await req.json());
+    const permissions = permissionsFor(policies);
+    const now = ctx.clock.now();
+    await ctx.store.setPermissions(instance.id, permissions, now);
+    try {
+      const view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
+      await ctx.audit('grant.permissions', {
+        userId: user.id,
+        runnerId: instance.runnerId,
+        envId: instance.id,
+        detail: { permissions },
+      });
+      ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
+      return { body: { instance: view } };
+    } catch (err) {
+      ctx.log.error('grant.permissions', { envId: instance.id, error: err instanceof Error ? err.name : 'unknown' });
+      return { body: {} };
+    }
   });
 
   router.add('DELETE', '/v1/instances/:envId', async (req) => {

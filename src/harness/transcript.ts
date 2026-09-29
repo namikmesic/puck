@@ -28,7 +28,14 @@ export type NoticeKind =
   | 'definition.applied'
   | 'github.auth'
   | 'item.created'
-  | 'item.updated';
+  | 'item.updated'
+  | 'issue.closed'
+  | 'issue.updated'
+  | 'issue.commented'
+  | 'pr.merged'
+  | 'pr.closed'
+  | 'pr.checks'
+  | 'pr.review';
 
 /** A daemon-written update delivered to the orchestrator with its next turn. */
 export interface Notice {

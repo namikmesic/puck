@@ -7,6 +7,10 @@
  * primary limit (5,000 requests per hour) is shared by all of a user's
  * tokens, so the last-seen budget is remembered per client and an exhausted
  * budget fails fast without spending a request.
+ *
+ * Conditional GETs: with `ifNoneMatch` a 304 answer comes back as a result
+ * with `status: 304` and no data (GitHub does not count it against the
+ * primary limit), so a poller can keep the body it already has.
  */
 
 export const API_BASE = 'https://api.github.com';
@@ -80,6 +84,10 @@ export interface RequestOptions {
   accept?: string;
   body?: unknown;
   signal?: AbortSignal;
+  /** An ETag from an earlier answer: a 304 then returns `status: 304` and null data. */
+  ifNoneMatch?: string;
+  /** Return the body as text whatever its media type (job logs are plain text). */
+  text?: boolean;
 }
 
 export interface GitHubResponse<T> {
@@ -102,11 +110,24 @@ export interface HttpClientOptions {
 export interface HttpClient {
   request<T>(path: string, opts?: RequestOptions): Promise<GitHubResponse<T>>;
   /** Every page of a list endpoint (per_page=100, following Link rel="next"). */
-  paginate<T>(path: string, pick?: (page: unknown) => T[], opts?: { maxPages?: number }): Promise<T[]>;
+  paginate<T>(path: string, pick?: (page: unknown) => T[], opts?: PaginateOptions): Promise<T[]>;
   rateLimit(): RateLimitState;
 }
 
 const JSON_MEDIA = 'application/vnd.github+json';
+const LIST_PAGE = 100;
+
+export interface PaginateOptions {
+  maxPages?: number;
+  signal?: AbortSignal;
+  /** Set when the page cap stops the walk while GitHub still offers another page. */
+  truncated?: { value: boolean };
+}
+
+function withPerPage(path: string): string {
+  if (/[?&]per_page=/.test(path)) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}per_page=${LIST_PAGE}`;
+}
 
 function headerNumber(headers: Headers, name: string): number | null {
   const raw = headers.get(name);
@@ -190,6 +211,7 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
           Authorization: `Bearer ${token}`,
           'X-GitHub-Api-Version': API_VERSION,
           'User-Agent': 'Puck',
+          ...(ro.ifNoneMatch ? { 'If-None-Match': ro.ifNoneMatch } : {}),
           ...(ro.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         body: ro.body !== undefined ? JSON.stringify(ro.body) : undefined,
@@ -197,8 +219,9 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
       });
       record(res.headers);
       const text = await res.text();
+      if (res.status === 304 && ro.ifNoneMatch) return { status: 304, headers: res.headers, data: null as T };
       // The raw and sha media types answer with the bare content, not JSON.
-      const isJson = !/\.(raw|sha)\b/.test(accept);
+      const isJson = !ro.text && !/\.(raw|sha)\b/.test(accept);
       if (res.ok) {
         const data = (isJson ? parseBody(text) : text) as T;
         return { status: res.status, headers: res.headers, data };
@@ -220,16 +243,18 @@ export function createHttpClient(opts: HttpClientOptions): HttpClient {
   async function paginate<T>(
     path: string,
     pick: (page: unknown) => T[] = (page) => (Array.isArray(page) ? (page as T[]) : []),
-    po: { maxPages?: number } = {},
+    po: PaginateOptions = {},
   ): Promise<T[]> {
     const out: T[] = [];
-    const sep = path.includes('?') ? '&' : '?';
-    let next: string | null = `${path}${sep}per_page=100`;
-    for (let page = 0; next && page < (po.maxPages ?? 20); page++) {
-      const res: GitHubResponse<unknown> = await request<unknown>(next);
+    let next: string | null = withPerPage(path);
+    if (po.truncated) po.truncated.value = false;
+    const max = po.maxPages ?? 20;
+    for (let page = 0; next && page < max; page++) {
+      const res: GitHubResponse<unknown> = await request<unknown>(next, { signal: po.signal });
       out.push(...pick(res.data));
       next = nextLink(res.headers.get('link'));
     }
+    if (po.truncated && next) po.truncated.value = true;
     return out;
   }
 

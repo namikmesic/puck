@@ -9,13 +9,14 @@
  * restart interrupted (an unfinished turn becomes interrupted; a transcript
  * that already finished is left idle and is not resumed; running work items
  * go back to queued without counting an attempt) → make sure the orchestrator
- * session exists → resume those turns → ready → start the scheduler and
- * the orchestrator's wake loop.
+ * session exists → resume those turns → ready → start the scheduler,
+ * the orchestrator's wake loop, and the GitHub poll.
  *
  * Orchestration lives in its own modules: items.ts (state machine and
  * backlog), scheduler.ts, work.ts (dispatch, worktrees, results, worker
- * questions), publish.ts, orchestrator.ts (notices and wake) and tools.ts
- * (the orchestrator's in-process tools). This class wires them to the turn
+ * questions), publish.ts, orchestrator.ts (notices and wake), tools.ts
+ * (the orchestrator's in-process tools) and github-sync.ts (issues, pull
+ * requests, CI and reviews on GitHub). This class wires them to the turn
  * loop and to the protocol's commands.
  */
 
@@ -33,6 +34,7 @@ import {
   type ProvisionStage,
   type Snapshot,
 } from '../harness/daemon-protocol';
+import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
 import { harnessDescriptors } from '../harness/providers';
 import { Credentials } from './credentials';
 import {
@@ -49,7 +51,10 @@ import { createAdapters } from './harness';
 import { harnessEnv } from './harness/spawn';
 import type { HarnessAdapter, OrchestratorTool } from './harness/types';
 import { testAdapters } from './harness/test-adapters';
+import { syncGrantPolicies } from './grant-sync';
 import { Git } from './git';
+import { GitHubApi } from './github-api';
+import { GithubSync } from './github-sync';
 import { Backlog, itemLabel, ItemStateError, publicItem } from './items';
 import { tailLog, type Logger } from './log';
 import { dispatch, OpError, type Handlers } from './ops';
@@ -57,6 +62,7 @@ import { Orchestrator } from './orchestrator';
 import { orchestratorPreamble } from './prompts';
 import { Publisher } from './publish';
 import { capacityOf, runningCounts, Scheduler, type SchedulerView } from './scheduler';
+import { githubStore } from './store/github';
 import { itemsStore } from './store/items';
 import type { SessionRecord } from './store/sessions';
 import { orchestratorTools } from './tools';
@@ -114,10 +120,13 @@ export class Daemon {
   private work!: Work;
   private scheduler!: Scheduler;
   private orchestrator!: Orchestrator;
+  private github!: GithubSync;
   private tools: OrchestratorTool[] = [];
   private git!: Git;
   /** True while a reprovision is waiting or provisioning. */
   private reprovisioning = false;
+  /** True while definition.apply has not yet stored its definition or failed. */
+  private applyingDefinition = false;
   private homeReady = false;
   private phase: DaemonPhase = 'serving';
   private exited = false;
@@ -158,13 +167,14 @@ export class Daemon {
       const asPuck = this.opts.privileged ? { uid: PUCK_UID, gid: PUCK_GID } : {};
       const git = (this.git = new Git({ paths, run: this.run, asPuck }));
       const test = testAdapters !== null;
+      const apiBase = (test && this.opts.env.PUCK_TEST_GITHUB_API) || undefined;
       const publisher = new Publisher({
         git,
         tmpDir: path.join(paths.state, 'tmp'),
         grantFor: (owner) => this.credentials.grantFor(owner),
         definition: () => this.definition,
         envName: () => this.instance.get()?.name || this.definition?.name || '',
-        apiBase: (test && this.opts.env.PUCK_TEST_GITHUB_API) || undefined,
+        apiBase,
         log,
         now: this.now,
       });
@@ -218,6 +228,22 @@ export class Daemon {
         },
         requestTick: () => this.scheduler.request(),
         reprovisioning: () => this.reprovisioning,
+        issueContext: (item) => this.github.issueContext(item),
+        published: (itemId) => this.github.published(itemId),
+        log,
+        now: this.now,
+      });
+      this.github = new GithubSync({
+        api: new GitHubApi({ grantFor: (owner) => this.credentials.grantFor(owner), apiBase, now: this.now }),
+        backlog: this.backlog,
+        work: this.work,
+        store: githubStore(paths.state),
+        definition: () => this.definition,
+        envId: () => this.instance.get()?.envId ?? '',
+        notify: (kind, text, itemId) => {
+          this.orchestrator.push(kind, text, itemId);
+        },
+        canRun: () => this.running(),
         log,
         now: this.now,
       });
@@ -239,6 +265,7 @@ export class Daemon {
           const view = this.schedulerView();
           return view ? runningCounts(view).perAgent : {};
         },
+        github: this.github,
       });
     }
     this.server = new DaemonServer({
@@ -286,6 +313,7 @@ export class Daemon {
     this.emitCapacity();
     this.scheduler.start();
     this.orchestrator.schedule();
+    this.github.start();
     log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length, requeued: requeued.length });
   }
 
@@ -335,42 +363,52 @@ export class Daemon {
    * not start work. A change that needs a rebuild is refused: the app
    * recreates the container itself.
    */
-  private applyDefinition(raw: unknown, pin: Pin): { classes: string[] } {
+  private async applyDefinition(raw: unknown, pin: Pin): Promise<{ classes: string[] }> {
     if (!this.running()) throw new OpError('not-ready', 'The environment is still starting.');
-    if (this.reprovisioning) throw new OpError('invalid-state', 'An update is already being applied.');
-    const record = this.instance.get();
-    const prev = this.definition;
-    if (!record || !prev) throw new OpError('not-ready', 'The environment is still starting.');
-    const parsed = readDefinition(raw);
-    if (!parsed.ok) throw new OpError('invalid-args', `The definition is invalid: ${parsed.error}`);
-    const next = parsed.value;
-    if (next.name !== prev.name) throw new OpError('invalid-args', `This environment runs "${prev.name}", not "${next.name}".`);
-    const changes = definitionChanges(record.definition, prev, raw, next);
-    const classes = changeClasses(changes);
-    if (classes.includes('rebuild')) {
-      const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
-      throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+    if (this.reprovisioning || this.applyingDefinition) throw new OpError('invalid-state', 'An update is already being applied.');
+    this.applyingDefinition = true;
+    try {
+      const record = this.instance.get();
+      const prev = this.definition;
+      if (!record || !prev) throw new OpError('not-ready', 'The environment is still starting.');
+      const parsed = readDefinition(raw);
+      if (!parsed.ok) throw new OpError('invalid-args', `The definition is invalid: ${parsed.error}`);
+      const next = parsed.value;
+      if (next.name !== prev.name) throw new OpError('invalid-args', `This environment runs "${prev.name}", not "${next.name}".`);
+      const changes = definitionChanges(record.definition, prev, raw, next);
+      const classes = changeClasses(changes);
+      if (classes.includes('rebuild')) {
+        const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
+        throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
+      }
+      const prevPolicies = tokenPoliciesFrom(prev.policies.github);
+      const nextPolicies = tokenPoliciesFrom(next.policies.github);
+      if (!sameTokenPermissions(prevPolicies, nextPolicies)) {
+        await syncGrantPolicies(this.opts.env, record.envId, nextPolicies);
+      }
+      this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
+      this.definition = next;
+      this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
+      this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
+      if (changes.length) {
+        const shown = changes.slice(0, 8).map((c) => c.summary);
+        const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
+        this.orchestrator.push(
+          'definition.applied',
+          `The environment definition was updated to ${pin.name} (${pin.sha.slice(0, 7)}): ${shown.join('; ')}${more}.`,
+        );
+      }
+      this.ensureOrchestrator(next);
+      this.emitCapacity();
+      this.scheduler.request();
+      if (classes.includes('reprovision')) {
+        this.reprovisioning = true;
+        void this.reprovision();
+      }
+      return { classes };
+    } finally {
+      this.applyingDefinition = false;
     }
-    this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
-    this.definition = next;
-    this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
-    this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
-    if (changes.length) {
-      const shown = changes.slice(0, 8).map((c) => c.summary);
-      const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';
-      this.orchestrator.push(
-        'definition.applied',
-        `The environment definition was updated to ${pin.name} (${pin.sha.slice(0, 7)}): ${shown.join('; ')}${more}.`,
-      );
-    }
-    this.ensureOrchestrator(next);
-    this.emitCapacity();
-    this.scheduler.request();
-    if (classes.includes('reprovision')) {
-      this.reprovisioning = true;
-      void this.reprovision();
-    }
-    return { classes };
   }
 
   private async reprovision(): Promise<void> {
@@ -453,6 +491,7 @@ export class Daemon {
 
   private emit(ev: DaemonEvent): void {
     if (!this.events.append(ev)) throw new Error('The event log could not record an event.');
+    if (ev.kind === 'item.upsert') this.github?.itemChanged(ev.item);
   }
 
   /* ---------- Agents, env, notices ---------- */
@@ -568,6 +607,14 @@ export class Daemon {
     'item.retry': ({ itemId }) => publicItem(this.items.retry(itemId)),
     'item.accept': ({ itemId }) => publicItem(this.items.accept(itemId)),
     'item.publish': ({ itemId }) => this.items.publish(itemId, {}, 'user'),
+    'issue.import': async ({ repo, number, agent, position }) => {
+      if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
+      return publicItem(await this.github.importIssue(repo, number, { agent, position }, 'user'));
+    },
+    'github.nudge': ({ repo, kind, number }) => {
+      this.github?.nudge(repo, kind, number);
+      return {};
+    },
     'item.delete': async ({ itemId }) => {
       await this.items.remove(itemId);
       return {};
@@ -590,6 +637,7 @@ export class Daemon {
     'github.put': ({ grants }) => {
       if (!this.credentials.putGithub(grants)) throw new OpError('invalid-args', 'Those are not usable GitHub installation token grants.');
       this.emitGithubAuth(true);
+      this.github?.grantsArrived();
       return {};
     },
     'secrets.put': ({ values }) => {
@@ -661,6 +709,7 @@ export class Daemon {
       this.turns?.stopAccepting();
       this.scheduler?.stop();
       this.orchestrator?.stop();
+      this.github?.stop();
     } catch (err) {
       log.error('daemon.upgrade-failed', err);
       void this.finishExit(1);
@@ -715,6 +764,7 @@ export class Daemon {
     this.turns?.stopAccepting();
     this.scheduler?.stop();
     this.orchestrator?.stop();
+    this.github?.stop();
     this.opts.log.info('daemon.shutdown');
     let code = 0;
     try {

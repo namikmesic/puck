@@ -14,7 +14,7 @@
 
 import type { ProviderOption } from '../options';
 import { harnessDescriptors, type HarnessDescriptor } from '../providers';
-import { API_VERSION, ENV_KEY_RE, LIMITS, NAME_RE, RESERVED_ENV_PREFIX } from './types';
+import { API_VERSION, DEFAULT_GITHUB_POLICIES as GH, ENV_KEY_RE, INTAKE_LABEL_RE, LIMITS, NAME_RE, RESERVED_ENV_PREFIX } from './types';
 import { DOCKER_REF_PATTERN, ORCHESTRATOR_HARNESS, REPO_PATH_PATTERN, REPO_RE } from './validate';
 
 export type JsonSchema = Record<string, unknown>;
@@ -176,6 +176,30 @@ function environmentSchema(): JsonSchema {
         asks: { type: 'string', enum: ['orchestrator-first', 'user'], default: 'orchestrator-first' },
         publish: { type: 'string', enum: ['manual', 'orchestrator'], default: 'orchestrator' },
         draftPullRequests: { type: 'boolean', default: true },
+        github: map({
+          intake: { type: 'string', enum: ['off', 'label'], default: GH.intake, description: 'Take in open issues carrying intakeLabel as work items.' },
+          intakeLabel: {
+            type: 'string',
+            pattern: INTAKE_LABEL_RE.source,
+            default: GH.intakeLabel,
+            description: 'The intake label; <intakeLabel>:<agent> also assigns the item.',
+          },
+          agentLabels: { type: 'boolean', default: GH.agentLabels, description: 'Honor <intakeLabel>:<agent> labels.' },
+          statusComment: { type: 'boolean', default: GH.statusComment, description: "Keep one Puck status comment on each linked issue." },
+          ci: { type: 'string', enum: ['notify', 'fix'], default: GH.ci, description: 'fix also queues failing CI to the worker.' },
+          maxCiFixAttempts: { ...int('Automatic CI fix follow-ups per item.', 1, 5), default: GH.maxCiFixAttempts },
+          reviews: {
+            type: 'string',
+            enum: ['notify', 'address'],
+            default: GH.reviews,
+            description: 'address also queues review feedback from people with write access to the worker.',
+          },
+          allowWorkflowEdits: {
+            type: 'boolean',
+            default: GH.allowWorkflowEdits,
+            description: "Give the environment's GitHub tokens the Workflows permission.",
+          },
+        }),
       }),
       git: map({
         userName: text('Commit author name (default: the GitHub login).', { minLength: 1, pattern: '\\S' }),

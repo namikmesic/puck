@@ -38,7 +38,7 @@ const def = (() => {
   return r.value;
 })();
 
-function publisher(now = 1_000, alter?: (git: Git) => void) {
+function publisher(now = 1_000, alter?: (git: Git) => void, route?: (url: string, method: string) => Response | undefined) {
   const fake = fakeRunner((argv) => {
     const sub = argv[0] === 'git' && argv[1] === '-C' ? argv[3] : '';
     if (sub === 'log') return { stdout: commits };
@@ -57,6 +57,8 @@ function publisher(now = 1_000, alter?: (git: Git) => void) {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ method, url, body, auth: new Headers(init?.headers).get('authorization') });
+    const routed = route?.(url, method);
+    if (routed) return routed;
     if (method === 'GET') return new Response(JSON.stringify(pulls.filter(() => url.includes('head=octo%3Apuck%2FW-4-fix-login-redirect'))), { status: 200 });
     if (method === 'POST') {
       const pr = { number: 7, html_url: 'https://github.com/octo/app/pull/7', draft: body.draft, head: { ref: body.head } };
@@ -104,6 +106,7 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
       endedAt: 1,
     },
     pr: null,
+    source: null,
     lastError: null,
     cancelReason: null,
     acceptNote: null,
@@ -190,6 +193,43 @@ describe('publishing', () => {
     });
     expect(pushed).toBe(bundledHead);
     expect(pushed).toBe(HEAD1);
+  });
+
+  it('closes the issue on the default branch or when that branch cannot be determined, and refs any other base', async () => {
+    const source = {
+      kind: 'github-issue' as const,
+      repo: 'octo/app',
+      number: 12,
+      url: 'https://github.com/octo/app/issues/12',
+      updatedAt: 1,
+    };
+    const repo = (payload: unknown, status = 200) => (url: string, method: string): Response | undefined =>
+      method === 'GET' && url === 'https://api.test/repos/octo/app'
+        ? new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+        : undefined;
+    const bodyOf = () => String((requests.find((r) => r.method === 'POST')?.body as { body?: string } | undefined)?.body ?? '');
+
+    const onDefault = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'main' })).publish(reviewItem({ source }));
+    expect(onDefault.link).toBe('Closes octo/app#12');
+    expect(bodyOf()).toContain('Closes octo/app#12');
+
+    requests = [];
+    pulls = [];
+    const otherBase = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'develop' })).publish(reviewItem({ source }));
+    expect(otherBase.link).toBe('Refs octo/app#12');
+    expect(bodyOf()).toContain('Merging this pull request will not close the issue');
+    expect(bodyOf()).not.toContain('Closes octo/app#12');
+
+    requests = [];
+    pulls = [];
+    const unknown = await publisher(1_000, undefined, repo({ full_name: 'octo/app' })).publish(reviewItem({ source }));
+    expect(unknown.link).toBe('Closes octo/app#12');
+
+    requests = [];
+    pulls = [];
+    const down = await publisher(1_000, undefined, repo({ message: 'no' }, 500)).publish(reviewItem({ source }));
+    expect(down.link).toBe('Closes octo/app#12');
+    expect(bodyOf()).toContain('Closes octo/app#12');
   });
 
   it('opens a draft pull request the first time and updates it after a follow-up, leased on the last push', async () => {

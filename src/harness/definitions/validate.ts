@@ -14,8 +14,10 @@ import { harnessDescriptors, type HarnessDescriptor } from '../providers';
 import { fieldName, parseDefinitionFile, type FieldPath, type ParsedFile } from './parse';
 import {
   API_VERSION,
+  DEFAULT_GITHUB_POLICIES,
   DEFINITION_DIRS,
   ENV_KEY_RE,
+  INTAKE_LABEL_RE,
   LIMITS,
   NAME_RE,
   RESERVED_ENV_PREFIX,
@@ -88,6 +90,15 @@ export const RULES = [
   'policies.asks',
   'policies.publish',
   'policies.draftPullRequests',
+  'policies.github',
+  'policies.github.intake',
+  'policies.github.intakeLabel',
+  'policies.github.agentLabels',
+  'policies.github.statusComment',
+  'policies.github.ci',
+  'policies.github.maxCiFixAttempts',
+  'policies.github.reviews',
+  'policies.github.allowWorkflowEdits',
   'git',
   'git.userName',
   'git.userEmail',
@@ -515,11 +526,29 @@ function checkEnvironment(c: Check, v: Record<string, unknown>, snap: RepoSnapsh
     c.int(limits.maxAttempts, ['limits', 'maxAttempts'], 'limits.maxAttempts', 1, 10);
   }
 
-  const policies = c.map(v.policies, ['policies'], 'policies', ['asks', 'publish', 'draftPullRequests']);
+  const policies = c.map(v.policies, ['policies'], 'policies', ['asks', 'publish', 'draftPullRequests', 'github']);
   if (policies) {
     c.oneOf(policies.asks, ['policies', 'asks'], 'policies.asks', ['orchestrator-first', 'user']);
     c.oneOf(policies.publish, ['policies', 'publish'], 'policies.publish', ['manual', 'orchestrator']);
     c.bool(policies.draftPullRequests, ['policies', 'draftPullRequests'], 'policies.draftPullRequests');
+    const gh = c.map(policies.github, ['policies', 'github'], 'policies.github', Object.keys(DEFAULT_GITHUB_POLICIES));
+    if (gh) {
+      const at = (key: string): FieldPath => ['policies', 'github', key];
+      c.oneOf(gh.intake, at('intake'), 'policies.github.intake', ['off', 'label']);
+      if (gh.intakeLabel !== undefined && (typeof gh.intakeLabel !== 'string' || !INTAKE_LABEL_RE.test(gh.intakeLabel))) {
+        c.fail(
+          'policies.github.intakeLabel',
+          at('intakeLabel'),
+          'policies.github.intakeLabel must be a GitHub label of 1-50 characters without commas, colons or surrounding spaces',
+        );
+      }
+      c.bool(gh.agentLabels, at('agentLabels'), 'policies.github.agentLabels');
+      c.bool(gh.statusComment, at('statusComment'), 'policies.github.statusComment');
+      c.oneOf(gh.ci, at('ci'), 'policies.github.ci', ['notify', 'fix']);
+      c.int(gh.maxCiFixAttempts, at('maxCiFixAttempts'), 'policies.github.maxCiFixAttempts', 1, 5);
+      c.oneOf(gh.reviews, at('reviews'), 'policies.github.reviews', ['notify', 'address']);
+      c.bool(gh.allowWorkflowEdits, at('allowWorkflowEdits'), 'policies.github.allowWorkflowEdits');
+    }
   }
 
   const git = c.map(v.git, ['git'], 'git', ['userName', 'userEmail']);

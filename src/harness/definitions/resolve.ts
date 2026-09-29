@@ -8,6 +8,7 @@
 
 import { blobAt, fileAt, isStartable, referencedAgents, type ValidatedRepo } from './validate';
 import {
+  DEFAULT_GITHUB_POLICIES,
   RESOLVER_VERSION,
   type AgentDefinition,
   type DefinitionError,
@@ -31,6 +32,11 @@ export class DefinitionsInvalidError extends Error {
     );
     this.name = 'DefinitionsInvalidError';
   }
+}
+
+/** The fields actually set (a YAML key present with no value adds nothing). */
+function definedOnly<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined && v !== null)) as Partial<T>;
 }
 
 export function resolveAgent(def: AgentDefinition, snap: RepoSnapshot): ResolvedAgent {
@@ -101,6 +107,7 @@ export function resolveEnvironment(
       asks: env.policies?.asks ?? 'orchestrator-first',
       publish: env.policies?.publish ?? 'orchestrator',
       draftPullRequests: env.policies?.draftPullRequests ?? true,
+      github: { ...DEFAULT_GITHUB_POLICIES, ...definedOnly(env.policies?.github ?? {}) },
     },
     git: { userName: env.git?.userName ?? null, userEmail: env.git?.userEmail ?? null },
     env: { ...(env.env ?? {}) },

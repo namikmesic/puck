@@ -10,7 +10,8 @@
  *   POST /v1/runners/registration-token | removal-token   (DELETE .../:id revokes)
  *   POST /v1/runners/register | token | remove
  *   GET  /v1/runners, GET|PATCH|DELETE /v1/runners/:id
- *   POST /v1/instances, GET /v1/instances[/:envId], PUT /v1/instances/:envId/grant, DELETE /v1/instances/:envId
+ *   POST /v1/instances, GET /v1/instances[/:envId], PUT /v1/instances/:envId/grant,
+ *   PUT /v1/instances/:envId/policies, DELETE /v1/instances/:envId
  *   POST /v1/runners/instances/:envId/github-token        (runner token)
  *   GET  /v1/runner/releases, GET /runner/:version/:file
  *   WS   /v1/runners/connect (runner token), /v1/app/connect (session token)

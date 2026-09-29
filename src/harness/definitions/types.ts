@@ -93,6 +93,43 @@ export interface AgentAssignment {
 export type AskPolicy = 'orchestrator-first' | 'user';
 export type PublishPolicy = 'manual' | 'orchestrator';
 
+/**
+ * How an environment works with GitHub. Intake: open issues carrying
+ * `intakeLabel` become work items, and `<intakeLabel>:<agent>` also assigns
+ * them (when `agentLabels`). One status comment per linked issue. CI and
+ * review results reach the orchestrator as notices; `fix` and `address`
+ * also queue follow-ups to the item's worker. Installation tokens carry
+ * the Workflows permission only with `allowWorkflowEdits`.
+ */
+export interface GitHubPolicies {
+  intake: 'off' | 'label';
+  intakeLabel: string;
+  agentLabels: boolean;
+  statusComment: boolean;
+  ci: 'notify' | 'fix';
+  maxCiFixAttempts: number;
+  reviews: 'notify' | 'address';
+  allowWorkflowEdits: boolean;
+}
+
+export const DEFAULT_GITHUB_POLICIES: Readonly<GitHubPolicies> = {
+  intake: 'off',
+  intakeLabel: 'puck',
+  agentLabels: true,
+  statusComment: true,
+  ci: 'notify',
+  maxCiFixAttempts: 2,
+  reviews: 'notify',
+  allowWorkflowEdits: false,
+};
+
+/**
+ * A GitHub label Puck can filter on and extend with `:<agent>`: 1-50
+ * characters, no comma (the list separator in label queries), no colon, no
+ * leading or trailing space.
+ */
+export const INTAKE_LABEL_RE = /^[^,:\s](?:[^,:]{0,48}[^,:\s])?$/;
+
 export interface EnvironmentDefinition {
   apiVersion: typeof API_VERSION;
   kind: 'Environment';
@@ -106,7 +143,7 @@ export interface EnvironmentDefinition {
   orchestrator: { agent: string; autoWake?: boolean; maxAutoTurnsPerHour?: number };
   agents: AgentAssignment[];
   limits?: { maxWorkers?: number; maxAttempts?: number };
-  policies?: { asks?: AskPolicy; publish?: PublishPolicy; draftPullRequests?: boolean };
+  policies?: { asks?: AskPolicy; publish?: PublishPolicy; draftPullRequests?: boolean; github?: Partial<GitHubPolicies> };
   git?: { userName?: string; userEmail?: string };
   env?: Record<string, string>;
   secrets?: string[];
@@ -194,7 +231,7 @@ export interface ResolvedEnvironment {
   orchestrator: { agent: string; autoWake: boolean; maxAutoTurnsPerHour: number };
   agents: Array<{ agent: string; maxParallel: number; instructions: string }>;
   limits: { maxWorkers: number; maxAttempts: number };
-  policies: { asks: AskPolicy; publish: PublishPolicy; draftPullRequests: boolean };
+  policies: { asks: AskPolicy; publish: PublishPolicy; draftPullRequests: boolean; github: GitHubPolicies };
   git: { userName: string | null; userEmail: string | null };
   env: Record<string, string>;
   secrets: string[];

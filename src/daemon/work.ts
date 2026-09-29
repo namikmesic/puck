@@ -19,9 +19,9 @@
  */
 
 import type { AskQuestion } from '../harness/types';
-import type { ItemPosition, WorkItem } from '../harness/daemon-protocol';
-import type { NoticeKind, TranscriptEntry, TurnEntry } from '../harness/transcript';
+import type { IssueSource, ItemPosition, WorkItem } from '../harness/daemon-protocol';
 import type { DaemonDefinition, DaemonRepo } from '../harness/env-definition';
+import type { EntryAuthor, NoticeKind, TranscriptEntry, TurnEntry } from '../harness/transcript';
 import { capBytes, type Git, GitError, itemBranch, RESULT_LIMITS } from './git';
 import { type Backlog, holdsSlot, itemLabel, ItemStateError } from './items';
 import type { Logger } from './log';
@@ -56,6 +56,10 @@ export interface WorkDeps {
   requestTick(): void;
   /** True while a definition reprovision is pending or running. */
   reprovisioning(): boolean;
+  /** For an item from a GitHub issue: the worker prompt's issue section, read at first dispatch. */
+  issueContext?(item: ItemRecord): Promise<string | null>;
+  /** After a publish: the GitHub workflow watches the new head. */
+  published?(itemId: string): Promise<void>;
   log: Logger;
   now?: () => number;
 }
@@ -182,18 +186,33 @@ export class Work {
   /* ---------- Backlog operations ---------- */
 
   create(
-    init: { title: string; body?: string; agent?: string | null; repo?: string | null; position?: ItemPosition },
+    init: { title: string; body?: string; agent?: string | null; repo?: string | null; position?: ItemPosition; source?: IssueSource | null },
     actor: Actor,
+    opts: { silent?: boolean } = {},
   ): ItemRecord {
     const def = this.def();
     const agent = init.agent ?? null;
     const repo = init.repo ?? null;
     if (agent) this.checkAgent(def, agent);
     this.checkRepo(def, repo, agent);
+    const source = init.source ?? null;
+    if (source) {
+      // One open item per issue.
+      const open = this.deps.backlog.byIssue(source.repo, source.number).find((i) => i.status !== 'done' && i.status !== 'cancelled');
+      if (open) throw new WorkError('invalid-state', `Issue ${source.repo}#${source.number} is already ${itemLabel(open)} (${open.status}).`);
+    }
     const item = this.guard(() =>
-      this.deps.backlog.create({ title: init.title.trim(), body: init.body ?? '', agent, repo, createdBy: actor, position: init.position }),
+      this.deps.backlog.create({
+        title: init.title.trim(),
+        body: init.body ?? '',
+        agent,
+        repo,
+        createdBy: actor,
+        position: init.position,
+        source,
+      }),
     );
-    if (actor === 'user') {
+    if (actor === 'user' && !opts.silent) {
       this.deps.notify('item.created', `The user created ${this.label(item)}${agent ? `, assigned to ${agent}` : ' in the backlog'}.`, item.id);
     }
     this.deps.requestTick();
@@ -275,7 +294,23 @@ export class Work {
   accept(ref: string, note?: string): ItemRecord {
     const item = this.item(ref);
     const acceptNote = note?.trim() ? note.trim() : null;
-    return this.guard(() => this.deps.backlog.transition(item, 'accept', { lastError: null, ...(acceptNote ? { acceptNote } : {}) }));
+    const held = holdsSlot(item.status);
+    const sessionId = item.sessionId;
+    const stop = !!sessionId && (item.status === 'queued' || held);
+    const updated = this.guard(() =>
+      this.deps.backlog.transition(item, 'accept', {
+        lastError: null,
+        requeue: null,
+        pendingAsk: null,
+        ...(acceptNote ? { acceptNote } : {}),
+      }),
+    );
+    if (stop && sessionId) {
+      this.deps.turns.clearQueue(sessionId);
+      this.deps.turns.interrupt(sessionId, 'user');
+    }
+    if (held) this.deps.slotsChanged();
+    return updated;
   }
 
   /**
@@ -283,7 +318,7 @@ export class Work {
    * (the text waits in the worker's session until a slot is free); while it
    * waits or runs the text joins the session's queue.
    */
-  followUp(ref: string, text: string, author: Actor): Promise<{ queued: boolean; turnId?: string }> {
+  followUp(ref: string, text: string, author: EntryAuthor): Promise<{ queued: boolean; turnId?: string }> {
     const item = this.item(ref);
     return this.exclusive(item.id, () => {
       if (!item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has not started yet.`);
@@ -317,9 +352,12 @@ export class Work {
       this.deps.backlog.patch(item, { pr: published.pr });
       this.deps.notify(
         'pr.published',
-        `${this.label(item)} was published: ${published.created ? 'opened' : 'updated'} ${published.pr.draft ? 'draft ' : ''}pull request ${published.pr.url}`,
+        `${this.label(item)} was published: ${published.created ? 'opened' : 'updated'} ${published.pr.draft ? 'draft ' : ''}pull request ${published.pr.url}${published.link ? ` (${published.link})` : ''}`,
         item.id,
       );
+      this.deps.published?.(item.id).catch((err: unknown) => {
+        this.deps.log.warn('github.published-hook-failed', { itemId: item.id, detail: (err as Error).message });
+      });
       return { prUrl: published.pr.url };
     });
   }
@@ -383,11 +421,13 @@ export class Work {
           return { branch: baseBranch, sha };
         });
         if (item.status !== 'running') return; // cancelled while preparing; finally drops the unrecorded worktree
+        const issue = this.deps.issueContext ? await this.deps.issueContext(item) : null;
+        if (item.status !== 'running') return;
         const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id });
         this.deps.backlog.patch(item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
         this.deps.turns.send(
           session.id,
-          workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base }),
+          workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base, issue }),
           'system',
         );
       } finally {

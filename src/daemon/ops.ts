@@ -16,6 +16,7 @@ import {
   type OpResult,
   type Pin,
 } from '../harness/daemon-protocol';
+import { REPO_RE } from '../harness/env-definition';
 import { validPin } from '../harness/inbox';
 import { MAX_GRANTS } from './credentials';
 
@@ -156,6 +157,21 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   'item.accept': itemOnly,
   'item.publish': itemOnly,
   'item.delete': itemOnly,
+  'issue.import': (args) => {
+    const o = obj(args);
+    if (typeof o.repo !== 'string' || !REPO_RE.test(o.repo)) bad('repo must be owner/name.');
+    const number = int(o, 'number', 1, 2_147_483_647);
+    if (number === undefined) bad('number is required.');
+    const agent = o.agent === undefined ? undefined : text(o, 'agent', 64, true);
+    if (agent !== undefined && !NAME_RE.test(agent)) bad('agent is not a valid name.');
+    return { repo: o.repo, number, agent, position: o.position === undefined ? undefined : position(o.position) };
+  },
+  'github.nudge': (args) => {
+    const o = obj(args);
+    if (typeof o.repo !== 'string' || !REPO_RE.test(o.repo)) bad('repo must be owner/name.');
+    if (o.kind !== 'issue' && o.kind !== 'pull' && o.kind !== 'checks') bad('kind must be "issue", "pull" or "checks".');
+    return { repo: o.repo, kind: o.kind, number: int(o, 'number', 1, 2_147_483_647) };
+  },
   'definition.apply': (args) => {
     const o = obj(args);
     const pin: Pin | null = validPin(o.pin);

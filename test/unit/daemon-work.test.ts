@@ -691,6 +691,10 @@ describe('orchestrator tools', () => {
       'work_read',
       'answer_worker',
       'escalate_to_user',
+      'issues_search',
+      'issues_import',
+      'pr_read',
+      'ci_read',
       'agents_list',
       'environment_info',
     ]);

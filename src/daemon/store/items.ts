@@ -5,7 +5,7 @@
  */
 
 import * as path from 'node:path';
-import type { ItemStatus, WorkItem } from '../../harness/daemon-protocol';
+import type { IssueSource, ItemStatus, WorkItem } from '../../harness/daemon-protocol';
 import { JsonStore } from './store';
 
 /**
@@ -33,6 +33,12 @@ export interface ItemsFile {
 const STATUSES: readonly ItemStatus[] = ['backlog', 'queued', 'running', 'needs-input', 'review', 'done', 'failed', 'cancelled'];
 const REQUEUE: readonly RequeueReason[] = ['error', 'restart', 'follow-up', 'retry'];
 
+function readSource(raw: unknown): IssueSource | null {
+  const s = raw as Partial<IssueSource> | null | undefined;
+  if (!s || s.kind !== 'github-issue' || typeof s.repo !== 'string' || typeof s.number !== 'number') return null;
+  return { kind: 'github-issue', repo: s.repo, number: s.number, url: typeof s.url === 'string' ? s.url : '', updatedAt: s.updatedAt ?? 0 };
+}
+
 function normalizeItem(id: string, raw: Partial<ItemRecord>): ItemRecord | null {
   if (typeof raw.title !== 'string' || typeof raw.number !== 'number') return null;
   return {
@@ -53,6 +59,7 @@ function normalizeItem(id: string, raw: Partial<ItemRecord>): ItemRecord | null 
     base: raw.base ?? null,
     result: raw.result ?? null,
     pr: raw.pr ?? null,
+    source: readSource(raw.source),
     lastError: raw.lastError ?? null,
     cancelReason: typeof raw.cancelReason === 'string' ? raw.cancelReason : null,
     acceptNote: typeof raw.acceptNote === 'string' ? raw.acceptNote : null,

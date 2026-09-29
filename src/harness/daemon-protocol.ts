@@ -164,6 +164,36 @@ export interface ItemResult {
   endedAt: number;
 }
 
+/** The GitHub issue a work item came from (intake by label, or an import). */
+export interface IssueSource {
+  kind: 'github-issue';
+  /** `owner/name`. */
+  repo: string;
+  number: number;
+  url: string;
+  /** The issue's `updated_at` when Puck last read it (epoch ms). */
+  updatedAt: number;
+}
+
+export type ChecksState = 'pending' | 'success' | 'failure' | 'neutral';
+
+/** CI on a published pull request's head commit: check runs, commit statuses and failed workflow jobs. */
+export interface PullChecks {
+  sha: string;
+  state: ChecksState;
+  failing: { name: string; url: string; summary: string }[];
+}
+
+export interface PullRequestRef {
+  number: number;
+  url: string;
+  draft: boolean;
+  lastPushedSha: string;
+  /** As GitHub last reported it; absent until the first poll. */
+  state?: 'open' | 'closed' | 'merged';
+  checks?: PullChecks | null;
+}
+
 export interface WorkItem {
   id: string;
   number: number;
@@ -181,7 +211,9 @@ export interface WorkItem {
   worktree: string | null;
   base: { branch: string; sha: string } | null;
   result: ItemResult | null;
-  pr: { number: number; url: string; draft: boolean; lastPushedSha: string } | null;
+  pr: PullRequestRef | null;
+  /** The GitHub issue this item works on, when it came from one. */
+  source: IssueSource | null;
   lastError: string | null;
   /** Why the item was cancelled, when the canceller gave one. */
   cancelReason: string | null;
@@ -261,6 +293,16 @@ export interface OpMap {
   'item.accept': { args: { itemId: string }; result: WorkItem };
   'item.publish': { args: { itemId: string }; result: { prUrl: string } };
   'item.delete': { args: { itemId: string }; result: Record<string, never> };
+  /** Import a GitHub issue of one of the environment's repositories as a work item. */
+  'issue.import': {
+    args: { repo: string; number: number; agent?: string; position?: ItemPosition };
+    result: WorkItem;
+  };
+  /** From the runner: something changed on GitHub; poll it now instead of at the next interval. */
+  'github.nudge': {
+    args: { repo: string; kind: 'issue' | 'pull' | 'checks'; number?: number };
+    result: Record<string, never>;
+  };
   'definition.apply': { args: { definition: unknown; pin: Pin }; result: { classes: string[] } };
   'credentials.put': { args: { harness: { id: string; content: string }[] }; result: Record<string, never> };
   'credentials.get': { args: Record<string, never>; result: { harness: { id: string; content: string }[] } };
@@ -293,6 +335,8 @@ const OP_TABLE: Record<Op, true> = {
   'item.accept': true,
   'item.publish': true,
   'item.delete': true,
+  'issue.import': true,
+  'github.nudge': true,
   'definition.apply': true,
   'credentials.put': true,
   'credentials.get': true,
@@ -311,7 +355,8 @@ export function isOp(value: unknown): value is Op {
 
 /**
  * Commands the renderer may issue through the app. Credential, secret,
- * definition and upgrade commands are issued by the main process only.
+ * definition and upgrade commands are issued by the main process only, and
+ * `github.nudge` by the runner only.
  */
 export type RendererOp =
   | 'snapshot.get'
@@ -320,6 +365,7 @@ export type RendererOp =
   | 'session.interrupt'
   | 'ask.answer'
   | Extract<Op, `item.${string}`>
+  | 'issue.import'
   | 'scheduler.pause'
   | 'scheduler.resume'
   | 'logs.tail';
@@ -333,6 +379,7 @@ export const RENDERER_OPS: readonly RendererOp[] = OPS.filter(
       'chat.send',
       'session.interrupt',
       'ask.answer',
+      'issue.import',
       'scheduler.pause',
       'scheduler.resume',
       'logs.tail',
