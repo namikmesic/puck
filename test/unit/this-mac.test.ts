@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import forgeConfig from '../../forge.config';
 import * as thisMac from '../../src/main/runners/this-mac';
 import { localRunner, setLocalRunner } from '../../src/main/runners/store';
 import { useServerDeps } from '../../src/main/server/http';
@@ -362,8 +363,7 @@ describe('This Mac runner', () => {
   });
 
   it('names the app bundle id the Electron build uses', () => {
-    const forge = /appBundleId:\s*'([^']+)'/.exec(fs.readFileSync(path.join(__dirname, '..', '..', 'forge.config.ts'), 'utf8'))?.[1];
-    expect(thisMac.APP_BUNDLE_ID).toBe(forge);
+    expect(thisMac.APP_BUNDLE_ID).toBe(forgeConfig.packagerConfig?.appBundleId);
   });
 
   it('names This Mac after the host, safely', () => {
