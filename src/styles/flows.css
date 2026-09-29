@@ -530,7 +530,7 @@
 .fr-harness-state.on {
   color: var(--emerald);
   background: var(--emerald-tint);
-  border-color: rgba(46, 94, 78, 0.18);
+  border-color: var(--emerald-edge);
 }
 
 .fr-harness-state.on .dot {

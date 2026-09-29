@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { DefinitionListing, HarnessProviderInfo, IntegrationProviderInfo, RunnersState } from '../../src/harness/bridge';
-import { EXAMPLE_CONFIG_URL } from '../../src/renderer/first-run';
+import { EXAMPLE_HOME_URL } from '../../src/renderer/home-setup';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { errorsFor, harnessesFor, initStartFlow, orderRunners } from '../../src/renderer/start-flow';
 import { LOCAL_ID, RID, runnerRow, runnersState } from './runners-fixtures';
@@ -131,7 +131,7 @@ describe('start flow', () => {
     expect(q('.sf-empty').textContent).toContain('agents/<name>.yaml, both at the root of the Puck home');
     expect(body.querySelector('.sf-defs')).toBeNull();
     (q('.sf-example') as HTMLButtonElement).click();
-    expect(bridge.openExternal).toHaveBeenCalledWith(EXAMPLE_CONFIG_URL);
+    expect(bridge.openExternal).toHaveBeenCalledWith(EXAMPLE_HOME_URL);
     (q('.sf-change-repo') as HTMLButtonElement).click();
     expect(openProviders).toHaveBeenCalled();
     expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the Puck home has an environment definition.');

@@ -19,6 +19,9 @@ function get(url: string): Promise<number> {
   });
 }
 
+const AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize';
+const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
 
 afterEach(async () => {
@@ -71,11 +74,29 @@ describe('claude sign-in vs sign-out race', () => {
     claudeProvider.auth.setOnLogin(() => logins.push('login'));
 
     await claudeProvider.auth.logout(); // an earlier sign-out must not poison later sign-ins
-    const authorize = new URL(await claudeProvider.auth.start());
+    const url = await claudeProvider.auth.start();
+    expect(url.startsWith(`${AUTHORIZE_URL}?`)).toBe(true);
+    const authorize = new URL(url);
     const redirect = new URL(authorize.searchParams.get('redirect_uri') ?? '');
     const state = authorize.searchParams.get('state') ?? '';
     await get(`http://127.0.0.1:${redirect.port}${redirect.pathname}?code=abc&state=${state}`);
     await vi.waitFor(() => expect(account.load()?.accessToken).toBe('fresh'));
     expect(logins).toEqual(['login']);
+    expect(fetchMock).toHaveBeenCalledWith(TOKEN_URL, expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('refreshes stale tokens against the token address', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ access_token: 'renewed', refresh_token: 'r2', expires_in: 3600 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    account.save({ accessToken: 'stale', refreshToken: 'r', expiresAt: Date.now() - 1000, scopes: [] });
+
+    expect((await account.getFreshTokens())?.accessToken).toBe('renewed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(TOKEN_URL, expect.objectContaining({ method: 'POST' }));
   });
 });
