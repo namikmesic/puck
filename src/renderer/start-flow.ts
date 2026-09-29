@@ -112,6 +112,17 @@ export function initStartFlow(ctx: StartFlowContext) {
     return { kind, name: pinValue.slice(split + 1) };
   }
 
+  function pinListed(next: DefinitionRefs, value: string): boolean {
+    if (value === 'commit') return true;
+    const split = value.indexOf(':');
+    if (split < 1) return false;
+    const kind = value.slice(0, split);
+    const name = value.slice(split + 1);
+    if (kind === 'tag') return next.tags.some((t) => t.name === name);
+    if (kind === 'branch') return next.branches.some((b) => b.name === name);
+    return false;
+  }
+
   function env(): EnvironmentSummary | null {
     return listing?.environments.find((e) => e.name === definition) ?? null;
   }
@@ -561,20 +572,23 @@ export function initStartFlow(ctx: StartFlowContext) {
       isOpen = true;
       startedId = null;
       startError = '';
+      listingToken += 1;
+      listing = null;
+      listingError = '';
+      loading = false;
       render();
       await loadHarnesses();
       try {
         refs = await bridge.definitionRefs();
         refsError = '';
-        if (!pinValue) {
-          const first = refs.defaultTag ? `tag:${refs.defaultTag}` : refs.tags[0] ? `tag:${refs.tags[0].name}` : refs.branches[0] ? `branch:${refs.branches[0].name}` : '';
-          pinValue = first;
+        if (!pinListed(refs, pinValue)) {
+          pinValue = refs.defaultTag ? `tag:${refs.defaultTag}` : refs.tags[0] ? `tag:${refs.tags[0].name}` : refs.branches[0] ? `branch:${refs.branches[0].name}` : '';
         }
       } catch (err) {
         refsError = errText(err);
       }
       render();
-      if (pinValue && !listing) await loadListing();
+      if (!refsError && pinValue) await loadListing();
     },
     close(): void {
       isOpen = false;

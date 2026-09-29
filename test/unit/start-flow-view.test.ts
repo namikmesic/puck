@@ -188,6 +188,66 @@ describe('start flow', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('loads the new config repo instead of keeping the previous listing', async () => {
+    const { flow, q, bridge } = setup();
+    const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
+    const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
+    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    at.mockResolvedValue({
+      ...listing(),
+      repo: 'namikmesic/puck',
+      pin: { kind: 'branch', name: 'main', sha: 'e'.repeat(40) },
+      environments: [],
+      agents: [],
+      errors: [],
+    });
+    await flow.open();
+    await flush();
+    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in namikmesic/puck at main.');
+    flow.close();
+
+    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
+    const fresh = listing();
+    const [example] = fresh.environments;
+    if (!example) throw new Error('fixture');
+    fresh.repo = 'octo/other';
+    fresh.pin = { kind: 'branch', name: 'main', sha: 'f'.repeat(40) };
+    fresh.environments = [{ ...example, name: 'fresh', path: 'environments/fresh.yaml' }];
+    at.mockResolvedValue(fresh);
+    const opening = flow.open();
+    expect(q('.sf-empty')).toBeNull();
+    await opening;
+    await flush();
+    expect(q('.sf-empty')).toBeNull();
+    expect(q('[data-definition="fresh"]')).not.toBeNull();
+    expect(q('[data-definition="example"]')).toBeNull();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('branch:main');
+    expect(at).toHaveBeenLastCalledWith({ kind: 'branch', name: 'main' });
+    expect(q('[data-step="2"]').classList.contains('disabled')).toBe(false);
+  });
+
+  it('selects the new default when the saved version is not in the repo', async () => {
+    const { flow, q, bridge } = setup();
+    const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
+    await flow.open();
+    await flush();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('tag:v1.2.0');
+    flow.close();
+
+    (bridge.definitionRefs as ReturnType<typeof vi.fn>).mockResolvedValue({
+      tags: [{ name: 'v9.0.0', sha: 'a'.repeat(40) }],
+      branches: [{ name: 'dev', sha: 'b'.repeat(40) }],
+      defaultTag: 'v9.0.0',
+    });
+    const opening = flow.open();
+    expect(q('[data-definition="example"]')).toBeNull();
+    await opening;
+    await flush();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('tag:v9.0.0');
+    expect(at).toHaveBeenLastCalledWith({ kind: 'tag', name: 'v9.0.0' });
+    expect(q('[data-definition="example"]')).not.toBeNull();
+  });
+
   it('says the chosen version could not be read when that version fails', async () => {
     const { flow, q, bridge } = setup();
     await flow.open();
