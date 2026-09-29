@@ -283,9 +283,10 @@ function boot(bridge: PuckBridge): void {
     bridge,
     store,
     runners: () => runners,
+    // The window switches under the dialog, which keeps showing the progress.
     opened: (envId) => {
-      go({ view: 'orchestrator' });
-      void openEnv(envId, true);
+      showCenter('orchestrator');
+      void openEnv(envId, false);
     },
     close: () => go({ view: 'close-modal' }),
     openRunners: () => go({ view: 'settings', section: 'runners' }),
@@ -442,15 +443,22 @@ function boot(bridge: PuckBridge): void {
     }
   }
 
+  /** Change what the center shows without closing a modal over it. */
+  function showCenter(center: 'orchestrator' | 'first-run'): void {
+    nav = { ...nav, center };
+    applyNav();
+  }
+
   function go(target: NavTarget): void {
     if (target.view === 'orchestrator' || target.view === 'work') sessions.closeFullTurn();
     nav = navTransition(nav, target);
     applyNav();
   }
 
-  async function openEnv(envId: string, fresh = false): Promise<void> {
+  async function openEnv(envId: string, closeModal = true): Promise<void> {
     viewing = null;
-    if (nav.center !== 'orchestrator' || fresh) go({ view: 'orchestrator' });
+    if (closeModal) go({ view: 'orchestrator' });
+    else if (nav.center !== 'orchestrator') showCenter('orchestrator');
     try {
       await sync?.open(envId);
     } catch (err) {
@@ -518,8 +526,8 @@ function boot(bridge: PuckBridge): void {
   });
 
   bridge.onInstanceEvent((event) => {
-    // A first environment: leave first run for it.
-    if (event.kind === 'upsert' && nav.center === 'first-run') go({ view: 'orchestrator' });
+    // A first environment: leave first run for it (a start dialog stays open).
+    if (event.kind === 'upsert' && nav.center === 'first-run') showCenter('orchestrator');
   });
 
   // Quit waits for the renderer; everything here is already saved.
@@ -610,9 +618,9 @@ function boot(bridge: PuckBridge): void {
       await openEnv(pick.id);
       return;
     }
-    go({ view: 'first-run' });
-    await firstRun.show();
-    if (firstRun.ready()) go({ view: 'orchestrator' });
+    showCenter('first-run');
+    await firstRun.loaded();
+    if (firstRun.ready() && nav.center === 'first-run') showCenter('orchestrator');
   })();
   applyNav();
 }

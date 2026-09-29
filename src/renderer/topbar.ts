@@ -155,6 +155,43 @@ export function initTopbar(ctx: TopbarContext) {
     apply.focus();
   }
 
+  function showDaemonDialog(envId: string): void {
+    els.dialog.textContent = '';
+    const box = el('div', 'tb-dialog');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', 'Update the daemon');
+    box.appendChild(el('h3', 'tb-dialog-title', 'Update the environment daemon'));
+    box.appendChild(
+      el('p', 'tb-dialog-note', 'This Puck carries a newer daemon. Updating restarts it; conversations and work items continue from where they are.'),
+    );
+    const foot = el('div', 'tb-dialog-foot');
+    const cancel = button('btn-ghost', 'Cancel');
+    cancel.addEventListener('click', closeDialog);
+    const drain = button('btn-primary', 'After running turns finish');
+    drain.dataset.mode = 'drain';
+    const now = button('btn-ghost danger', 'Now');
+    now.dataset.mode = 'now';
+    now.title = 'Running turns are interrupted and resume after the restart';
+    for (const b of [drain, now]) {
+      b.addEventListener('click', async () => {
+        for (const x of [cancel, drain, now]) x.disabled = true;
+        try {
+          await bridge.instanceUpgradeDaemon(envId, b.dataset.mode === 'now' ? 'now' : 'drain');
+          closeDialog();
+          ctx.say('');
+        } catch (err) {
+          for (const x of [cancel, drain, now]) x.disabled = false;
+          ctx.say(errText(err));
+        }
+      });
+    }
+    foot.append(cancel, now, drain);
+    box.appendChild(foot);
+    els.dialog.appendChild(box);
+    els.dialog.classList.remove('hidden');
+    drain.focus();
+  }
+
   function chip(cls: string, text: string, title = ''): HTMLElement {
     const c = el('span', `tb-chip ${cls}`, text);
     if (title) c.title = title;
@@ -213,6 +250,12 @@ export function initTopbar(ctx: TopbarContext) {
       els.chips.appendChild(chip('github bad', text, 'The runner keeps GitHub tokens coming from the Puck server; check that the runner is online and Puck is installed on the repositories.'));
     }
     if (live?.upgrading) els.chips.appendChild(chip('upgrading', 'Daemon updating', live.upgrading === 'drain' ? 'Updating once running turns finish' : 'Updating now'));
+    else if (info.daemonUpdate && info.attach === 'attached') {
+      const b = button('tb-chip daemon', 'Daemon update');
+      b.title = 'This Puck carries a newer environment daemon';
+      b.addEventListener('click', () => showDaemonDialog(info.id));
+      els.chips.appendChild(b);
+    }
   }
 
   function renderBanner(): void {

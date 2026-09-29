@@ -30,10 +30,12 @@ import { syncOnAttach, type SyncDeps, type SyncHarness } from './credentials-syn
 import { DaemonClient, type AttachState } from './daemon-client';
 import { buildArgs, create, harnessesOf, preflight, uploadBundle, type StartDeps } from './start-flow';
 import * as store from './store';
-import { applyUpdate as applyDefinitionUpdate, checkUpdate as checkDefinition, type UpdateDeps } from './update';
+import { applyUpdate as applyDefinitionUpdate, checkUpdate as checkDefinition, upgradeDaemon as upgradeDaemonTo, type UpdateDeps } from './update';
 
 const ops = new Map<string, InstanceOp>();
 const daemonState = new Map<string, InstanceState>();
+/** The build each environment's daemon reported in its last welcome. */
+const daemonBuilds = new Map<string, string>();
 const chains = new Map<string, Promise<unknown>>();
 let attached: DaemonClient | null = null;
 let attachDetail = '';
@@ -113,6 +115,7 @@ function infoOf(envId: string): InstanceInfo | null {
     daemon: daemonState.get(envId) ?? null,
     op,
     lastSeq: cursor?.lastSeq ?? null,
+    daemonUpdate: current && daemonBuilds.has(envId) && daemonBuilds.get(envId) !== DAEMON_META.build,
   };
 }
 
@@ -263,6 +266,10 @@ function attach(envId: string): void {
       daemonState.set(envId, { status: snapshot.instance.status, stage: snapshot.instance.stage, detail: snapshot.instance.detail, error: snapshot.instance.error });
       if (snapshot.instance.pin) store.updateCursor(envId, { pin: snapshot.instance.pin });
       emitDaemon({ envId, snapshot });
+      changed(envId);
+    },
+    onWelcome: (daemon) => {
+      daemonBuilds.set(envId, daemon.build);
       changed(envId);
     },
     onState: (state: AttachState, detail) => {
@@ -435,6 +442,27 @@ const updateDeps = (): UpdateDeps => ({
   applied: (envId, def) => store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def) }),
 });
 
+/** Updates the attached daemon to the build this app carries (see update.ts). */
+export function upgradeDaemon(envId: string, mode: 'drain' | 'now'): Promise<void> {
+  return serial(envId, async () => {
+    await upgradeDaemonTo(envId, mode, {
+      runnerOf: (id) => indexOf(id).runnerId,
+      upload: (runnerId) => uploadBundle(runnerId, startDeps()),
+      stage: async (runnerId, id, bundleSha) => {
+        await runners.control(runnerId, 'instance.stageDaemon', { envId: id, bundleSha }, { timeoutMs: LONG_TIMEOUT_MS });
+      },
+      upgrade: async (id, how) => {
+        const client = attached;
+        if (!client || client.envId !== id || client.attachState !== 'attached') {
+          throw new Error('Open this environment and wait until it is connected, then update its daemon.');
+        }
+        await client.cmd('daemon.upgrade', { mode: how });
+      },
+    });
+    log.info('instance.daemon-upgrade', { envId, mode });
+  });
+}
+
 /** A newer definition for the environment's pin, with its changes grouped by how they apply. */
 export function checkUpdate(envId: string): Promise<InstanceUpdate | null> {
   return checkDefinition(envId, updateDeps());
@@ -476,6 +504,7 @@ export function forget(envId: string): Promise<void> {
 
 function forgetLocal(envId: string): void {
   ops.delete(envId);
+  daemonBuilds.delete(envId);
   daemonState.delete(envId);
   store.removeCursor(envId);
   changed(envId);

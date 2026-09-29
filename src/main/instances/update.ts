@@ -46,6 +46,23 @@ export async function checkUpdate(envId: string, deps: UpdateDeps): Promise<Inst
   return { pin: found.pin, changes: groupByClass(diffEnvironments(prev, next)) };
 }
 
+export interface DaemonUpgradeDeps {
+  runnerOf(envId: string): string;
+  /** The app's daemon bundle into the runner's cache; its sha. */
+  upload(runnerId: string): Promise<string>;
+  stage(runnerId: string, envId: string, bundleSha: string): Promise<void>;
+  /** `daemon.upgrade` on the attached daemon; throws when it is not attached. */
+  upgrade(envId: string, mode: 'drain' | 'now'): Promise<void>;
+}
+
+/** The runner stages the app's daemon bundle beside the running one, then the daemon swaps it in. */
+export async function upgradeDaemon(envId: string, mode: 'drain' | 'now', deps: DaemonUpgradeDeps): Promise<void> {
+  const runnerId = deps.runnerOf(envId);
+  const sha = await deps.upload(runnerId);
+  await deps.stage(runnerId, envId, sha);
+  await deps.upgrade(envId, mode);
+}
+
 export async function applyUpdate(envId: string, spec: PinSpec, deps: UpdateDeps): Promise<'hot' | 'reprovision' | 'rebuild' | 'none'> {
   const name = deps.definition(envId);
   const next = await deps.resolve(spec, name);

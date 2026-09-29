@@ -721,6 +721,15 @@ body.v2 .hidden {
   background: var(--emerald-light);
 }
 
+.tb-chip.daemon {
+  background: var(--gold-muted);
+  color: #6f5716;
+}
+
+.tb-chip.daemon:hover {
+  background: rgba(212, 175, 55, 0.28);
+}
+
 .tb-chip.bad {
   background: rgba(160, 60, 50, 0.1);
   color: var(--red);

@@ -142,3 +142,22 @@ describe('top bar', () => {
     expect(instanceOps(instance({ op: { kind: 'stopping', stage: null, detail: '', startedAt: 1, error: 'x' } }))).toHaveLength(4);
   });
 });
+
+describe('daemon update', () => {
+  it('offers drain or now for a daemon older than the app carries', async () => {
+    const { store, tb, byId, bridge } = setup([instance({ daemonUpdate: true })]);
+    (bridge as unknown as { instanceUpgradeDaemon: unknown }).instanceUpgradeDaemon = vi.fn(async () => undefined);
+    store.applySnapshot(snap(), ENV);
+    tb.render();
+    const chip = byId('chips').querySelector<HTMLButtonElement>('.tb-chip.daemon') as HTMLButtonElement;
+    expect(chip.textContent).toBe('Daemon update');
+    chip.click();
+    (byId('dialog').querySelector('[data-mode="drain"]') as HTMLButtonElement).click();
+    await flush();
+    expect(bridge.instanceUpgradeDaemon).toHaveBeenCalledWith(ENV, 'drain');
+    expect(byId('dialog').classList.contains('hidden')).toBe(true);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    tb.render();
+    expect([...byId('chips').querySelectorAll('.tb-chip')].map((c) => c.textContent)).toEqual(['Daemon updating']);
+  });
+});

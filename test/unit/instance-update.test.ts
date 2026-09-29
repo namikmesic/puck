@@ -10,7 +10,7 @@ import type { Pin } from '../../src/harness/daemon-protocol';
 import { resolveEnvironment } from '../../src/harness/definitions/resolve';
 import type { PinSpec, ResolvedEnvironment } from '../../src/harness/definitions/types';
 import { validateSnapshot } from '../../src/harness/definitions/validate';
-import { applyUpdate, checkUpdate, type UpdateDeps } from '../../src/main/instances/update';
+import { applyUpdate, checkUpdate, upgradeDaemon, type UpdateDeps } from '../../src/main/instances/update';
 import { exampleFiles, snapshotOf } from './definitions-fixtures';
 
 const ENV = 'env_01J8Z3X0000000000000000000';
@@ -83,5 +83,21 @@ describe('definition updates', () => {
     d.apply.mockRejectedValueOnce(new Error('Open this environment and wait until it is connected, then apply the update.'));
     await expect(applyUpdate(ENV, { kind: 'tag', name: 'v1.1.0' }, d)).rejects.toThrow(/wait until it is connected/);
     expect(d.applied).not.toHaveBeenCalled();
+  });
+});
+
+describe('daemon upgrades', () => {
+  it('stages the bundle on the runner before asking the daemon to swap it in', async () => {
+    const calls: string[] = [];
+    await upgradeDaemon(ENV, 'now', {
+      runnerOf: () => 'rnr_1',
+      upload: async (runnerId) => {
+        calls.push(`upload ${runnerId}`);
+        return 'sha1';
+      },
+      stage: async (runnerId, envId, sha) => void calls.push(`stage ${runnerId} ${envId} ${sha}`),
+      upgrade: async (envId, mode) => void calls.push(`upgrade ${envId} ${mode}`),
+    });
+    expect(calls).toEqual(['upload rnr_1', `stage rnr_1 ${ENV} sha1`, `upgrade ${ENV} now`]);
   });
 });

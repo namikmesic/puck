@@ -332,6 +332,8 @@ export interface InstanceInfo {
   op: InstanceOp | null;
   /** The last daemon event this app applied (replay resumes after it). */
   lastSeq: number | null;
+  /** The attached daemon runs another build than the one this app carries: offer the update. */
+  daemonUpdate?: boolean;
 }
 
 /** What the start flow sends: main resolves the pin, reads the definition, and checks everything first. */
@@ -485,6 +487,12 @@ export interface PuckBridge {
    * rebuild rebuilds the container at the new pin.
    */
   instanceApplyUpdate(envId: string, pin: PinSpec): Promise<void>;
+  /**
+   * Updates the attached environment's daemon to the build this app
+   * carries: the runner stages it, then the daemon swaps it in after its
+   * running turns finish (`drain`) or at once (`now`), and restarts.
+   */
+  instanceUpgradeDaemon(envId: string, mode: 'drain' | 'now'): Promise<void>;
   onInstanceEvent(cb: (e: InstanceEvent) => void): void;
   /** A command to an environment's daemon (renderer allowlist only). */
   daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>>;

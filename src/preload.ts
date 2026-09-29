@@ -52,6 +52,7 @@ const bridge: PuckBridge = {
   instanceForget: (envId) => ipcRenderer.invoke(CHANNELS.instanceForget, envId),
   instanceCheckUpdate: (envId) => ipcRenderer.invoke(CHANNELS.instanceCheckUpdate, envId),
   instanceApplyUpdate: (envId, pin) => ipcRenderer.invoke(CHANNELS.instanceApplyUpdate, { envId, pin }),
+  instanceUpgradeDaemon: (envId, mode) => ipcRenderer.invoke(CHANNELS.instanceUpgradeDaemon, { envId, mode }),
   onInstanceEvent: (cb) => {
     ipcRenderer.on(INSTANCE_EVENT_CHANNEL, (_event, payload: InstanceEvent) => cb(payload));
   },

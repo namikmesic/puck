@@ -327,8 +327,13 @@ export function initSessionView(ctx: SessionViewContext) {
     }
   }
 
+  let attached: HTMLElement | null = null;
+
   function attach(thread: HTMLElement): void {
     if (!scroller) return;
+    // A thread shown elsewhere before leaves it, so its events never scroll this one.
+    if (attached && attached !== thread) attached.remove();
+    attached = thread;
     scroller.textContent = '';
     scroller.appendChild(thread);
     stick = true;

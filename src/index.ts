@@ -247,6 +247,11 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
     const a = objArgs(args);
     return instances.applyUpdate(instanceIdFrom(a.envId), pinFrom(a.pin));
   },
+  [CHANNELS.instanceUpgradeDaemon]: (_event, args) => {
+    const a = objArgs(args);
+    if (a.mode !== 'drain' && a.mode !== 'now') throw new Error('mode must be "drain" or "now".');
+    return instances.upgradeDaemon(instanceIdFrom(a.envId), a.mode);
+  },
   [CHANNELS.daemon]: (_event, args) => {
     const { envId, op, args: opArgs } = daemonCallFrom(args);
     return instances.daemon(envId, op, opArgs as never);

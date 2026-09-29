@@ -80,6 +80,7 @@ export function initFirstRun(ctx: FirstRunContext) {
   let poll: ReturnType<typeof setInterval> | null = null;
   let shown: FirstRunStep | null = null;
   let active = false;
+  let loading: Promise<void> = Promise.resolve();
 
   async function load(): Promise<void> {
     const infos: ProviderInfo[] = await bridge.providers().catch((err: unknown) => {
@@ -295,12 +296,14 @@ export function initFirstRun(ctx: FirstRunContext) {
   }
 
   return {
-    async show(): Promise<void> {
+    show(): Promise<void> {
       active = true;
       shown = null;
-      await load();
-      draw();
+      loading = load().then(draw);
+      return loading;
     },
+    /** The facts of the last show() are in. */
+    loaded: (): Promise<void> => loading,
     hide(): void {
       active = false;
       if (poll) clearInterval(poll);
