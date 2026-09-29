@@ -27,16 +27,17 @@
  *     (a new head, or a closed or merged pull request, stops that). A
  *     changed outcome — new failing check names, or success and failure
  *     swapping — is another notice and updates `pr.checks`. `ci: fix`
-     *     queues one follow-up for a head the worker has not yet been sent, up
-     *     to `maxCiFixAttempts`, and does not queue another for that watch.
+ *     queues one follow-up for a head the worker has not yet been sent, up
+ *     to `maxCiFixAttempts`, and does not queue another for that watch.
  *     The notice is the latest run of every
  *     check name. Nothing reported settles as neutral and stays watched,
  *     so a check that appears later still reports. A failure whose job
  *     logs could not all be read waits for up to LIMITS.logReads polls
  *     before it is reported with what was read. Those retries end when a
- *     green run is delivered or the watch is replaced. Publishing the same
- *     pull request's same head again keeps its watch: no second notice or
- *     fix for that head. A new pull request starts a new watch.
+ *     later poll is not that same failure (still pending, a success, or no
+ *     checks), or the watch is replaced. Publishing the same pull request's
+ *     same head again keeps its watch: no second notice or fix for that
+ *     head. A new pull request starts a new watch.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
