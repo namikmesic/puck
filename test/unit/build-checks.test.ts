@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { findAppArtifacts, findMakeArtifacts, nodeMajorMismatch } from '../../scripts/build-checks.mjs';
 import { MIN_MACOS, RELEASE_TARGET } from '../../scripts/release.mjs';
 
@@ -112,6 +113,22 @@ describe('toolchain pin', () => {
   it('routes package and make through the artifact-checking wrapper', () => {
     expect(pkg.scripts.package).toBe('node scripts/forge.mjs package');
     expect(pkg.scripts.make).toBe('node scripts/forge.mjs make');
+  });
+});
+
+describe('local server (compose.yaml)', () => {
+  const compose = parseYaml(read('compose.yaml')) as {
+    services: Record<string, { build: { args?: Record<string, string> }; pull_policy?: string; environment?: Record<string, string> }>;
+  };
+  const service = compose.services['puck-server'];
+
+  it('builds and runs the development server, which hosts the runner packages', () => {
+    expect(service.build.args?.PUCK_DEVELOPMENT).toBe('true');
+    expect(service.environment?.PUCK_DEVELOPMENT).toBe('true');
+  });
+
+  it('rebuilds the image on every up instead of reusing an older build', () => {
+    expect(service.pull_policy).toBe('build');
   });
 });
 

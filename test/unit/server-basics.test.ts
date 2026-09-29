@@ -67,9 +67,22 @@ describe('loadConfig', () => {
     [{ PUCK_SERVER_URL: 'ftp://x' }, /http or https/],
     [{ PUCK_SERVER_PORT: 'eighty' }, /not a port/],
     [{ PUCK_RUNNER_MIN_VERSION: '1.2' }, /MAJOR.MINOR.PATCH/],
+    [{ PUCK_DEVELOPMENT: 'yes' }, /true or false/],
+    [{ PUCK_RUNNER_DOWNLOADS: '/srv/runners' }, /only a development server/],
+    [{ PUCK_RUNNER_DOWNLOADS: '/srv/runners', PUCK_DEVELOPMENT: 'false' }, /only a development server/],
   ])('refuses %j', (env, message) => {
     expect(() => loadConfig(env as Record<string, string>)).toThrow(ConfigError);
     expect(() => loadConfig(env as Record<string, string>)).toThrow(message);
+  });
+
+  it('hosts runner downloads only in development mode', () => {
+    expect(loadConfig({})).toMatchObject({ development: false, runnerDownloads: null });
+    expect(loadConfig({ PUCK_DEVELOPMENT: 'false' })).toMatchObject({ development: false, runnerDownloads: null });
+    expect(loadConfig({ PUCK_DEVELOPMENT: 'true' })).toMatchObject({ development: true, runnerDownloads: null });
+    expect(loadConfig({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: '/srv/runners' })).toMatchObject({
+      development: true,
+      runnerDownloads: '/srv/runners',
+    });
   });
 
   it('compares versions numerically', () => {

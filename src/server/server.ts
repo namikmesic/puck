@@ -83,7 +83,7 @@ export function createPuckServer(deps: ServerDeps): PuckServer {
   registerAuthRoutes(router, ctx);
   registerRunnerRoutes(router, ctx);
   registerInstanceRoutes(router, ctx);
-  registerDownloadRoutes(router, ctx, new RunnerDownloads(config.runnerDownloads, config.publicUrl));
+  registerDownloadRoutes(router, ctx, new RunnerDownloads(config.development ? config.runnerDownloads : null, config.publicUrl));
 
   const server = http.createServer(createRequestHandler(router, log));
   server.headersTimeout = 30_000;

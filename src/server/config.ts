@@ -13,6 +13,11 @@
  * is a start-up error, so a typo never silently disables sign-in. The App
  * slug and the GitHub endpoint URLs are optional.
  *
+ * Runner downloads are a development feature: only a server started with
+ * `PUCK_DEVELOPMENT=true` (the local Compose setup) hosts runner packages.
+ * Setting `PUCK_RUNNER_DOWNLOADS` without it is a start-up error, so a
+ * production server never serves runners by accident.
+ *
  * | Variable | Meaning |
  * | --- | --- |
  * | PUCK_SERVER_URL | Public base URL (default `http://localhost:<port>`); runners and apps use it, and runner assertions are audienced to it |
@@ -24,7 +29,8 @@
  * | PUCK_GITHUB_CLIENT_SECRET[_FILE] | The App's client secret (web-flow code exchange) |
  * | PUCK_GITHUB_PRIVATE_KEY[_FILE] | The App's private key: PEM, or the PEM base64-encoded on one line (for env files) |
  * | PUCK_GITHUB_API_URL, PUCK_GITHUB_WEB_URL | GitHub endpoints (default github.com) |
- * | PUCK_RUNNER_DOWNLOADS | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz` |
+ * | PUCK_DEVELOPMENT | `true` for a development server, which may host runner downloads (default `false`) |
+ * | PUCK_RUNNER_DOWNLOADS | Development only. Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz` |
  * | PUCK_RUNNER_MIN_VERSION | Runners older than this are refused |
  */
 
@@ -47,6 +53,8 @@ export interface ServerConfig {
   dbPath: string;
   tokenKey: Buffer | null;
   github: GitHubAppConfig | null;
+  development: boolean;
+  /** Always null outside development mode. */
   runnerDownloads: string | null;
   minRunnerVersion: string | null;
 }
@@ -136,6 +144,14 @@ export function loadConfig(env: Env, read?: (path: string) => string): ServerCon
     };
   }
 
+  const devText = plain(env, 'PUCK_DEVELOPMENT');
+  if (devText && devText !== 'true' && devText !== 'false') throw new ConfigError('PUCK_DEVELOPMENT must be true or false.');
+  const development = devText === 'true';
+  const runnerDownloads = plain(env, 'PUCK_RUNNER_DOWNLOADS');
+  if (runnerDownloads && !development) {
+    throw new ConfigError('PUCK_RUNNER_DOWNLOADS is set, but only a development server (PUCK_DEVELOPMENT=true) hosts runner downloads.');
+  }
+
   const minRunnerVersion = plain(env, 'PUCK_RUNNER_MIN_VERSION');
   if (minRunnerVersion && !/^\d+\.\d+\.\d+$/.test(minRunnerVersion)) {
     throw new ConfigError('PUCK_RUNNER_MIN_VERSION must be MAJOR.MINOR.PATCH.');
@@ -148,7 +164,8 @@ export function loadConfig(env: Env, read?: (path: string) => string): ServerCon
     dbPath: plain(env, 'PUCK_SERVER_DB') ?? 'puck-server.db',
     tokenKey,
     github,
-    runnerDownloads: plain(env, 'PUCK_RUNNER_DOWNLOADS'),
+    development,
+    runnerDownloads,
     minRunnerVersion,
   };
 }

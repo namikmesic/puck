@@ -96,7 +96,7 @@ beforeEach(async () => {
   downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-dl-'));
   fs.mkdirSync(path.join(downloads, '0.1.0'));
   fs.writeFileSync(path.join(downloads, '0.1.0', TARBALL), 'tarball bytes');
-  h = await startLiveServer({ PUCK_RUNNER_DOWNLOADS: downloads });
+  h = await startLiveServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: downloads });
   h.github.addUser('octo');
   await signIn();
 });

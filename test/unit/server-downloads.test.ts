@@ -3,9 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { call, startServer, type Harness } from './server-fakes';
+import { checkNoRunnerDownloads, checkRunnerDownloads } from '../../scripts/check-runner-downloads.mjs';
+import { call, startLiveServer, startServer, type Harness } from './server-fakes';
 
-let h: Harness;
+let h: Pick<Harness, 'base' | 'close'>;
 let dir: string;
 afterEach(async () => {
   await h?.close();
@@ -25,7 +26,7 @@ describe('runner downloads', () => {
     const sum = publish('0.10.0', 'puck-runner-linux-x64-0.10.0.tar.gz', 'linux');
     publish('0.10.0', 'puck-runner-macos-arm64-0.10.0.tar.gz', 'mac');
     publish('0.10.0', 'notes.txt', 'ignored');
-    h = await startServer({ PUCK_RUNNER_DOWNLOADS: dir, PUCK_RUNNER_MIN_VERSION: '0.1.0' }, { github: false });
+    h = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: dir, PUCK_RUNNER_MIN_VERSION: '0.1.0' }, { github: false });
     const res = await call(h, 'GET', '/v1/runner/releases');
     expect(res.body).toMatchObject({ latest: '0.10.0', minVersion: '0.1.0' });
     expect(res.body.assets).toEqual([
@@ -46,7 +47,7 @@ describe('runner downloads', () => {
     dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
     const sum = publish('0.1.0', 'puck-runner-linux-arm64-0.1.0.tar.gz', 'tarball-bytes');
     writeFileSync(join(dir, 'secret.txt'), 'nope');
-    h = await startServer({ PUCK_RUNNER_DOWNLOADS: dir }, { github: false });
+    h = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: dir }, { github: false });
     const file = await fetch(`${h.base}/runner/0.1.0/puck-runner-linux-arm64-0.1.0.tar.gz`);
     expect(file.status).toBe(200);
     expect(file.headers.get('content-type')).toBe('application/gzip');
@@ -60,8 +61,50 @@ describe('runner downloads', () => {
 
   it('lists nothing when no directory is configured', async () => {
     dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
+    h = await startServer({ PUCK_DEVELOPMENT: 'true' }, { github: false });
+    expect((await call(h, 'GET', '/v1/runner/releases')).body).toEqual({ latest: null, minVersion: null, assets: [] });
+  });
+
+  it('serves no runners outside development mode', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
+    publish('0.1.0', 'puck-runner-linux-x64-0.1.0.tar.gz', 'tarball-bytes');
     h = await startServer({}, { github: false });
     expect((await call(h, 'GET', '/v1/runner/releases')).body).toEqual({ latest: null, minVersion: null, assets: [] });
+    expect((await fetch(`${h.base}/runner/0.1.0/puck-runner-linux-x64-0.1.0.tar.gz`)).status).toBe(404);
+    expect((await fetch(`${h.base}/runner/0.1.0/puck-runner-linux-x64-0.1.0.tar.gz.sha256`)).status).toBe(404);
+  });
+});
+
+describe('check-runner-downloads (the server image check in CI)', () => {
+  const all = (version: string) => {
+    for (const t of ['linux-x64', 'linux-arm64', 'macos-arm64']) publish(version, `puck-runner-${t}-${version}.tar.gz`, t);
+  };
+
+  it('passes when the server offers all three targets for the version and each download matches', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
+    all('0.2.0');
+    h = await startLiveServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: dir });
+    await expect(checkRunnerDownloads(h.base, '0.2.0')).resolves.toBeUndefined();
+  });
+
+  it('fails on another version, a missing target, or no packages at all', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
+    h = await startLiveServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: dir });
+    await expect(checkRunnerDownloads(h.base, '0.2.0')).rejects.toThrow('latest is null, not 0.2.0');
+    all('0.1.0');
+    await expect(checkRunnerDownloads(h.base, '0.2.0')).rejects.toThrow('latest is "0.1.0", not 0.2.0');
+    publish('0.2.0', 'puck-runner-linux-x64-0.2.0.tar.gz', 'x');
+    await expect(checkRunnerDownloads(h.base, '0.2.0')).rejects.toThrow('assets are [linux-x64], not [linux-arm64, linux-x64, macos-arm64]');
+  });
+
+  it('--none passes only when the server offers no runners', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'puck-dl-'));
+    h = await startLiveServer({});
+    await expect(checkNoRunnerDownloads(h.base, '0.2.0')).resolves.toBeUndefined();
+    await h.close();
+    all('0.2.0');
+    h = await startLiveServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: dir });
+    await expect(checkNoRunnerDownloads(h.base, '0.2.0')).rejects.toThrow('the server offers runners: latest "0.2.0", 3 assets');
   });
 });
 
