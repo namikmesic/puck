@@ -140,6 +140,17 @@ describe('start flow', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('shows only the config-repo sentence when opening with no repo, and Start stays disabled', async () => {
+    const { flow, q, startBtn, bridge } = setup();
+    (bridge.definitionRefs as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Error invoking remote method 'defs:refs': Error: Choose a config repo in Settings → Providers → GitHub first."),
+    );
+    await flow.open();
+    await flush();
+    expect(q('.sf-error').textContent).toBe('Choose a config repo in Settings → Providers → GitHub first.');
+    expect(startBtn().disabled).toBe(true);
+  });
+
   it('shows why a start was refused and keeps the form', async () => {
     const { flow, q, startBtn, bridge } = setup();
     (bridge.instanceStart as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('build-box is offline.'));

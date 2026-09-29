@@ -93,6 +93,20 @@ describe('settings modal', () => {
     expect(byId('rn').textContent).toContain('No runners yet');
   });
 
+  it('when signed out, the Runners section points at Providers, not Integrations below', async () => {
+    const { modal, byId, bridge } = setup();
+    (bridge.providers as ReturnType<typeof vi.fn>).mockResolvedValue([
+      ...PROVIDERS.filter((p) => p.kind !== 'environment'),
+      runnersInfo({ signedIn: false, runners: [] }),
+    ]);
+    modal.show('runners');
+    await flush();
+    const text = byId('rn').textContent ?? '';
+    expect(text).toContain('Sign in to Puck with GitHub on the Providers page to add runners.');
+    expect(text).not.toContain('Integrations below');
+    expect([...byId('rn').querySelectorAll('button')].some((b) => b.textContent === 'Add runner')).toBe(false);
+  });
+
   it('shows the support facts, and hands nav and close to the owner', async () => {
     const { modal, byId, pick, requestClose } = setup();
     modal.show('support');

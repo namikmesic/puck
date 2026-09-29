@@ -22,7 +22,12 @@ export function initRunnersSection(ctx: RunnersSectionContext) {
   const say = (text: string): void => {
     els.msg.textContent = text;
   };
-  const view = initRunnersView({ bridge: ctx.bridge, say, copy: ctx.copy });
+  const view = initRunnersView({
+    bridge: ctx.bridge,
+    say,
+    copy: ctx.copy,
+    signedOutNote: 'Sign in to Puck with GitHub on the Providers page to add runners. Runners belong to your Puck account.',
+  });
   let shown = false;
 
   return {
