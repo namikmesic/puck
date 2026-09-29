@@ -237,6 +237,11 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.instanceRebuild]: (_event, envId) => instances.rebuild(instanceIdFrom(envId)),
   [CHANNELS.instanceDelete]: (_event, envId) => instances.remove(instanceIdFrom(envId)),
   [CHANNELS.instanceForget]: (_event, envId) => instances.forget(instanceIdFrom(envId)),
+  [CHANNELS.instanceCheckUpdate]: (_event, envId) => instances.checkUpdate(instanceIdFrom(envId)),
+  [CHANNELS.instanceApplyUpdate]: (_event, args) => {
+    const a = objArgs(args);
+    return instances.applyUpdate(instanceIdFrom(a.envId), pinFrom(a.pin));
+  },
   [CHANNELS.daemon]: (_event, args) => {
     const { envId, op, args: opArgs } = daemonCallFrom(args);
     return instances.daemon(envId, op, opArgs as never);

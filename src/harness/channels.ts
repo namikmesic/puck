@@ -38,6 +38,8 @@ export const CHANNELS = {
   instanceRebuild: 'instance:rebuild',
   instanceDelete: 'instance:delete',
   instanceForget: 'instance:forget',
+  instanceCheckUpdate: 'instance:check-update',
+  instanceApplyUpdate: 'instance:apply-update',
   daemon: 'daemon:command',
 
   definitionRefs: 'defs:refs',

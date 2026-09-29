@@ -18,7 +18,9 @@ import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, Start
 import type { DaemonEvent, InstanceState, Op, OpArgs, OpResult, RendererOp } from '../../harness/daemon-protocol';
 import type { InstanceStage } from '../../harness/runner-protocol';
 import { app } from 'electron';
-import { resolveDefinition } from '../config-repo';
+import type { ResolvedEnvironment } from '../../harness/definitions/types';
+import type { InstanceUpdate, PinSpec } from '../../harness/bridge';
+import { checkDefinitionUpdate, resolveDefinition } from '../config-repo';
 import { DAEMON_META, DAEMON_SOURCE } from '../daemon-source';
 import { log } from '../log';
 import * as providerRegistry from '../providers';
@@ -29,6 +31,7 @@ import { syncOnAttach, type SyncDeps, type SyncHarness } from './credentials-syn
 import { DaemonClient, type AttachState } from './daemon-client';
 import { buildArgs, create, harnessesOf, preflight, uploadBundle, type StartDeps } from './start-flow';
 import * as store from './store';
+import { applyUpdate as applyDefinitionUpdate, checkUpdate as checkDefinition, type UpdateDeps } from './update';
 
 const ops = new Map<string, InstanceOp>();
 const daemonState = new Map<string, InstanceState>();
@@ -384,31 +387,66 @@ export function resume(envId: string): Promise<void> {
   );
 }
 
-export function rebuild(envId: string): Promise<void> {
-  return serial(envId, () =>
-    withOp(envId, 'rebuilding', async (stage) => {
-      const index = indexOf(envId);
+/** Recreates the container from `def` (volumes, and so all work, are kept). Runs inside `serial`. */
+function rebuildFrom(envId: string, given?: ResolvedEnvironment): Promise<void> {
+  return withOp(envId, 'rebuilding', async (stage) => {
+    const index = indexOf(envId);
+    let def = given;
+    if (!def) {
       const pin = store.cursor(envId)?.pin;
       if (!pin) throw new Error('Puck does not know which definition pin this environment runs; open it once, then rebuild.');
-      const def = await resolveDefinition({ kind: pin.kind, name: pin.kind === 'commit' ? pin.sha : pin.name }, index.definition);
-      const deps = startDeps();
-      if (attached?.envId === envId) detach();
-      const bundleSha = await uploadBundle(index.runnerId, deps);
-      await runners.control(
-        index.runnerId,
-        'instance.rebuild',
-        { ...buildArgs(envId, def, bundleSha, deps), instance: { envId, name: def.name, pin: def.source.pin, definition: def } },
-        {
-          timeoutMs: LONG_TIMEOUT_MS,
-          onEvent: (ev) => {
-            if (ev.kind === 'instance.stage' && ev.envId === envId) stage(ev.stage, ev.detail);
-          },
+      def = await resolveDefinition({ kind: pin.kind, name: pin.kind === 'commit' ? pin.sha : pin.name }, index.definition);
+    }
+    const deps = startDeps();
+    if (attached?.envId === envId) detach();
+    const bundleSha = await uploadBundle(index.runnerId, deps);
+    await runners.control(
+      index.runnerId,
+      'instance.rebuild',
+      { ...buildArgs(envId, def, bundleSha, deps), instance: { envId, name: def.name, pin: def.source.pin, definition: def } },
+      {
+        timeoutMs: LONG_TIMEOUT_MS,
+        onEvent: (ev) => {
+          if (ev.kind === 'instance.stage' && ev.envId === envId) stage(ev.stage, ev.detail);
         },
-      );
-      store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def) });
-      if (store.currentId() === envId) attach(envId);
-    }),
-  );
+      },
+    );
+    store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def) });
+    if (store.currentId() === envId) attach(envId);
+  });
+}
+
+export function rebuild(envId: string): Promise<void> {
+  return serial(envId, () => rebuildFrom(envId));
+}
+
+const updateDeps = (): UpdateDeps => ({
+  pin: (envId) => store.cursor(envId)?.pin ?? null,
+  definition: (envId) => indexOf(envId).definition,
+  check: checkDefinitionUpdate,
+  resolve: resolveDefinition,
+  apply: async (envId, def) => {
+    const client = attached;
+    if (!client || client.envId !== envId || client.attachState !== 'attached') {
+      throw new Error('Open this environment and wait until it is connected, then apply the update.');
+    }
+    await client.cmd('definition.apply', { definition: def, pin: def.source.pin });
+  },
+  rebuild: (envId, def) => rebuildFrom(envId, def),
+  applied: (envId, def) => store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def) }),
+});
+
+/** A newer definition for the environment's pin, with its changes grouped by how they apply. */
+export function checkUpdate(envId: string): Promise<InstanceUpdate | null> {
+  return checkDefinition(envId, updateDeps());
+}
+
+/** Moves the environment to `pin`: in place when the daemon can, else by a rebuild. */
+export function applyUpdate(envId: string, pin: PinSpec): Promise<void> {
+  return serial(envId, async () => {
+    const cls = await applyDefinitionUpdate(envId, pin, updateDeps());
+    log.info('instance.update-applied', { envId, class: cls });
+  });
 }
 
 export function remove(envId: string): Promise<void> {

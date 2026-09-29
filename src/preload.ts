@@ -50,6 +50,8 @@ const bridge: PuckBridge = {
   instanceRebuild: (envId) => ipcRenderer.invoke(CHANNELS.instanceRebuild, envId),
   instanceDelete: (envId) => ipcRenderer.invoke(CHANNELS.instanceDelete, envId),
   instanceForget: (envId) => ipcRenderer.invoke(CHANNELS.instanceForget, envId),
+  instanceCheckUpdate: (envId) => ipcRenderer.invoke(CHANNELS.instanceCheckUpdate, envId),
+  instanceApplyUpdate: (envId, pin) => ipcRenderer.invoke(CHANNELS.instanceApplyUpdate, { envId, pin }),
   onInstanceEvent: (cb) => {
     ipcRenderer.on(INSTANCE_EVENT_CHANNEL, (_event, payload: InstanceEvent) => cb(payload));
   },
