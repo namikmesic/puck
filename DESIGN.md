@@ -19,6 +19,7 @@ repo's first commit — the colors earned their keep; the bag spa did not.)
 | `--emerald-dark`  | `#1E3E34`              | Active/emphasis text                    |
 | `--emerald-tint`  | `rgba(46,94,78,0.07)`  | Hover fills, chips                      |
 | `--gold`          | `#D4AF37`              | Live activity: thinking dots, running   |
+| `--gold-muted`    | `rgba(212,175,55,0.15)`| Gold chip fills, the waiting halo       |
 | `--charcoal`      | `#1C1C1A`              | Body text                               |
 | `--gray`          | `#6B6B66`              | Secondary text                          |
 | `--gray-light`    | `#78786F`              | Timestamps, hints (AA on cream)         |
@@ -35,14 +36,22 @@ neutral gray — everything on the page leans slightly emerald.
 
 ## Layout
 
-One shared column variable (`--content-col`, 940px max) aligns the thread,
-composer, and settings pages; `--content-pad` scales gutters with the
-window. Chat is Slack-shaped: avatar-gutter message rows, day dividers,
-grouped consecutive messages — never bubbles.
+One window, one environment on screen: a 48px top bar (the environment
+switcher and status) over a three-pane grid — the backlog on the left
+(`--bl-w`, 220–420px, default 280), the orchestrator chat or a work item's
+detail in the center, and work in progress on the right (`--wp-w`,
+240–460px, default 300). Side panes resize on their handles and collapse
+(⌘[ and ⌘]); below 1,100px the right pane becomes a drawer over the center.
+`--content-col` (940px max) still caps the chat column inside the center
+pane, and `--content-pad` scales gutters with the window. Chat is
+Slack-shaped: avatar-gutter message rows, day dividers, grouped consecutive
+messages — never bubbles.
 
 ## Signals
 
-- Gold pulse = an agent is working (thinking dots, turn cards, sidebar).
-- Emerald dot = finished; red = error; gold halo = waiting on your answer.
+- Gold pulse = something is working: running work items, orchestrator turns
+  (thinking dots, turn cards), and an environment provisioning.
+- Emerald dot = ready or finished; red = error; gold halo = a question is
+  waiting for an answer.
 - Destructive actions arm on first click ("Confirm?") and never confirm via
   dialog.
