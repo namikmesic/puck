@@ -179,7 +179,7 @@ describe('Add runner', () => {
     expect(card.querySelector('#rn-add')?.classList.contains('hidden')).toBe(true);
   });
 
-  it('Cancel revokes the token, and closing Settings does too', async () => {
+  it('Cancel revokes the token, and closing Settings leaves it valid', async () => {
     const { card, bridge, view } = mount();
     btn(card, 'Add runner').click();
     await settle();
@@ -188,7 +188,8 @@ describe('Add runner', () => {
     btn(card, 'Add runner').click();
     await settle();
     view.close();
-    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(2);
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
+    expect(card.querySelector('#rn-add')?.classList.contains('hidden')).toBe(true);
   });
 
   it('an expired token offers a new one', async () => {
@@ -209,6 +210,7 @@ describe('Add runner', () => {
     btn(card.querySelector('#rn-add') as Element, 'Set up This Mac').click();
     await settle();
     expect(bridge.runnerInstallLocal).toHaveBeenCalled();
+    expect(bridge.runnerRegistrationCancel).not.toHaveBeenCalled();
     expect(card.querySelector('#rn-add')?.classList.contains('hidden')).toBe(true);
     expect(btn(card, 'Set up This Mac')).toBeUndefined();
   });

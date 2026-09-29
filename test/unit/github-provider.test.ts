@@ -4,7 +4,7 @@
  * access token the server hands out.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APP_SLUG_ENV, CLIENT_ID_ENV, githubAppSlug, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
 import { githubProvider, installations, repositories, setConfigRepo, useGitHubDeps } from '../../src/main/providers/github';
 import { githubSettings, updateGithubSettings } from '../../src/main/providers/providers-store';
@@ -104,6 +104,44 @@ describe('signing in to Puck with GitHub', () => {
     const calls = gh.requests.filter((r) => r.url.startsWith('https://api.github.com/'));
     expect(calls).toHaveLength(2);
     for (const r of calls) expect(r.headers.Authorization).toBe(`Bearer ${handed.token}`);
+  });
+
+  it('drops a GitHub access token that arrives after the Puck session changed', async () => {
+    await signIn('octocat');
+    const gh = github((req) =>
+      req.url.startsWith('https://api.github.com/user/installations') ? { body: { total_count: 0, installations: [] } } : undefined,
+    );
+    useGitHubDeps({ ...gh.deps, now: () => h.clock.now() });
+
+    let releaseA!: (t: { token: string; expiresAt: number }) => void;
+    const pendingA = new Promise<{ token: string; expiresAt: number }>((resolve) => {
+      releaseA = resolve;
+    });
+    const spy = vi.spyOn(api, 'githubToken').mockImplementationOnce(() => pendingA);
+    const stale = installations();
+    try {
+      await settle(() => spy.mock.calls.length === 1);
+      await githubProvider.auth.logout();
+      await signIn('me');
+      spy.mockImplementation(async () => ({ token: 'ghu_me', expiresAt: h.clock.now() + 60 * 60_000 }));
+
+      const fresh = installations();
+      const arrived = await Promise.race([fresh.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))]);
+      expect(arrived).toBe(true);
+      await fresh;
+
+      releaseA({ token: 'ghu_octocat', expiresAt: h.clock.now() + 60 * 60_000 });
+      await expect(stale).rejects.toThrow(/Sign in to Puck with GitHub first/);
+      await installations();
+      expect(gh.requests.filter((r) => r.url.startsWith('https://api.github.com/')).map((r) => r.headers.Authorization)).toEqual([
+        'Bearer ghu_me',
+        'Bearer ghu_me',
+      ]);
+    } finally {
+      releaseA({ token: 'ghu_octocat', expiresAt: h.clock.now() + 60 * 60_000 });
+      spy.mockRestore();
+      await stale.catch(() => undefined);
+    }
   });
 });
 

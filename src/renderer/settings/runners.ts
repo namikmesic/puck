@@ -167,11 +167,10 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     if (add === mine) drawAdd();
   }
 
-  function closeAdd(revoke: boolean): void {
+  function closeAdd(): void {
     const was = add;
     add = null;
     if (was?.timer) clearInterval(was.timer);
-    if (revoke && was?.reg && !was.online) void ctx.bridge.runnerRegistrationCancel(was.reg.id).catch(() => undefined);
     addPanel.classList.add('hidden');
     addPanel.textContent = '';
     drawFoot();
@@ -294,7 +293,11 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     addPanel.appendChild(status);
     const f = el('div', 'card-foot');
     const done = button(add.online ? 'btn-primary' : 'btn-ghost', add.online ? 'Done' : 'Cancel');
-    done.addEventListener('click', () => closeAdd(!add?.online));
+    done.addEventListener('click', () => {
+      const was = add;
+      if (was?.reg && !was.online) void ctx.bridge.runnerRegistrationCancel(was.reg.id).catch(() => undefined);
+      closeAdd();
+    });
     f.appendChild(done);
     addPanel.appendChild(f);
   }
@@ -314,7 +317,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     ctx.say('');
     try {
       view.update(await ctx.bridge.runnerInstallLocal());
-      if (add?.platform === 'this-mac') closeAdd(true);
+      if (add?.platform === 'this-mac') closeAdd();
     } catch (err) {
       ctx.say(errText(err));
       btn.disabled = false;
@@ -530,7 +533,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
       if (add && add.platform === 'this-mac') drawAdd();
     },
     close() {
-      if (add) closeAdd(true);
+      if (add) closeAdd();
       editing = null;
       removals.clear();
     },

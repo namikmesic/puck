@@ -47,32 +47,39 @@ export function useGitHubDeps(next: GitHubDeps | undefined): void {
 
 const now = (): number => (deps ?? { now: Date.now }).now();
 
-let cached: { token: string; expiresAt: number } | null = null;
-let fetching: Promise<string> | null = null;
+let generation = 0;
+let cached: { token: string; expiresAt: number; generation: number } | null = null;
+let fetching: { promise: Promise<string>; generation: number } | null = null;
 
 onSessionChange(() => {
+  generation += 1;
   cached = null;
+  fetching = null;
 });
 
 async function accessToken(): Promise<string> {
   if (!current()) throw new Error('Sign in to Puck with GitHub first.');
-  if (cached && (cached.expiresAt === 0 || cached.expiresAt - TOKEN_MARGIN_MS > now())) return cached.token;
-  fetching ??= serverApi
-    .githubToken()
-    .then((t) => {
-      cached = t;
+  const gen = generation;
+  if (cached && cached.generation === gen && (cached.expiresAt === 0 || cached.expiresAt - TOKEN_MARGIN_MS > now())) return cached.token;
+  if (fetching && fetching.generation === gen) return fetching.promise;
+  const promise = serverApi.githubToken().then(
+    (t) => {
+      if (gen !== generation) throw new Error('Sign in to Puck with GitHub first.');
+      cached = { token: t.token, expiresAt: t.expiresAt, generation: gen };
       return t.token;
-    })
-    .catch((err: unknown) => {
+    },
+    (err: unknown) => {
       if (err instanceof ServerApiError && err.code === 'github-auth-lost') {
         throw new Error('GitHub no longer accepts your Puck sign-in. Sign out of Puck and sign in again.');
       }
       throw err;
-    })
-    .finally(() => {
-      fetching = null;
-    });
-  return fetching;
+    },
+  );
+  fetching = { promise, generation: gen };
+  void promise.finally(() => {
+    if (fetching?.promise === promise) fetching = null;
+  }).catch(() => undefined);
+  return promise;
 }
 
 /** One client for the app's GitHub access, so the rate-limit budget is tracked once. */
