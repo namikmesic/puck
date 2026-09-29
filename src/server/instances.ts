@@ -231,20 +231,28 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const permissions = permissionsFor(policies);
     const now = ctx.clock.now();
     await ctx.store.setPermissions(instance.id, permissions, now);
+    // Committed: the reply is a success and the app hears of it, whatever
+    // fails after this point. Without the repositories there is no view to push.
+    const failed = (err: unknown) =>
+      ctx.log.error('grant.permissions', { envId: instance.id, error: err instanceof Error ? err.name : 'unknown' });
+    let view: InstanceView | null = null;
     try {
-      const view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
+      view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
+      ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
+    } catch (err) {
+      failed(err);
+    }
+    try {
       await ctx.audit('grant.permissions', {
         userId: user.id,
         runnerId: instance.runnerId,
         envId: instance.id,
         detail: { permissions },
       });
-      ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
-      return { body: { instance: view } };
     } catch (err) {
-      ctx.log.error('grant.permissions', { envId: instance.id, error: err instanceof Error ? err.name : 'unknown' });
-      return { body: {} };
+      failed(err);
     }
+    return { body: view ? { instance: view } : {} };
   });
 
   router.add('DELETE', '/v1/instances/:envId', async (req) => {

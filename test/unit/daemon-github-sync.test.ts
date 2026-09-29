@@ -59,6 +59,8 @@ function fakeGitHub() {
     runs: new Map<string, Json[]>(),
     jobs: new Map<number, Json[]>(),
     logs: new Map<number, string>(),
+    /** Job ids whose log read fails with HTTP 500. */
+    logsDown: new Set<number>(),
     /** login → permission (`admin`…) or an HTTP status to fail the read. */
     permissions: new Map<string, string | number>(),
     requests: [] as Req[],
@@ -168,7 +170,10 @@ function fakeGitHub() {
       const page = paged(url, gh.jobs.get(Number(m[1])) ?? []);
       return [200, { jobs: page.body }, page.link ? { link: page.link } : undefined];
     }
-    if ((m = /^\/actions\/jobs\/(\d+)\/logs$/.exec(p))) return [200, gh.logs.get(Number(m[1])) ?? ''];
+    if ((m = /^\/actions\/jobs\/(\d+)\/logs$/.exec(p))) {
+      if (gh.logsDown.has(Number(m[1]))) return [500, { message: 'Server Error' }];
+      return [200, gh.logs.get(Number(m[1])) ?? ''];
+    }
     return [404, { message: 'Not Found' }];
   };
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -1201,6 +1206,63 @@ describe('CI on the published head', () => {
     expect(log).toHaveLength(200);
     expect(log[0]).toBe('line 100');
     expect(read.logs[0].log).not.toContain('ghs_leakedtoken123');
+  });
+
+  it('reads a failed job log again on the next poll when the read fails, and reports once it is read', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA }]);
+    fake.gh.jobs.set(50, [{ id: 60, name: 'test', status: 'completed', conclusion: 'failure', html_url: null }]);
+    fake.gh.logs.set(60, 'npm test\nFAIL readme.test.js');
+    fake.gh.logsDown.add(60);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    fake.gh.logsDown.delete(60);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL readme.test.js');
+    const read = sync.ciRead(backlog.get(item.id) as ItemRecord) as { logs: Array<{ job: string; log: string }> };
+    expect(read.logs).toEqual([{ job: 'test', log: 'npm test\nFAIL readme.test.js' }]);
+  });
+
+  it(`reports a failure without the log after ${LIMITS.logReads} failed reads`, async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA }]);
+    fake.gh.jobs.set(50, [{ id: 60, name: 'test', status: 'completed', conclusion: 'failure', html_url: null }]);
+    fake.gh.logsDown.add(60);
+    for (let poll = 1; poll < LIMITS.logReads; poll++) {
+      await pollAll();
+      expect(noticesOf('pr.checks')).toEqual([]);
+    }
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+  });
+
+  it('keeps the CI watch when the same head is published again', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    await sync.published(item.id);
+    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
   });
 
   it('ci: fix queues the failure to the worker, up to maxCiFixAttempts', async () => {

@@ -51,7 +51,7 @@ import { createAdapters } from './harness';
 import { harnessEnv } from './harness/spawn';
 import type { HarnessAdapter, OrchestratorTool } from './harness/types';
 import { testAdapters } from './harness/test-adapters';
-import { syncGrantPolicies } from './grant-sync';
+import { GRANT_SYNC_TIMEOUT_MS, grantSyncConfigured, syncGrantPolicies } from './grant-sync';
 import { Git } from './git';
 import { GitHubApi } from './github-api';
 import { GithubSync } from './github-sync';
@@ -98,6 +98,8 @@ export interface DaemonOptions {
   now?: () => number;
   /** How long upgrade-now and shutdown wait for a turn that ignores interrupt. */
   shutdownGraceMs?: number;
+  /** Deadline of one policies PUT to the server (`GRANT_SYNC_TIMEOUT_MS`). */
+  grantSyncTimeoutMs?: number;
 }
 
 /** Ops a failed daemon still answers (fresh GitHub grants help the next boot). */
@@ -135,11 +137,13 @@ export class Daemon {
   private readonly run: CommandRunner;
   private readonly now: () => number;
   private readonly shutdownGraceMs: number;
+  private readonly grantSyncTimeoutMs: number;
 
   constructor(private readonly opts: DaemonOptions) {
     this.run = opts.run ?? runCommand;
     this.now = opts.now ?? Date.now;
     this.shutdownGraceMs = opts.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
+    this.grantSyncTimeoutMs = opts.grantSyncTimeoutMs ?? GRANT_SYNC_TIMEOUT_MS;
   }
 
   /* ---------- Boot ---------- */
@@ -381,11 +385,7 @@ export class Daemon {
         const fields = changes.filter((c) => c.class === 'rebuild').map((c) => c.field);
         throw new OpError('invalid-state', `This update needs the environment rebuilt (${fields.join(', ')}).`);
       }
-      const prevPolicies = tokenPoliciesFrom(prev.policies.github);
-      const nextPolicies = tokenPoliciesFrom(next.policies.github);
-      if (!sameTokenPermissions(prevPolicies, nextPolicies)) {
-        await syncGrantPolicies(this.opts.env, record.envId, nextPolicies);
-      }
+      await this.syncGrant(record, prev, next);
       this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
       this.definition = next;
       this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
@@ -408,6 +408,40 @@ export class Daemon {
       return { classes };
     } finally {
       this.applyingDefinition = false;
+    }
+  }
+
+  /**
+   * Store the next definition's token permissions on the server before the
+   * definition is applied. The instance is marked unsure first, so a reply
+   * lost after the server committed (or a crash) makes the next apply sync
+   * even when its permissions look unchanged. A failed sync puts the
+   * previous permissions back, best effort, and refuses the apply.
+   */
+  private async syncGrant(record: InstanceRecord, prev: DaemonDefinition, next: DaemonDefinition): Promise<void> {
+    const prevPolicies = tokenPoliciesFrom(prev.policies.github);
+    const nextPolicies = tokenPoliciesFrom(next.policies.github);
+    if (!record.grantUnsure && sameTokenPermissions(prevPolicies, nextPolicies)) return;
+    const { env } = this.opts;
+    if (!grantSyncConfigured(env)) return syncGrantPolicies(env, record.envId, nextPolicies);
+    if (!record.grantUnsure) {
+      this.instance.set({ ...record, grantUnsure: true });
+      this.instance.commit();
+    }
+    try {
+      await syncGrantPolicies(env, record.envId, nextPolicies, this.grantSyncTimeoutMs);
+    } catch (err) {
+      try {
+        await syncGrantPolicies(env, record.envId, prevPolicies, this.grantSyncTimeoutMs);
+        const current = this.instance.get();
+        if (current) {
+          this.instance.set({ ...current, grantUnsure: false });
+          this.instance.commit();
+        }
+      } catch {
+        this.opts.log.warn('definition.grant-unsure', { envId: record.envId });
+      }
+      throw err;
     }
   }
 
@@ -454,7 +488,7 @@ export class Daemon {
     }
     const history = current?.history ?? [];
     if (!current || current.sha !== update.sha) history.push({ sha: update.sha, pin: update.pin, appliedAt: this.now() });
-    this.instance.set({ ...update, history, provisioned: current?.provisioned ?? null });
+    this.instance.set({ ...update, history, provisioned: current?.provisioned ?? null, grantUnsure: false });
     this.instance.commit();
   }
 

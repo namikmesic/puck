@@ -31,7 +31,10 @@
  *     to `maxCiFixAttempts`, and does not queue another for that head.
  *     The notice is the latest run of every
  *     check name. Nothing reported settles as neutral and stays watched,
- *     so a check that appears later still reports.
+ *     so a check that appears later still reports. A failure whose job
+ *     logs could not all be read waits for up to LIMITS.logReads polls
+ *     before it is reported with what was read. Publishing the same head
+ *     again keeps its watch: no second notice or fix for that head.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -97,6 +100,8 @@ export const LIMITS = {
   logLines: 200,
   logBytes: 16 * 1024,
   failedJobs: 5,
+  /** Polls that try to read a failure's job logs before it is reported without all of them. */
+  logReads: 3,
   feedbackBodyBytes: 4 * 1024,
   hunkBytes: 2 * 1024,
   feedbackKept: 100,
@@ -296,6 +301,8 @@ export class GithubSync {
   private readonly waitingForGrant = new Set<string>();
   /** `repo\0login` → write / no / unread, for the current poll only. */
   private readonly access = new Map<string, 'write' | 'no' | 'unread'>();
+  /** item id → the failure (sha and outcome) whose logs were not all read, and how often that was tried. */
+  private readonly logTries = new Map<string, { key: string; tries: number }>();
   private readonly now: () => number;
   private readonly timers: Timers;
 
@@ -453,6 +460,7 @@ export class GithubSync {
       delete file.items[id];
       removed = true;
       for (const kind of ['issue', 'pull', 'checks']) this.last.delete(`${kind}:${id}`);
+      this.logTries.delete(id);
     }
     if (removed) this.deps.store.commit();
   }
@@ -792,10 +800,13 @@ export class GithubSync {
     }
     s.prState = 'open';
     s.headSha = pr.lastPushedSha;
-    s.ci = this.watch(pr.lastPushedSha);
+    // The same head published again (a body or title update) keeps its CI
+    // watch, so its result is not reported, or fixed, a second time.
+    const ci = s.ci?.sha === pr.lastPushedSha ? s.ci : this.watch(pr.lastPushedSha);
+    s.ci = ci;
     this.last.set(`checks:${item.id}`, this.now());
     this.save();
-    this.patchPr(item, { state: 'open', checks: { sha: pr.lastPushedSha, state: 'pending', failing: [] } });
+    this.patchPr(item, { state: 'open', checks: { sha: ci.sha, state: ci.state, failing: ci.failing } });
     this.kick();
   }
 
@@ -1026,13 +1037,16 @@ export class GithubSync {
     const state = result.state;
     ci.failing = result.failing;
     const outcome = state === 'success' || state === 'failure' ? ciOutcome(state, result.failing) : null;
-    const deliver = outcome !== null && outcome !== ci.reported;
+    let deliver = outcome !== null && outcome !== ci.reported;
     if (deliver && state === 'failure') {
+      let complete = false;
       try {
-        await this.collectFailedJobs(repo.github, ci);
+        complete = await this.collectFailedJobs(repo.github, ci);
       } catch (err) {
         this.failed(`ci-logs:${item.id}`, err);
       }
+      if (s.ci !== ci) return;
+      deliver = this.logsSettled(item.id, `${ci.sha}\0${outcome}`, complete);
     }
     if (s.ci !== ci) return;
     if (deliver && state === 'success') ci.logs = [];
@@ -1043,10 +1057,27 @@ export class GithubSync {
     this.ciSettled(item, ci, result.passed);
   }
 
-  private async collectFailedJobs(repo: string, ci: CiWatch): Promise<void> {
+  /**
+   * Whether a failure can be reported now: its logs were all read, or they
+   * were tried LIMITS.logReads times. Otherwise the next poll reads them again.
+   */
+  private logsSettled(itemId: string, key: string, complete: boolean): boolean {
+    const prior = this.logTries.get(itemId);
+    const tries = (prior?.key === key ? prior.tries : 0) + 1;
+    if (complete || tries >= LIMITS.logReads) {
+      this.logTries.delete(itemId);
+      return true;
+    }
+    this.logTries.set(itemId, { key, tries });
+    return false;
+  }
+
+  /** Reads failed jobs' log tails into `ci.logs`. False when a log could not be read. */
+  private async collectFailedJobs(repo: string, ci: CiWatch): Promise<boolean> {
     const runs = await this.deps.api.runs(repo, ci.sha);
     const failed = runs.filter((r) => r.status === 'completed' && FAILED_CONCLUSIONS.has(r.conclusion ?? ''));
     const logs: CiWatch['logs'] = [];
+    let complete = true;
     for (const run of failed) {
       if (logs.length >= LIMITS.failedJobs) break;
       for (const job of await this.deps.api.jobs(repo, run.id)) {
@@ -1056,10 +1087,12 @@ export class GithubSync {
           logs.push({ name: ciLine(job.name, 120), text: logTail(String((await this.deps.api.jobLog(repo, job.id)) ?? '')) });
         } catch (err) {
           this.failed('ci-log', err);
+          complete = false;
         }
       }
     }
     ci.logs = logs;
+    return complete;
   }
 
   private ciSettled(item: ItemRecord, ci: CiWatch, passed: number): void {
