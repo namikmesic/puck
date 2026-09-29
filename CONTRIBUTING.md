@@ -20,6 +20,7 @@ npm run start:isolated -- -- --remote-debugging-port=9222
 ```
 
 It keeps all app data in a throwaway folder (under the OS temp dir, or `PUCK_ISOLATED_DIR`), uses Electron's mock keychain so macOS is never asked, and opens the window without taking focus.
+Setting up This Mac is refused in that launch; see the README's Develop section.
 `npm start` is for using Puck yourself: it reads and writes your real data folder and Keychain.
 
 Never replace `HOME` to isolate Puck.

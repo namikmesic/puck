@@ -7,6 +7,7 @@
  *   .credentials    { runnerId, keyFile, keyFingerprint }                                        0600
  *   .runner_key     the runner's Ed25519 private key, PKCS#8 PEM                                0600
  *   .service        the installed service unit, when svc.sh installed one                      0644
+ *   puck-runner     the LaunchAgent's program on macOS, written by svc.sh install; runs run.sh 0755
  *   _diag/          runner.log and its two rotations, redacted                                0700
  *   cache/daemon/   <sha256>.js daemon bundles received from apps                            0700
  *   _update/        downloads and the previous version during a self-update
