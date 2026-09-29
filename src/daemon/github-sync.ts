@@ -28,8 +28,8 @@
  *     changed outcome — new failing check names, or success and failure
  *     swapping — is another notice and updates `pr.checks`. `ci: fix`
  *     queues one follow-up for a head the worker has not yet been sent, up
- *     to `maxCiFixAttempts`, and does not queue again while that head's
- *     failing set is unchanged. The notice is the latest run of every
+ *     to `maxCiFixAttempts`, and does not queue another for that head.
+ *     The notice is the latest run of every
  *     check name. Nothing reported settles as neutral and stays watched,
  *     so a check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback

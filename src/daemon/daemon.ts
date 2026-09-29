@@ -9,8 +9,8 @@
  * restart interrupted (an unfinished turn becomes interrupted; a transcript
  * that already finished is left idle and is not resumed; running work items
  * go back to queued without counting an attempt) → make sure the orchestrator
- * session exists → resume those turns → ready → start the scheduler and
- * the orchestrator's wake loop.
+ * session exists → resume those turns → ready → start the scheduler,
+ * the orchestrator's wake loop, and the GitHub poll.
  *
  * Orchestration lives in its own modules: items.ts (state machine and
  * backlog), scheduler.ts, work.ts (dispatch, worktrees, results, worker
