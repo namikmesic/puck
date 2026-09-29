@@ -66,11 +66,21 @@ describe('runner key pinning', () => {
   });
 
   it('loads older or damaged files leniently', () => {
-    expect(normalizeRunners(null)).toEqual({ v: 1, keys: {}, local: null });
+    expect(normalizeRunners(null)).toEqual({ v: 1, keys: {}, local: null, accounts: {} });
     expect(normalizeRunners({ keys: { a: 'SHA256:x', b: 3 }, local: { dir: '/d', socket: '/d/s' } })).toEqual({
       v: 1,
       keys: { a: 'SHA256:x' },
       local: { runnerId: null, dir: '/d', socket: '/d/s' },
+      accounts: {},
+    });
+    expect(normalizeRunners({ local: { dir: '/d', socket: '/d/s', accountId: 'usr_a', runnerId: 'rnr_a' }, accounts: { usr_b: { dir: '/b', socket: '/b/s', runnerId: 'rnr_b' } } })).toEqual({
+      v: 1,
+      keys: {},
+      local: null,
+      accounts: {
+        usr_a: { runnerId: 'rnr_a', dir: '/d', socket: '/d/s', accountId: 'usr_a' },
+        usr_b: { runnerId: 'rnr_b', dir: '/b', socket: '/b/s', accountId: 'usr_b' },
+      },
     });
   });
 });

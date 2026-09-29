@@ -27,7 +27,7 @@ import { current, freshSession, onSessionChange, signOut } from '../server/sessi
 import { ChannelOpenError, type RunnerTransport } from './channel';
 import { ControlClient } from './control-client';
 import { localTransport } from './local';
-import { checkPinnedKey, forgetKey, localRunner } from './store';
+import { adoptLegacyLocal, checkPinnedKey, forgetKey, localRunner } from './store';
 import * as thisMac from './this-mac';
 import type { EnvironmentProvider } from '../providers/types';
 
@@ -37,6 +37,13 @@ const runners = new Map<string, ServerRunner>();
 const instances = new Map<string, ServerInstance>();
 let socketState: SocketState = 'idle';
 let loaded = false;
+/**
+ * Advances on every sign-in and sign-out. A list fetched for an earlier
+ * generation is dropped, so one account's runners cannot land in another's.
+ */
+let generation = 0;
+/** Pushes are applied only while this equals `generation` (the live session). */
+let acceptedGeneration = 0;
 
 type Listener<T> = (value: T) => void;
 const runnerListeners: Listener<{ kind: 'upsert'; runner: RunnerRow } | { kind: 'removed'; runnerId: string } | { kind: 'state' }>[] = [];
@@ -140,13 +147,18 @@ export function serverInstance(envId: string): ServerInstance | undefined {
 
 /** Re-reads runners and environments from the server. */
 export async function refresh(): Promise<void> {
-  if (!current()) return;
+  const gen = generation;
+  const session = current();
+  if (!session) return;
+  const userId = session.user.id;
   const [list, envs] = await Promise.all([api.listRunners(), api.listInstances()]);
+  if (gen !== generation || current()?.user.id !== userId) return;
   runners.clear();
   for (const r of list) runners.set(r.id, r);
   instances.clear();
   for (const i of envs) instances.set(i.id, i);
   loaded = true;
+  adoptLegacyLocal(userId, list.map((r) => r.id));
   emitRunners({ kind: 'state' });
   emitInstances({ kind: 'reload' });
   // A nudge is cheap: an attached environment that is already connected ignores it.
@@ -155,6 +167,7 @@ export async function refresh(): Promise<void> {
 
 /** A push event from the server socket (exported for tests, which play the server). */
 export function onPush(push: ServerPush): void {
+  if (generation !== acceptedGeneration) return;
   switch (push.type) {
     case 'runner.upsert': {
       const before = runners.get(push.runner.id);
@@ -208,15 +221,16 @@ export function start(): void {
 }
 
 onSessionChange((signedIn) => {
-  if (signedIn) {
-    connection.start();
-    return;
-  }
-  connection.stop('signed-out');
+  generation += 1;
+  connection.stop(signedIn ? 'session-changed' : 'signed-out');
   for (const id of [...pool.keys()]) closeControl(id);
   runners.clear();
   instances.clear();
   loaded = false;
+  if (signedIn) {
+    acceptedGeneration = generation;
+    connection.start();
+  }
   emitRunners({ kind: 'state' });
   emitInstances({ kind: 'reload' });
 });
@@ -317,7 +331,12 @@ export async function forceRemove(runnerId: string): Promise<void> {
 /* ---------- This Mac ---------- */
 
 export async function installLocal(): Promise<void> {
-  const existing = current() ? await api.listRunners() : [];
+  const gen = generation;
+  const session = current();
+  if (!session) throw new Error('Sign in to Puck first (Settings → Providers → GitHub).');
+  const userId = session.user.id;
+  const existing = await api.listRunners();
+  if (gen !== generation || current()?.user.id !== userId) throw new Error('The Puck session changed; try again.');
   await thisMac.install(existing);
   await refresh().catch(() => undefined);
 }

@@ -59,6 +59,13 @@ export function serviceSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'runner';
 }
 
+const SERVICE_LABEL_RE = /^com\.puck\.runner\.[a-z0-9-]{1,48}$/;
+
+/** The LaunchAgent label: a configured one, or one derived from the runner name. */
+export function launchdLabel(name: string, serviceLabel: string | null | undefined): string {
+  return serviceLabel && SERVICE_LABEL_RE.test(serviceLabel) ? serviceLabel : `com.puck.runner.${serviceSlug(name)}`;
+}
+
 const xml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 export function systemdUnit(opts: { name: string; root: string; user: string }): string {
@@ -186,7 +193,7 @@ export class Service {
       await this.must('systemctl', ['daemon-reload'], 'systemctl daemon-reload');
       await this.must('systemctl', ['enable', name], `systemctl enable ${name}`);
     } else {
-      const label = `com.puck.runner.${slug}`;
+      const label = launchdLabel(this.deps.config.name, this.deps.config.serviceLabel);
       const file = path.join(this.deps.homedir, 'Library', 'LaunchAgents', `${label}.plist`);
       fs.mkdirSync(path.join(this.deps.paths.root, '_diag'), { recursive: true, mode: 0o700 });
       writeFileAtomic(file, launchdPlist({ label, root: this.deps.paths.root }), 0o644);

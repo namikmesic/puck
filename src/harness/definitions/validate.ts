@@ -678,6 +678,11 @@ export function summarize(repo: ValidatedRepo): { agents: AgentSummary[]; enviro
       startable: isStartable(repo, f.fileName),
       orchestrator: typeof orch === 'string' ? orch : null,
       agents: list.flatMap((a: unknown) => (isPlainObject(a) && typeof a.agent === 'string' ? [a.agent] : [])),
+      secrets: f.definition?.secrets ?? [],
+      resources: {
+        cpus: f.definition?.resources?.cpus ?? null,
+        memory: f.definition?.resources?.memory ?? null,
+      },
     };
   });
   return { agents, environments };

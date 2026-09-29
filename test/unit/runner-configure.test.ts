@@ -192,10 +192,10 @@ describe('config.sh --local-socket', { timeout: 20_000 }, () => {
     const session = await signIn(h, 'octo');
     const socket = path.join(dir, 'runner', 'local.sock');
     await configure(
-      { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: socket, labels: 'local' },
+      { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: socket, labels: 'local', serviceLabel: 'com.puck.runner.abcd1234' },
       { paths, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' }, hostname: 'mbp' },
     );
-    expect(readConfig(paths)).toMatchObject({ localSocket: socket, labels: ['macos', 'arm64', 'local'] });
+    expect(readConfig(paths)).toMatchObject({ localSocket: socket, labels: ['macos', 'arm64', 'local'], serviceLabel: 'com.puck.runner.abcd1234' });
 
     const other = runnerPaths(path.join(dir, 'other'));
     await expect(

@@ -6,11 +6,14 @@
  *   means a server that later lists another key for the same runner is
  *   noticed, and channels to that runner are refused until the user removes
  *   and registers it again (re-registration always makes a new runner id).
- * - `local`: the This Mac runner this app installed, and where.
+ * - `local`: a This Mac install from before installs were keyed by account.
+ * - `accounts`: the This Mac install for each Puck account. A second account
+ *   on this OS user gets its own record and never replaces the first.
  *
  * Migrate, don't break: missing fields default at load.
  */
 
+import { current } from '../server/session';
 import { defineStore } from '../store';
 
 export interface LocalRunnerRecord {
@@ -20,12 +23,17 @@ export interface LocalRunnerRecord {
   dir: string;
   /** Its local socket. */
   socket: string;
+  /** The Puck account this install belongs to. Absent on a legacy unbound record. */
+  accountId?: string;
 }
 
 export interface RunnersFile {
   v: 1;
   keys: Record<string, string>;
+  /** Legacy single install with no account id. Dual-read; new installs go in `accounts`. */
   local: LocalRunnerRecord | null;
+  /** This Mac installs keyed by Puck account id. One account never replaces another's. */
+  accounts: Record<string, LocalRunnerRecord>;
 }
 
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
@@ -36,14 +44,28 @@ export function normalizeRunners(raw: unknown): RunnersFile {
   if (typeof file.keys === 'object' && file.keys !== null) {
     for (const [id, fp] of Object.entries(file.keys as Record<string, unknown>)) if (isStr(fp)) keys[id] = fp;
   }
-  const l = (typeof file.local === 'object' && file.local !== null ? file.local : null) as Record<string, unknown> | null;
-  const local = l && isStr(l.dir) && isStr(l.socket) ? { runnerId: isStr(l.runnerId) ? l.runnerId : null, dir: l.dir, socket: l.socket } : null;
-  return { v: 1, keys, local };
+  const readRecord = (value: unknown): LocalRunnerRecord | null => {
+    const l = (typeof value === 'object' && value !== null ? value : null) as Record<string, unknown> | null;
+    if (!l || !isStr(l.dir) || !isStr(l.socket)) return null;
+    const accountId = isStr(l.accountId) ? l.accountId : undefined;
+    return { runnerId: isStr(l.runnerId) ? l.runnerId : null, dir: l.dir, socket: l.socket, ...(accountId ? { accountId } : {}) };
+  };
+  const accounts: Record<string, LocalRunnerRecord> = {};
+  if (typeof file.accounts === 'object' && file.accounts !== null) {
+    for (const [id, raw] of Object.entries(file.accounts as Record<string, unknown>)) {
+      const rec = readRecord(raw);
+      if (rec && isStr(id)) accounts[id] = { ...rec, accountId: id };
+    }
+  }
+  const legacy = readRecord(file.local);
+  if (legacy?.accountId && !accounts[legacy.accountId]) accounts[legacy.accountId] = { ...legacy, accountId: legacy.accountId };
+  const local = legacy && !legacy.accountId ? { runnerId: legacy.runnerId, dir: legacy.dir, socket: legacy.socket } : null;
+  return { v: 1, keys, local, accounts };
 }
 
 const store = defineStore<RunnersFile>({
   file: 'puck-runners.json',
-  defaults: () => ({ v: 1, keys: {}, local: null }),
+  defaults: () => ({ v: 1, keys: {}, local: null, accounts: {} }),
   migrate: normalizeRunners,
 });
 
@@ -74,12 +96,48 @@ export function forgetKey(runnerId: string): void {
   store.persist();
 }
 
+/** The This Mac install for the signed-in account, or null when signed out or unset. */
 export function localRunner(): LocalRunnerRecord | null {
-  const l = store.read().local;
-  return l ? { ...l } : null;
+  const id = current()?.user.id;
+  if (!id) return null;
+  const rec = store.read().accounts[id];
+  return rec ? { ...rec } : null;
 }
 
+/**
+ * Records the signed-in account's This Mac install. A null record clears only
+ * that account. With no signed-in account, a record is kept as the legacy
+ * unbound install and null clears only that unbound record.
+ */
 export function setLocalRunner(record: LocalRunnerRecord | null): void {
-  store.read().local = record ? { ...record } : null;
+  const state = store.read();
+  if (!record) {
+    const id = current()?.user.id;
+    if (id) delete state.accounts[id];
+    else state.local = null;
+    store.persist();
+    return;
+  }
+  const accountId = record.accountId || current()?.user.id || '';
+  if (!accountId) {
+    state.local = { runnerId: record.runnerId, dir: record.dir, socket: record.socket };
+    store.persist();
+    return;
+  }
+  state.accounts[accountId] = { runnerId: record.runnerId, dir: record.dir, socket: record.socket, accountId };
   store.persist();
+}
+
+/**
+ * A legacy unbound install belongs to the account whose runner list contains
+ * its id. Any other account leaves it, and the directory, alone.
+ */
+export function adoptLegacyLocal(accountId: string, runnerIds: readonly string[]): boolean {
+  const state = store.read();
+  if (!accountId || state.accounts[accountId] || !state.local?.runnerId) return false;
+  if (!runnerIds.includes(state.local.runnerId)) return false;
+  state.accounts[accountId] = { ...state.local, accountId };
+  state.local = null;
+  store.persist();
+  return true;
 }

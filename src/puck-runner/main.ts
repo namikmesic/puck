@@ -49,6 +49,7 @@ Options:
   --disableupdate             Do not update the runner automatically
   --local-socket <path>       Also listen on this unix socket for Puck on this machine
                               (the This Mac runner Puck installs uses it)
+  --service-label <label>     LaunchAgent label (com.puck.runner.<name>); This Mac sets one per account
   -h, --help                  Show this help
 
 Remove options:
@@ -113,6 +114,7 @@ async function config(argv: string[]): Promise<number> {
       replace: { type: 'boolean' },
       disableupdate: { type: 'boolean' },
       'local-socket': { type: 'string' },
+      'service-label': { type: 'string' },
       'keep-environments': { type: 'boolean' },
       'delete-environments': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -158,6 +160,7 @@ async function config(argv: string[]): Promise<number> {
         replace: !!values.replace,
         disableUpdate: !!values.disableupdate,
         localSocket: values['local-socket'],
+        serviceLabel: values['service-label'],
       },
       { paths, docker: realDocker, io, version: RUNNER_VERSION, platform },
     );

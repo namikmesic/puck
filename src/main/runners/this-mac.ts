@@ -8,7 +8,7 @@
  *
  * Install: the macOS ARM64 runner tarball the Puck server publishes is
  * downloaded and checked against its sha256, unpacked with /usr/bin/tar into
- * `<userData>/runner`, then driven by its own scripts' entry point with its
+ * `<userData>/r/<account>`, one directory per Puck account, then driven by its own scripts' entry point with its
  * own Node runtime: `config --unattended … --labels local --local-socket
  * <dir>/local.sock` with a registration token read from a 0600 file (then
  * revoked), and `svc install` + `svc start`. The app's Electron binary is not
@@ -34,6 +34,7 @@ import type { ServerRunner } from '../../harness/server-api';
 import { log } from '../log';
 import * as api from '../server/api';
 import { serverDeps } from '../server/http';
+import { current } from '../server/session';
 import { localRunner, setLocalRunner, type LocalRunnerRecord } from './store';
 
 /** Unix socket paths are limited to 104 bytes on macOS. */
@@ -128,6 +129,22 @@ export function localState(): LocalRunnerState {
   };
 }
 
+/** Eight hex characters, so two account ids never share a directory or a socket path long enough to matter. */
+export function accountKey(accountId: string): string {
+  return createHash('sha256').update(accountId).digest('hex').slice(0, 8);
+}
+
+/** LaunchAgent label for one Puck account. A second account gets a different label. */
+export function serviceLabelFor(accountId: string): string {
+  return `com.puck.runner.${accountKey(accountId)}`;
+}
+
+function accountId(): string {
+  const id = current()?.user.id;
+  if (!id) throw new Error('Sign in to Puck first (Settings → Providers → GitHub).');
+  return id;
+}
+
 /** The runner name This Mac registers under. */
 export function localName(hostname: string): string {
   const host = hostname
@@ -188,8 +205,9 @@ async function startRecorded(dir: string, socket: string): Promise<void> {
   await d().waitForSocket(socket, 60_000);
 }
 
-export function paths(dataDir = d().dataDir()): { dir: string; socket: string } {
-  const dir = path.join(dataDir, 'runner');
+/** This account's runner directory. The socket stays under the unix-socket path limit. */
+export function pathsFor(dataDir: string, id: string): { dir: string; socket: string } {
+  const dir = path.join(dataDir, 'r', accountKey(id));
   return { dir, socket: path.join(dir, 'local.sock') };
 }
 
@@ -251,7 +269,8 @@ async function exclusive<T>(kind: 'installing' | 'uninstalling', fn: () => Promi
 export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
   return exclusive('installing', async () => {
     if (!supported()) throw new Error('The This Mac runner needs macOS on Apple silicon. Add this Mac as a runner by hand instead.');
-    const { dir, socket } = paths();
+    const id = accountId();
+    const { dir, socket } = pathsFor(d().dataDir(), id);
     if (Buffer.byteLength(socket, 'utf8') > MAX_SOCKET_PATH_BYTES) {
       throw new Error(`Puck's data folder path is too long for the runner's local socket (${socket}).`);
     }
@@ -260,7 +279,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       // A registration from an earlier install that the record lost: keep it, make sure it runs.
       progress('Starting the runner…');
       await startRecorded(dir, socket);
-      const record = { runnerId: already, dir, socket };
+      const record = { runnerId: already, dir, socket, accountId: id };
       setLocalRunner(record);
       log.info('this-mac.installed', { runnerId: already });
       return record;
@@ -274,7 +293,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     const recordedId = localRunner()?.runnerId ?? null;
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    setLocalRunner({ runnerId: null, dir, socket });
+    setLocalRunner({ runnerId: null, dir, socket, accountId: id });
     const tarball = path.join(dir, asset.file);
     const tokenFile = path.join(dir, '.registration-token');
     let tokenId: string | null = null;
@@ -291,13 +310,13 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       tokenId = reg.id;
       fs.writeFileSync(tokenFile, reg.token, { mode: 0o600 });
       const target = registrationTarget(existing, recordedId, d().hostname());
-      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket];
+      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket, '--service-label', serviceLabelFor(id)];
       if (target.replace) args.push('--replace');
       await runner(dir, args, 'Registering the runner');
       fs.rmSync(tokenFile, { force: true });
       const runnerId = readRunnerId(dir);
       if (!runnerId) throw new Error('The runner did not record its registration.');
-      const record = { runnerId, dir, socket };
+      const record = { runnerId, dir, socket, accountId: id };
 
       progress('Starting the LaunchAgent…');
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);

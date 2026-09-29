@@ -104,6 +104,8 @@ export interface ConfigureOptions {
   disableUpdate: boolean;
   /** Also listen on this unix socket for the app on this machine (the This Mac runner). */
   localSocket?: string;
+  /** LaunchAgent label, when this install must not share the name-derived one. */
+  serviceLabel?: string;
 }
 
 export interface ConfigureDeps {
@@ -184,6 +186,7 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
       disableUpdate: opts.disableUpdate,
       owner: res.owner?.login ?? null,
       localSocket: opts.localSocket ?? null,
+      serviceLabel: opts.serviceLabel || null,
     });
     writeCredentials(paths, { runnerId: res.runnerId, keyFile: '.runner_key', keyFingerprint: key.fingerprint });
   } catch (err) {

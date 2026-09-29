@@ -111,8 +111,17 @@ providerRegistry.setOnLogout(async (provider) => {
 // Injected by Forge's webpack plugin: dev-server vs packaged bundle URLs.
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
+declare const MAIN_WINDOW_V2_WEBPACK_ENTRY: string;
+declare const MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY: string;
+
+/** PUCK_UI=v2 loads the runner shell. The legacy window stays the default until cutover. */
+function windowAssets(): { url: string; preload: string } {
+  if (process.env.PUCK_UI === 'v2') return { url: MAIN_WINDOW_V2_WEBPACK_ENTRY, preload: MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY };
+  return { url: MAIN_WINDOW_WEBPACK_ENTRY, preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY };
+}
 
 const createWindow = (): void => {
+  const assets = windowAssets();
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
@@ -123,7 +132,7 @@ const createWindow = (): void => {
     // An isolated launch must not take focus from the person at the desk.
     show: !isolated,
     webPreferences: {
-      preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
+      preload: assets.preload,
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -140,14 +149,14 @@ const createWindow = (): void => {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== MAIN_WINDOW_WEBPACK_ENTRY) {
+    if (url !== assets.url) {
       event.preventDefault();
       if (/^https?:/i.test(url)) void shell.openExternal(url);
     }
   });
 
   if (isolated) mainWindow.once('ready-to-show', () => mainWindow.showInactive());
-  mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
+  mainWindow.loadURL(assets.url);
   log.info('window.created');
 };
 

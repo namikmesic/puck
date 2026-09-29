@@ -21,6 +21,7 @@ type Live = Awaited<ReturnType<typeof startLiveServer>>;
 let h: Live;
 let data: string;
 let downloads: string;
+let login = 'octo';
 const RUNNER_ID = 'rnr_01J8Z3X0000000000000000002';
 const TARBALL = 'puck-runner-macos-arm64-0.1.0.tar.gz';
 
@@ -33,7 +34,8 @@ function fakeExec(calls: Call[], opts: { failConfig?: string; svc?: (sub: string
   const svcCount = new Map<string, number>();
   return async (file, args) => {
     calls.push({ file, args });
-    const dir = path.join(data, 'runner');
+    const socketAt = args.indexOf('--local-socket');
+    const dir = file === '/usr/bin/tar' ? args[args.indexOf('-C') + 1] : socketAt === -1 ? '' : path.dirname(args[socketAt + 1]);
     if (file === '/usr/bin/tar') {
       fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
       return { code: 0, stdout: '', stderr: '' };
@@ -65,10 +67,18 @@ function configName(args: string[]): string {
   return args[args.indexOf('--name') + 1];
 }
 
-async function signIn(): Promise<void> {
+function macDir(): string {
+  const id = current()?.user.id;
+  if (!id) throw new Error('not signed in');
+  return thisMac.pathsFor(data, id).dir;
+}
+
+async function signIn(name = 'octo'): Promise<void> {
+  login = name;
+  if (name !== 'octo') h.github.addUser(name);
   useServerDeps({
     openExternal: async (authorizeUrl) => {
-      const u = new URL(h.github.approve(authorizeUrl, 'octo'));
+      const u = new URL(h.github.approve(authorizeUrl, login));
       const cb = await fetch(h.base + u.pathname + u.search, { redirect: 'manual' });
       await fetch(cb.headers.get('location') as string);
     },
@@ -102,16 +112,16 @@ describe('This Mac runner', () => {
     const calls: Call[] = [];
     thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'feynman-mbp.local', dataDir: () => data, waitForSocket: async () => undefined });
     const record = await thisMac.install([]);
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     const node = path.join(dir, 'bin', 'node');
     const bundle = path.join(dir, 'bin', 'puck-runner.js');
-    expect(record).toEqual({ runnerId: RUNNER_ID, dir, socket: path.join(dir, 'local.sock') });
+    expect(record).toEqual({ runnerId: RUNNER_ID, dir, socket: path.join(dir, 'local.sock'), accountId: current()?.user.id });
     expect(localRunner()).toEqual(record);
     expect(calls[0]).toEqual({ file: '/usr/bin/tar', args: ['-xzf', path.join(dir, TARBALL), '-C', dir] });
     const config = calls[1];
     expect(config.file).toBe(node);
     expect(config.args.slice(0, 3)).toEqual([bundle, 'config', '--unattended']);
-    expect(config.args).toEqual(expect.arrayContaining(['--url', h.base, '--name', 'This Mac (feynman-mbp)', '--labels', 'local', '--local-socket', path.join(dir, 'local.sock')]));
+    expect(config.args).toEqual(expect.arrayContaining(['--url', h.base, '--name', 'This Mac (feynman-mbp)', '--labels', 'local', '--local-socket', path.join(dir, 'local.sock'), '--service-label', thisMac.serviceLabelFor(current()?.user.id ?? '')]));
     expect(config.args).not.toContain('--replace');
     expect(config.args.join(' ')).not.toMatch(/PRT_/); // the token travels in a file, never argv
     expect(calls.slice(2).map((c) => c.args.slice(1))).toEqual([
@@ -136,7 +146,7 @@ describe('This Mac runner', () => {
     expect(name).toMatch(/^This Mac \(MacBook-Pro [0-9a-f]{4}\)$/);
     expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,63}$/);
 
-    fs.rmSync(path.join(data, 'runner', '.runner'));
+    fs.rmSync(path.join(macDir(), '.runner'));
     setLocalRunner(null);
     calls.length = 0;
     await thisMac.install([other as never]);
@@ -147,7 +157,7 @@ describe('This Mac runner', () => {
   it('re-registers only the runner id this Mac recorded', async () => {
     const calls: Call[] = [];
     const own = 'rnr_01J8Z3X0000000000000000002';
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     setLocalRunner({ runnerId: own, dir, socket: path.join(dir, 'local.sock') });
     deps(fakeExec(calls), 'mbp.local');
     await thisMac.install([
@@ -160,7 +170,7 @@ describe('This Mac runner', () => {
 
   it('does not replace another Mac when the recorded id is not that runner', async () => {
     const calls: Call[] = [];
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     setLocalRunner({ runnerId: 'rnr_01J8Z3X0000000000000000008', dir, socket: path.join(dir, 'local.sock') });
     deps(fakeExec(calls), 'mbp');
     await thisMac.install([{ id: 'rnr_01J8Z3X0000000000000000099', name: 'This Mac (mbp)' } as never]);
@@ -169,7 +179,7 @@ describe('This Mac runner', () => {
   });
 
   it('installs the LaunchAgent when a recorded runner has no service, then waits for the socket', async () => {
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
     const calls: Call[] = [];
@@ -196,7 +206,7 @@ describe('This Mac runner', () => {
   });
 
   it('treats an already-running LaunchAgent as up', async () => {
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
     const calls: Call[] = [];
@@ -217,7 +227,7 @@ describe('This Mac runner', () => {
   });
 
   it('surfaces a LaunchAgent start failure and does not mark This Mac installed', async () => {
-    const dir = path.join(data, 'runner');
+    const dir = macDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
     const calls: Call[] = [];
@@ -260,7 +270,7 @@ describe('This Mac runner', () => {
     );
     await expect(thisMac.install([])).rejects.toThrow(/Operation not permitted/);
     expect(waited).toBe(0);
-    expect(fs.existsSync(path.join(data, 'runner', '.runner'))).toBe(true);
+    expect(fs.existsSync(path.join(macDir(), '.runner'))).toBe(true);
     expect(localRunner()?.runnerId ?? null).toBeNull();
     expect(thisMac.localState().installed).toBe(false);
   });
@@ -280,7 +290,7 @@ describe('This Mac runner', () => {
     );
     await expect(thisMac.install([])).rejects.toThrow(/does not match its published sha256/);
     expect(calls).toEqual([]);
-    expect(fs.existsSync(path.join(data, 'runner'))).toBe(false);
+    expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
     expect(thisMac.localState().error).toMatch(/sha256/);
     expect(createHash('sha256').update('tarball bytes').digest('hex')).toHaveLength(64);
@@ -290,7 +300,7 @@ describe('This Mac runner', () => {
     const calls: Call[] = [];
     thisMac.useThisMacDeps({ exec: fakeExec(calls, { failConfig: 'Docker is not running on this machine.' }), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
     await expect(thisMac.install([])).rejects.toThrow(/Registering the runner failed: Docker is not running/);
-    expect(fs.existsSync(path.join(data, 'runner'))).toBe(false);
+    expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
   });
 
@@ -307,7 +317,7 @@ describe('This Mac runner', () => {
     calls.length = 0;
     await thisMac.uninstall();
     expect(calls.map((c) => c.args.slice(1))).toEqual([['config', 'remove', '--unattended', '--keep-environments']]);
-    expect(fs.existsSync(path.join(data, 'runner'))).toBe(false);
+    expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
     expect(thisMac.localState()).toMatchObject({ installed: false, runnerId: null });
   });
@@ -315,5 +325,56 @@ describe('This Mac runner', () => {
   it('names This Mac after the host, safely', () => {
     expect(thisMac.localName('Feynman’s MacBook.local')).toBe('This Mac (Feynman-s MacBook)');
     expect(thisMac.localName('...')).toBe('This Mac');
+  });
+
+  it('keeps each account socket under 103 bytes', () => {
+    const dataDir = `/Users/${'n'.repeat(63)}`;
+    const a = thisMac.pathsFor(dataDir, `usr_${'A'.repeat(26)}`);
+    const b = thisMac.pathsFor(dataDir, `usr_${'B'.repeat(26)}`);
+    expect(Buffer.byteLength(a.socket)).toBeLessThanOrEqual(103);
+    expect(Buffer.byteLength(b.socket)).toBeLessThanOrEqual(103);
+    expect(a.dir).not.toBe(b.dir);
+    expect(thisMac.serviceLabelFor(`usr_${'A'.repeat(26)}`)).not.toBe(thisMac.serviceLabelFor(`usr_${'B'.repeat(26)}`));
+  });
+
+  it('lets a second account install beside the first and leaves the first runner in place', async () => {
+    const calls: Call[] = [];
+    deps(fakeExec(calls), 'mbp.local');
+    const aId = current()?.user.id ?? '';
+    await thisMac.install([]);
+    const aDir = thisMac.pathsFor(data, aId).dir;
+    const aLabel = thisMac.serviceLabelFor(aId);
+    expect(fs.existsSync(path.join(aDir, '.runner'))).toBe(true);
+    expect(calls[1].args).toContain(aLabel);
+    expect(thisMac.localState()).toMatchObject({ installed: true, runnerId: RUNNER_ID });
+
+    await account.logout();
+    expect(thisMac.localState().installed).toBe(false);
+    await signIn('bee');
+    expect(current()?.user.id).not.toBe(aId);
+    expect(thisMac.localState().installed).toBe(false);
+    expect(fs.existsSync(aDir)).toBe(true);
+
+    calls.length = 0;
+    await thisMac.install([]);
+    const bId = current()?.user.id ?? '';
+    const bDir = thisMac.pathsFor(data, bId).dir;
+    expect(bDir).not.toBe(aDir);
+    expect(fs.existsSync(path.join(aDir, '.runner'))).toBe(true);
+    expect(fs.existsSync(path.join(bDir, '.runner'))).toBe(true);
+    expect(calls[1].args).toContain(thisMac.serviceLabelFor(bId));
+    expect(calls[1].args).not.toContain(aLabel);
+    expect(calls[1].args).not.toContain('--replace');
+    expect(thisMac.localState()).toMatchObject({ installed: true });
+
+    await thisMac.uninstall();
+    expect(fs.existsSync(aDir)).toBe(true);
+    expect(fs.existsSync(bDir)).toBe(false);
+
+    await account.logout();
+    await signIn('octo');
+    expect(current()?.user.id).toBe(aId);
+    expect(thisMac.localState()).toMatchObject({ installed: true, runnerId: RUNNER_ID });
+    expect(localRunner()?.dir).toBe(aDir);
   });
 });
