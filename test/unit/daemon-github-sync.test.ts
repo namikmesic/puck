@@ -11,6 +11,7 @@ import {
   LIMITS,
   logTail,
   MAX_REVIEW_ROUNDS,
+  POLL,
   statusMarker,
   statusText,
   type SyncWork,
@@ -1046,13 +1047,14 @@ describe('review feedback and the trust filter', () => {
 /* ---------- CI ---------- */
 
 describe('CI on the published head', () => {
-  const run = (id: number, name: string, conclusion: string | null, status = 'completed') => ({
+  const run = (id: number, name: string, conclusion: string | null, status = 'completed', startedAt?: string) => ({
     id,
     name,
     status,
     conclusion,
     html_url: `https://github.com/octo/app/runs/${id}`,
     output: { title: `${name} ${conclusion ?? status}` },
+    ...(startedAt ? { started_at: startedAt } : {}),
   });
 
   it.each([
@@ -1123,9 +1125,73 @@ describe('CI on the published head', () => {
     expect(await sync.ciRerun(backlog.get(item.id) as ItemRecord)).toEqual({ rerun: 1 });
     expect(fake.gh.reruns).toEqual([50]);
     expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
-    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'success')]);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'success', 'completed', iso(clock + 1_000))]);
     await pollAll();
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([expect.stringMatching(/1 check failed/), 'W-1 PR #7: all 1 check passed.']);
+  });
+
+  it('does not report the failure a re-run has not replaced', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure', 'completed', iso(clock - 60_000))]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA, run_started_at: iso(clock - 60_000) }]);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+
+    const requested = clock;
+    expect(await sync.ciRerun(backlog.get(item.id) as ItemRecord)).toEqual({ rerun: 1 });
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    const checkReads = () => fake.gh.requests.filter((r) => r.method === 'GET' && r.path.includes('/check-runs')).length;
+    const readsAfterRerun = checkReads();
+
+    clock += POLL.tickMs;
+    await sync.poll();
+    expect(checkReads()).toBe(readsAfterRerun);
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+
+    sync.nudge('octo/app', 'checks', 7);
+    await sync.poll();
+    expect(checkReads()).toBe(readsAfterRerun + 1);
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    sync = build();
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    const started = iso(requested + 1_000);
+    const oldFailure = run(1, 'test', 'failure', 'completed', iso(requested - 60_000));
+    fake.gh.checkRuns.set(SHA, [oldFailure, run(9, 'retry', null, 'in_progress', started)]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'in_progress', conclusion: null, head_sha: SHA, run_started_at: started }]);
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    const finished = iso(requested + 2_000);
+    fake.gh.checkRuns.set(SHA, [oldFailure, run(9, 'retry', 'failure', 'completed', finished)]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA, run_started_at: finished }]);
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/1 check failed \(test\)/),
+      expect.stringMatching(/1 check failed \(retry\).*attempt 2 of 2/),
+    ]);
+    expect(followUps).toHaveLength(2);
+    expect(followUps[1].text).toContain('- retry:');
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(2);
+    expect(followUps).toHaveLength(2);
   });
 
   it('ci: fix queues the failure to the worker, up to maxCiFixAttempts', async () => {

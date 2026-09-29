@@ -23,8 +23,11 @@
  *   - CI on the pull request's head: check runs, commit statuses and the
  *     redacted log tails of failed workflow jobs. A success or failure is
  *     a notice; `ci: fix` also queues a follow-up whenever the item can
- *     take one, up to `maxCiFixAttempts`. Nothing reported settles as
- *     neutral and stays watched, so a check that appears later still reports.
+ *     take one, up to `maxCiFixAttempts`. After ci_rerun the watch stays
+ *     pending until a check or workflow run is still going or started
+ *     after the request, so the result that was re-run is not reported
+ *     again. Nothing reported settles as neutral and stays watched, so a
+ *     check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -50,6 +53,7 @@ import { capBytes } from './git';
 import {
   type GhCheckRun,
   type GhComment,
+  type GhRun,
   type GhCombinedStatus,
   type GhIssue,
   type GhReview,
@@ -246,6 +250,13 @@ const parseTime = (s: string | null | undefined, fallback: number): number => {
   const t = s ? Date.parse(s) : NaN;
   return Number.isNaN(t) ? fallback : t;
 };
+
+function rerunReady(checks: readonly GhCheckRun[], actions: readonly GhRun[], rerunAt: number): boolean {
+  const startedAfter = (value: string | null | undefined): boolean => parseTime(value, 0) > rerunAt;
+  if (checks.some((c) => c.status !== 'completed') || actions.some((r) => r.status !== 'completed')) return false;
+  if (checks.length > 0) return checks.some((c) => startedAfter(c.started_at));
+  return actions.some((r) => startedAfter(r.run_started_at));
+}
 
 /* ---------- The workflow ---------- */
 
@@ -766,8 +777,8 @@ export class GithubSync {
     this.kick();
   }
 
-  private watch(sha: string): CiWatch {
-    return { sha, state: 'pending', since: this.now(), failing: [], logs: [], failedRuns: [], notified: null };
+  private watch(sha: string, rerunAt: number | null = null): CiWatch {
+    return { sha, state: 'pending', since: this.now(), failing: [], logs: [], failedRuns: [], notified: null, rerunAt };
   }
 
   private async pollPull(itemId: string): Promise<void> {
@@ -953,10 +964,22 @@ export class GithubSync {
     const s = this.deps.store.get().items[itemId];
     const ci = s?.ci;
     if (!item?.pr || !repo || !ci || ci.notified === ci.sha) return;
-    const [runs, status] = await Promise.all([this.deps.api.checkRuns(repo.github, ci.sha), this.deps.api.combinedStatus(repo.github, ci.sha)]);
-    const result = evaluateChecks(runs.data ?? [], status.data ?? null, runs.incomplete === true || status.incomplete === true);
+    const awaitingRerun = ci.rerunAt != null;
+    const [polled, status, workflowRuns] = await Promise.all([
+      this.deps.api.checkRuns(repo.github, ci.sha),
+      this.deps.api.combinedStatus(repo.github, ci.sha),
+      awaitingRerun ? this.deps.api.runs(repo.github, ci.sha) : Promise.resolve([] as GhRun[]),
+    ]);
+    if (s.ci !== ci) return;
+    const rerunAt = ci.rerunAt;
+    let checks = polled.data ?? [];
+    if (rerunAt != null) {
+      if (!rerunReady(checks, workflowRuns, rerunAt)) return;
+      const fresh = checks.filter((c) => parseTime(c.started_at, 0) > rerunAt);
+      if (fresh.length > 0) checks = fresh;
+    }
+    const result = evaluateChecks(checks, status.data ?? null, polled.incomplete === true || status.incomplete === true);
     const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
-    if (s.ci !== ci) return; // a publish replaced the watch meanwhile
     ci.failing = result.failing;
     if (state === 'failure') {
       try {
@@ -1083,10 +1106,9 @@ export class GithubSync {
       );
     }
     const current = this.syncOf(item.id);
-    current.ci = { ...this.watch(ci.sha) };
+    current.ci = this.watch(ci.sha, this.now());
     this.save();
     this.patchPr(item, { checks: { sha: ci.sha, state: 'pending', failing: [] } });
-    this.last.delete(`checks:${item.id}`);
     this.kick(POLL.checksMs);
     return { rerun: runs.length };
   }

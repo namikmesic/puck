@@ -90,6 +90,7 @@ export interface GhCheckRun {
   html_url: string | null;
   details_url?: string | null;
   output?: { title?: string | null; summary?: string | null };
+  started_at?: string | null;
 }
 
 export interface GhCombinedStatus {
@@ -104,6 +105,7 @@ export interface GhRun {
   status: string;
   conclusion: string | null;
   head_sha: string;
+  run_started_at?: string | null;
 }
 
 export interface GhJob {

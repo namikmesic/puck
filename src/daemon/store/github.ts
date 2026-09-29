@@ -44,6 +44,8 @@ export interface CiWatch {
   failedRuns: number[];
   /** The sha whose success or failure was reported. Neutral is not reported, so a later check still is. */
   notified: string | null;
+  /** ci_rerun request time for this sha, or null when none is outstanding. */
+  rerunAt: number | null;
 }
 
 export interface ItemSync {
@@ -101,7 +103,10 @@ function normalizeSync(raw: Partial<ItemSync>): ItemSync {
     seen: Array.isArray(raw.seen) ? raw.seen.filter((k): k is string => typeof k === 'string') : [],
     feedback: Array.isArray(raw.feedback) ? raw.feedback.filter((f) => f && typeof f.key === 'string') : [],
     reviewRounds: typeof raw.reviewRounds === 'number' ? raw.reviewRounds : 0,
-    ci: raw.ci && typeof raw.ci.sha === 'string' ? { ...raw.ci, logs: raw.ci.logs ?? [], failedRuns: nums(raw.ci.failedRuns) } : base.ci,
+    ci:
+      raw.ci && typeof raw.ci.sha === 'string'
+        ? { ...raw.ci, logs: raw.ci.logs ?? [], failedRuns: nums(raw.ci.failedRuns), rerunAt: typeof raw.ci.rerunAt === 'number' ? raw.ci.rerunAt : null }
+        : base.ci,
     ciFixAttempts: typeof raw.ciFixAttempts === 'number' ? raw.ciFixAttempts : 0,
   };
 }
