@@ -94,3 +94,17 @@ export function loginItemName(plist: string): string | null {
 export function launchAgentNamesApp(plist: string, bundleId: string): boolean {
   return plist.includes('<key>AssociatedBundleIdentifiers</key>') && plist.includes(`<string>${xml(bundleId)}</string>`);
 }
+
+/** True when `launchctl bootout` failed because that label is not loaded. */
+export function launchdNotLoaded(code: number | null, output: string): boolean {
+  return code === 3 || /No such process|Could not find (specified )?service/i.test(output);
+}
+
+/** Program basename from `launchctl print`: the name Login Items shows for the loaded job. */
+export function launchdPrintedProgram(printStdout: string): string | null {
+  const program = /^\s*program = (.+)$/m.exec(printStdout)?.[1]?.trim();
+  if (!program) return null;
+  const slash = program.lastIndexOf('/');
+  const base = (slash === -1 ? program : program.slice(slash + 1)).trim();
+  return base || null;
+}

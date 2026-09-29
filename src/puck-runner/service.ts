@@ -14,8 +14,10 @@
  * names the background item after the executable; the plist names the
  * app's bundle id in AssociatedBundleIdentifiers when the runner was
  * configured with one (This Mac). Installing again rewrites that agent
- * in place. `start` bootstraps the agent and then
- * kickstarts it: launchd may hold a freshly loaded RunAtLoad job back
+ * in place, and unloads the previous label when it changes (nothing
+ * loaded is fine). `start` unloads this label the same way, bootstraps
+ * the plist just written, and kickstarts it: launchd keeps a previously
+ * loaded definition, and may hold a freshly loaded RunAtLoad job back
  * ("pended nondemand spawn"), so loading alone does not start the runner.
  *
  * The installed unit is recorded in `.service`, so `start`, `stop`,
@@ -27,7 +29,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { LAUNCHER, launcherPath, launcherScript, launchdPlist, loginItemName } from '../harness/launch-agent';
+import { LAUNCHER, launchdNotLoaded, launchdPrintedProgram, launcherPath, launcherScript, launchdPlist, loginItemName } from '../harness/launch-agent';
 import { writeFileAtomic, type RunnerConfig, type RunnerPaths } from './files';
 import type { Exec } from './update';
 
@@ -145,19 +147,28 @@ export class Service {
     return r.stdout;
   }
 
-  /** Loads the LaunchAgent (an already loaded one is fine) and starts it. */
+  /** Unloads `name` when it is loaded. A label that is not loaded is fine; any other failure is not. */
+  private async bootoutLabel(name: string): Promise<void> {
+    const r = await this.deps.exec('launchctl', ['bootout', `${this.domain}/${name}`], { timeoutMs: 60_000 });
+    if (r.code === 0 || launchdNotLoaded(r.code, `${r.stderr}\n${r.stdout}`)) return;
+    throw new ServiceError(`launchctl bootout failed: ${why(r)}`);
+  }
+
+  /** The name Login Items shows for the job launchd has loaded, or the plist just written. */
+  private async loadedItemName(r: ServiceRecord): Promise<string> {
+    const printed = await this.deps.exec('launchctl', ['print', `${this.domain}/${r.name}`], { timeoutMs: 60_000 });
+    return launchdPrintedProgram(printed.stdout) ?? backgroundItemName(r.file);
+  }
+
+  /** Unloads this label, bootstraps the plist on disk, and kickstarts that job. */
   private async startLaunchd(r: ServiceRecord): Promise<void> {
-    const target = `${this.domain}/${r.name}`;
-    const boot = await this.deps.exec('launchctl', ['bootstrap', this.domain, r.file], { timeoutMs: 60_000 });
-    if (boot.code !== 0) {
-      const loaded = await this.deps.exec('launchctl', ['print', target], { timeoutMs: 60_000 });
-      if (loaded.code !== 0) throw new ServiceError(`launchctl bootstrap failed: ${why(boot)}`);
-    }
-    const kick = await this.deps.exec('launchctl', ['kickstart', target], { timeoutMs: 60_000 });
+    await this.bootoutLabel(r.name);
+    await this.must('launchctl', ['bootstrap', this.domain, r.file], 'launchctl bootstrap');
+    const kick = await this.deps.exec('launchctl', ['kickstart', `${this.domain}/${r.name}`], { timeoutMs: 60_000 });
     if (kick.code !== 0) {
       throw new ServiceError(
         `launchd did not start ${r.name} (launchctl kickstart: ${why(kick)}). ` +
-          `Check that ${backgroundItemName(r.file)} is allowed in System Settings → General → Login Items & Extensions, and see ${path.join(this.deps.paths.root, '_diag', 'service.log')}.`,
+          `Check that ${await this.loadedItemName(r)} is allowed in System Settings → General → Login Items & Extensions, and see ${path.join(this.deps.paths.root, '_diag', 'service.log')}.`,
       );
     }
   }
@@ -199,6 +210,8 @@ export class Service {
       const label = launchdLabel(this.deps.config.name, this.deps.config.serviceLabel);
       const file = path.join(this.deps.homedir, 'Library', 'LaunchAgents', `${label}.plist`);
       const launcher = launcherPath(this.deps.paths.root);
+      const previousName = existing?.kind === 'launchd' && existing.name !== label ? existing.name : null;
+      if (previousName) await this.bootoutLabel(previousName);
       if (existing?.kind === 'launchd' && existing.file !== file) fs.rmSync(existing.file, { force: true });
       fs.mkdirSync(path.join(this.deps.paths.root, '_diag'), { recursive: true, mode: 0o700 });
       writeFileAtomic(launcher, launcherScript(), 0o755);

@@ -72,7 +72,7 @@ background, install it as a service with ./svc.sh.
 Commands:
   install [user]   Install the service (Linux: a systemd unit, run with sudo, for [user]
                    or the user who ran sudo; macOS: a LaunchAgent for you, without sudo)
-  start            Start it (macOS: load the LaunchAgent and start it now)
+  start            Start it (macOS: unload the LaunchAgent if it is loaded, then load and start it)
   stop             Stop it (environments keep running)
   status           Show its status
   uninstall        Stop and remove it

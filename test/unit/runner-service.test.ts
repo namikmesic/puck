@@ -28,7 +28,7 @@ const config: RunnerConfig = {
   appBundleId: null,
 };
 
-type Reply = { code: number; stderr: string } | null;
+type Reply = { code: number; stderr: string; stdout?: string } | null;
 
 function deps(platform: NodeJS.Platform, uid: number, env: NodeJS.ProcessEnv = {}, groups = 'puck docker', reply: (call: string) => Reply = () => null) {
   const calls: string[] = [];
@@ -44,7 +44,7 @@ function deps(platform: NodeJS.Platform, uid: number, env: NodeJS.ProcessEnv = {
       const call = [file, ...args].join(' ');
       calls.push(call);
       const r = reply(call);
-      if (r) return { code: r.code, stdout: '', stderr: r.stderr };
+      if (r) return { code: r.code, stdout: r.stdout ?? '', stderr: r.stderr };
       return { code: 0, stdout: file === 'id' ? groups : '', stderr: '' };
     },
     print: (l) => lines.push(l),
@@ -167,8 +167,10 @@ describe('runner service', () => {
     await svc.status();
     await svc.uninstall();
     expect(calls).toEqual([
+      'launchctl bootout gui/501/com.puck.runner.build-box-2',
       `launchctl bootstrap gui/501 ${plist}`,
       'launchctl kickstart gui/501/com.puck.runner.build-box-2',
+      'launchctl bootout gui/501/com.puck.runner.build-box-2',
       'launchctl bootout gui/501/com.puck.runner.build-box-2',
       `launchctl bootstrap gui/501 ${plist}`,
       'launchctl kickstart gui/501/com.puck.runner.build-box-2',
@@ -180,24 +182,70 @@ describe('runner service', () => {
     await expect(new Service(deps('darwin', 0).d).install()).rejects.toThrow('without sudo');
   });
 
-  it('starts a LaunchAgent that is already loaded', async () => {
+  it('unloads a LaunchAgent that is already loaded, then starts the plist on disk', async () => {
+    const { d, calls } = deps('darwin', 501);
+    const svc = new Service(d);
+    await svc.install();
+    const file = readServiceRecord(d.paths)?.file as string;
+    calls.length = 0;
+    await svc.start();
+    expect(calls).toEqual([
+      'launchctl bootout gui/501/com.puck.runner.build-box-2',
+      `launchctl bootstrap gui/501 ${file}`,
+      'launchctl kickstart gui/501/com.puck.runner.build-box-2',
+    ]);
+    expect(fs.readFileSync(file, 'utf8')).toContain(`<string>${path.join(d.paths.root, 'puck-runner')}</string>`);
+  });
+
+  it('bootstraps when the LaunchAgent is not already loaded', async () => {
+    const { d, calls } = deps('darwin', 501, {}, '', (call) =>
+      call.startsWith('launchctl bootout') ? { code: 3, stderr: 'Boot-out failed: 3: No such process' } : null,
+    );
+    const svc = new Service(d);
+    await svc.install();
+    const file = readServiceRecord(d.paths)?.file as string;
+    calls.length = 0;
+    await svc.start();
+    expect(calls).toEqual([
+      'launchctl bootout gui/501/com.puck.runner.build-box-2',
+      `launchctl bootstrap gui/501 ${file}`,
+      'launchctl kickstart gui/501/com.puck.runner.build-box-2',
+    ]);
+  });
+
+  it('bootstraps when bootout reports the LaunchAgent is missing', async () => {
+    const { d, calls } = deps('darwin', 501, {}, '', (call) =>
+      call.startsWith('launchctl bootout') ? { code: 113, stderr: 'Could not find service' } : null,
+    );
+    const svc = new Service(d);
+    await svc.install();
+    calls.length = 0;
+    await svc.start();
+    expect(calls[0]).toBe('launchctl bootout gui/501/com.puck.runner.build-box-2');
+    expect(calls[1]).toContain('launchctl bootstrap');
+    expect(calls[2]).toContain('launchctl kickstart');
+  });
+
+  it('does not bootstrap a LaunchAgent it failed to unload', async () => {
+    const { d, calls } = deps('darwin', 501, {}, '', (call) =>
+      call.startsWith('launchctl bootout') ? { code: 1, stderr: 'Operation not permitted' } : null,
+    );
+    const svc = new Service(d);
+    await svc.install();
+    calls.length = 0;
+    await expect(svc.start()).rejects.toThrow('launchctl bootout failed: Operation not permitted');
+    expect(calls).toEqual(['launchctl bootout gui/501/com.puck.runner.build-box-2']);
+  });
+
+  it('reports a LaunchAgent that does not load, and does not try to start it', async () => {
     const { d, calls } = deps('darwin', 501, {}, '', (call) =>
       call.startsWith('launchctl bootstrap') ? { code: 5, stderr: 'Bootstrap failed: 5: Input/output error' } : null,
     );
     const svc = new Service(d);
     await svc.install();
-    await svc.start();
-    expect(calls.slice(1)).toEqual(['launchctl print gui/501/com.puck.runner.build-box-2', 'launchctl kickstart gui/501/com.puck.runner.build-box-2']);
-  });
-
-  it('reports a LaunchAgent that does not load, and does not try to start it', async () => {
-    const { d, calls } = deps('darwin', 501, {}, '', (call) =>
-      call.startsWith('launchctl bootstrap') ? { code: 5, stderr: 'Bootstrap failed: 5: Input/output error' } : call.startsWith('launchctl print') ? { code: 113, stderr: 'Could not find service' } : null,
-    );
-    const svc = new Service(d);
-    await svc.install();
     await expect(svc.start()).rejects.toThrow('launchctl bootstrap failed: Bootstrap failed: 5: Input/output error');
     expect(calls.some((c) => c.includes('kickstart'))).toBe(false);
+    expect(calls.some((c) => c.includes('bootout'))).toBe(true);
   });
 
   it('rewrites an installed LaunchAgent that still runs run.sh', async () => {
@@ -214,6 +262,35 @@ describe('runner service', () => {
     expect(text).toContain('<string>com.namikmesic.puck</string>');
     expect(text).not.toContain('run.sh');
     expect(calls).toEqual([]);
+    await svc.start();
+    expect(calls).toEqual([
+      'launchctl bootout gui/501/com.puck.runner.build-box-2',
+      `launchctl bootstrap gui/501 ${file}`,
+      'launchctl kickstart gui/501/com.puck.runner.build-box-2',
+    ]);
+  });
+
+  it('unloads the previous LaunchAgent when install changes its label', async () => {
+    const { d, calls } = deps('darwin', 501, {}, '', (call) =>
+      call.startsWith('launchctl bootout') ? { code: 3, stderr: 'Boot-out failed: 3: No such process' } : null,
+    );
+    await new Service(d).install();
+    const oldFile = readServiceRecord(d.paths)?.file as string;
+    calls.length = 0;
+    const next = new Service({ ...d, config: { ...config, serviceLabel: 'com.puck.runner.aaaaaaaa' } });
+    await next.install();
+    expect(calls).toEqual(['launchctl bootout gui/501/com.puck.runner.build-box-2']);
+    expect(fs.existsSync(oldFile)).toBe(false);
+    const record = readServiceRecord(d.paths);
+    expect(record?.name).toBe('com.puck.runner.aaaaaaaa');
+    const file = record?.file as string;
+    calls.length = 0;
+    await next.start();
+    expect(calls).toEqual([
+      'launchctl bootout gui/501/com.puck.runner.aaaaaaaa',
+      `launchctl bootstrap gui/501 ${file}`,
+      'launchctl kickstart gui/501/com.puck.runner.aaaaaaaa',
+    ]);
   });
 
   it('still refuses a second systemd install', async () => {
@@ -229,6 +306,19 @@ describe('runner service', () => {
     await svc.install();
     const file = readServiceRecord(d.paths)?.file as string;
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\/puck-runner</, '/run.sh<'));
+    await expect(svc.start()).rejects.toThrow(/Check that run\.sh is allowed in System Settings → General → Login Items & Extensions/);
+  });
+
+  it('names the login item launchd loaded when kickstart fails', async () => {
+    const { d } = deps('darwin', 501, {}, '', (call) => {
+      if (call.startsWith('launchctl kickstart')) return { code: 1, stderr: 'Operation not permitted' };
+      if (call.startsWith('launchctl print')) return { code: 0, stderr: '', stdout: 'gui/501/com.puck.runner.build-box-2 = {\n\tprogram = /var/folders/xx/T/puck-isolated-1/run.sh\n}\n' };
+      return null;
+    });
+    const svc = new Service(d);
+    await svc.install();
+    const file = readServiceRecord(d.paths)?.file as string;
+    expect(fs.readFileSync(file, 'utf8')).toContain('/puck-runner<');
     await expect(svc.start()).rejects.toThrow(/Check that run\.sh is allowed in System Settings → General → Login Items & Extensions/);
   });
 

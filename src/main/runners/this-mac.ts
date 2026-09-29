@@ -13,10 +13,12 @@
  * <dir>/local.sock --app-bundle-id <Puck's>` with a registration token read
  * from a 0600 file (then revoked), and `svc install` + `svc start`. Then the
  * app kickstarts the LaunchAgent itself: launchd may hold a freshly loaded
- * job back, and an older runner release's `svc start` only loads it. A
- * LaunchAgent left from that older install — its program is not the
- * puck-runner launcher, or its plist names no app — is rewritten with
- * `svc install`, then bootout, bootstrap and kickstart. The
+ * job back, and an older runner release's `svc start` only loads it. That
+ * kickstart unloads the recorded agent when one is loaded and bootstraps
+ * its plist, so the job that runs is the plist on disk. A LaunchAgent left
+ * from an older install — its program is not the puck-runner launcher, or
+ * its plist names no app — is rewritten first, including one an older
+ * `svc install` just wrote. The
  * app's Electron binary is not used as a Node runtime: packaged builds
  * switch that off (the RunAsNode fuse), and the runner updates itself from
  * the server like any other.
@@ -40,7 +42,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LocalRunnerState } from '../../harness/bridge';
-import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdPlist, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
+import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdNotLoaded, launchdPlist, launchdPrintedProgram, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
 import type { ServerRunner } from '../../harness/server-api';
 import { ISOLATED_ENV } from '../isolation';
 import { log } from '../log';
@@ -246,9 +248,13 @@ function installedService(dir: string, fallback: string): InstalledService | nul
   }
 }
 
-/** The file name Login Items shows for the recorded agent. */
-function recordedItemName(dir: string, label: string): string {
+/** The name Login Items shows for the job launchd has loaded, or for the plist on disk. */
+async function shownItemName(dir: string, label: string): Promise<string> {
   const rec = installedService(dir, label);
+  const name = rec?.name ?? label;
+  const printed = await d().exec('/bin/launchctl', ['print', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  const fromJob = launchdPrintedProgram(printed.stdout);
+  if (fromJob) return fromJob;
   if (!rec) return LAUNCHER;
   try {
     return loginItemName(fs.readFileSync(rec.file, 'utf8')) ?? LAUNCHER;
@@ -303,21 +309,39 @@ function placeLaunchAgent(dir: string, rec: InstalledService): void {
   }
 }
 
-/** Starts the loaded LaunchAgent; a no-op when it already runs. */
+/** Unloads `name`. A label that is not loaded is fine; any other failure is not. */
+async function bootoutLabel(name: string): Promise<void> {
+  const r = await d().exec('/bin/launchctl', ['bootout', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  if (r.code === 0 || launchdNotLoaded(r.code, `${r.stderr}\n${r.stdout}`)) return;
+  const why = (r.stderr || r.stdout).trim().slice(-300) || `exit ${r.code}`;
+  throw new Error(`launchctl bootout failed: ${why}`);
+}
+
+/** Unloads the recorded agent and bootstraps its plist, so kickstart runs that plist. */
+async function loadRecorded(dir: string, label: string): Promise<void> {
+  const rec = installedService(dir, label);
+  if (!rec) return;
+  await bootoutLabel(rec.name);
+  if (rec.name !== label) await bootoutLabel(label);
+  const boot = await d().exec('/bin/launchctl', ['bootstrap', `gui/${d().uid}`, rec.file], { timeoutMs: 30_000 });
+  if (boot.code !== 0) {
+    const why = (boot.stderr || boot.stdout).trim().slice(-300) || `exit ${boot.code}`;
+    throw new Error(`launchctl bootstrap failed: ${why}`);
+  }
+}
+
+/** Loads the recorded plist and kickstarts that job. */
 async function kickstart(dir: string, label: string): Promise<void> {
+  await loadRecorded(dir, label);
   const name = installedService(dir, label)?.name ?? label;
   const r = await d().exec('/bin/launchctl', ['kickstart', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
   if (r.code !== 0) {
     const why = (r.stderr || r.stdout).trim().slice(-300) || `exit ${r.code}`;
-    throw new Error(`launchd did not start the runner (${why}). Check that ${recordedItemName(dir, label)} is allowed in System Settings → General → Login Items & Extensions.`);
+    throw new Error(`launchd did not start the runner (${why}). Check that ${await shownItemName(dir, label)} is allowed in System Settings → General → Login Items & Extensions.`);
   }
 }
 
-async function bootout(name: string): Promise<void> {
-  await d().exec('/bin/launchctl', ['bootout', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
-}
-
-/** Rewrites a stale LaunchAgent through `svc install`, then loads that plist. */
+/** Rewrites a stale LaunchAgent through `svc install`. Kickstart then loads that plist. */
 async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => void): Promise<void> {
   const previous = installedService(dir, label);
   if (!previous) throw new Error('No LaunchAgent is installed.');
@@ -335,14 +359,8 @@ async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => v
   gate();
   const next = installedService(dir, label) ?? previous;
   placeLaunchAgent(dir, next);
-  await bootout(previous.name);
-  if (next.name !== previous.name) await bootout(next.name);
+  if (previous.name !== next.name) await bootoutLabel(previous.name);
   gate();
-  const boot = await d().exec('/bin/launchctl', ['bootstrap', `gui/${d().uid}`, next.file], { timeoutMs: 30_000 });
-  if (boot.code !== 0) {
-    const why = (boot.stderr || boot.stdout).trim().slice(-300) || `exit ${boot.code}`;
-    throw new Error(`launchctl bootstrap failed: ${why}`);
-  }
 }
 
 async function startRecorded(dir: string, socket: string, label: string, gate: () => void): Promise<void> {
@@ -357,7 +375,15 @@ async function startRecorded(dir: string, socket: string, label: string, gate: (
       if (message.includes('No service is installed')) {
         await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
         gate();
-        await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+        if (recordedAgentStale(dir, label)) {
+          const rec = installedService(dir, label);
+          if (rec) {
+            ensureAppBundleId(dir);
+            placeLaunchAgent(dir, rec);
+          }
+        } else {
+          await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+        }
       } else if (!serviceAlreadyUp(message)) {
         throw err;
       }
