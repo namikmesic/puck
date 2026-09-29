@@ -6,8 +6,9 @@
  * Boot: migrate the state format (a failure leaves the daemon `failed`,
  * answering only the handshake, snapshots and logs) → open the socket so
  * the app can watch → ingest the inbox → provision → reconcile what a
- * restart interrupted (sessions become interrupted; running work items go
- * back to queued without counting an attempt) → make sure the orchestrator
+ * restart interrupted (an unfinished turn becomes interrupted; a transcript
+ * that already finished is left idle and is not resumed; running work items
+ * go back to queued without counting an attempt) → make sure the orchestrator
  * session exists → resume those turns → ready → start the scheduler and
  * the orchestrator's wake loop.
  *
@@ -187,6 +188,7 @@ export class Daemon {
         sessions: sessionsStore(paths.state),
         transcripts: this.transcripts,
         emit: (ev) => this.emit(ev),
+        retained: () => (this.events.since(this.events.oldest() - 1) ?? []).map((e) => e.ev),
         log,
         agentFor: (s) => this.agentFor(s),
         envFor: () => this.harnessEnv(),

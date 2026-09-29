@@ -19,7 +19,13 @@
  *     content, the id is dropped and the turn silently retries once fresh.
  *     An id we only attempted is never persisted, even when echoed back;
  *   - always ends with a turn-end (synthesized if the adapter did not send
- *     one), then starts the next queued input.
+ *     one). The transcript is fsynced before the turn is finalized, before
+ *     the session record says the turn is over, and before `turn.end` is
+ *     published. Queued text or pending notices start only after that. A
+ *     failed transcript fsync keeps the handoff and the chosen end status
+ *     (idle, or interrupted after shutdown or upgrade) and is retried until
+ *     it lands, even if the session was closed meanwhile. A `turn.end` the
+ *     event log refuses is retried until appended.
  *
  * Interrupting a turn cancels its open questions and aborts the adapter.
  * An interrupt from shutdown or upgrade leaves the session `interrupted`,
@@ -27,9 +33,9 @@
  *
  * Worker sessions belong to work items: `canStart` keeps them from starting
  * on their own (the scheduler starts them), `onTurnEnd` hands each finished
- * turn to the item logic before the next queued input may start, and
- * `routeAsk` decides whether a question waits for the user or the
- * orchestrator.
+ * turn to the item logic only after the turn-end transcript fsync and before
+ * the next queued input may start, and `routeAsk` decides whether a question
+ * waits for the user or the orchestrator.
  */
 
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
@@ -47,6 +53,7 @@ import {
   type Notice,
   type TranscriptEntry,
   type TurnEntry,
+  type UserEntry,
 } from '../harness/transcript';
 import { isStaleResumeError } from '../harness/resume';
 import { harnessDescriptorById } from '../harness/providers';
@@ -64,6 +71,8 @@ export interface TurnsDeps {
   sessions: JsonStore<SessionMap>;
   transcripts: TranscriptBook;
   emit(ev: DaemonEvent): void;
+  /** Every event the event log still retains, oldest first. Read at boot and on rare recovery paths. */
+  retained(): DaemonEvent[];
   log: Logger;
   /** The effective agent for a session (instructions composed), or null if it is gone. */
   agentFor(session: SessionRecord): DaemonAgent | null;
@@ -75,7 +84,7 @@ export interface TurnsDeps {
   commitNotices(count: number): void;
   /** False keeps a session's queued input waiting (a worker whose item holds no slot). Default: true. */
   canStart?(session: SessionRecord): boolean;
-  /** Awaited after every turn, before the session's next queued input may start. */
+  /** Awaited once the turn-end transcript is durable, before the end status is committed and before the next input may start. */
   onTurnEnd?(session: SessionRecord, outcome: TurnOutcome): Promise<void> | void;
   /** Where a new question waits. Default: the user. */
   routeAsk?(session: SessionRecord, askId: string, questions: AskQuestion[]): 'user' | 'orchestrator';
@@ -90,6 +99,8 @@ export interface TurnsDeps {
   /** Extra summary fields (the orchestrator's auto-wake state). */
   summaryExtra?(session: SessionRecord): Partial<SessionSummary>;
   now?: () => number;
+  /** How often a held end is retried: the transcript commit, then `turn.end`, then a start that waited. */
+  endRetryMs?: number;
 }
 
 export type AskCloser = 'user' | 'orchestrator' | 'cancelled';
@@ -106,6 +117,17 @@ export interface TurnOutcome {
   entry: TurnEntry | null;
   /** Notices this turn delivered (orchestrator only). */
   notices: Notice[];
+}
+
+type TurnEndEvent = Extract<DaemonEvent, { kind: 'turn.end' }>;
+
+interface HeldEnd {
+  ev: TurnEndEvent;
+  status: 'idle' | 'interrupted';
+  outcome: TurnOutcome;
+  landed: boolean;
+  finalized: boolean;
+  released: boolean;
 }
 
 interface PendingAsk {
@@ -131,6 +153,8 @@ interface ActiveTurn {
 
 const ZERO_STATS: TurnStats = { inputTokens: 0, outputTokens: 0, durationMs: 0 };
 
+const END_RETRY_MS = 1000;
+
 /** Sent when a restart resumes an interrupted turn. Kept in the input queue, not a new store. */
 export const RESUME_PROMPT = 'Continue.';
 
@@ -152,6 +176,13 @@ export class Turns {
   private readonly asks = new Map<string, PendingAsk>();
   private accepting = true;
   private readonly now: () => number;
+  /** `turn.end` events not yet appended, by turn id, until an append succeeds. */
+  private readonly unsentEnds = new Map<string, TurnEndEvent>();
+  private readonly heldEnds = new Map<string, HeldEnd>();
+  private readonly releasing = new Map<string, Promise<boolean>>();
+  private endTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Sessions whose start waited on a held end; started once it lands. */
+  private readonly blockedStarts = new Set<string>();
 
   constructor(private readonly deps: TurnsDeps) {
     this.now = deps.now ?? Date.now;
@@ -245,27 +276,235 @@ export class Turns {
    * Boot reconciliation: a session whose turn was in flight when the daemon
    * stopped becomes `interrupted`, and its unfinished turn entry is closed
    * (unanswered questions marked dismissed, an error and a turn-end
-   * appended) so replay renders a finished turn. Returns the sessions touched.
+   * appended) so replay renders a finished turn. The closed entry is
+   * fsynced before the session record changes, and a session an earlier
+   * boot already marked interrupted gets the same close if its entry is
+   * still open. A session still `running` whose transcript already finished
+   * is marked idle and is not resumed. Its turn count, last-turn tokens, and
+   * last-active time come from the transcript header, and that turn's cost
+   * is added only when the session's last-active time does not already match
+   * the header, so a queue write that already stored the end snapshot is not
+   * counted twice. A session an orderly shutdown left
+   * `interrupted` stays interrupted so the next boot resumes it. Every turn
+   * the event log started without ending gets a `turn.end`. Returns the
+   * sessions that became interrupted.
    */
   reconcile(): SessionRecord[] {
     const touched: SessionRecord[] = [];
     const at = this.now();
+    let dirty = false;
     for (const session of this.list()) {
-      if (session.status !== 'running') continue;
-      session.status = 'interrupted';
-      touched.push(session);
-      const log = this.deps.transcripts.get(session.id).log;
-      const last = [...log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
+      if (session.status !== 'running' && session.status !== 'interrupted') continue;
+      if (this.needsRelease(session.id)) continue;
+      const transcript = this.deps.transcripts.get(session.id);
+      const last = [...transcript.log].reverse().find((e): e is TurnEntry => e.kind === 'turn');
+      if (
+        session.status === 'running' &&
+        last &&
+        finishedTurn(last.events) &&
+        (!session.handoff || session.handoff.turnId === last.turnId)
+      ) {
+        const stats = finishedStats(last.events);
+        if (session.lastActiveAt !== transcript.lastActiveAt && stats && typeof stats.costUsd === 'number') {
+          session.costUsd += stats.costUsd;
+        }
+        session.turns = transcript.turns;
+        session.lastTurnTokens = transcript.lastTurnTokens;
+        session.lastActiveAt = transcript.lastActiveAt;
+        session.status = 'idle';
+        if (session.handoff) delete session.handoff;
+        dirty = true;
+        continue;
+      }
       if (last && !last.events.some((e) => e.kind === 'turn-end')) {
         for (const e of last.events) if (e.kind === 'ask' && e.answers === undefined) e.answers = null;
         last.events.push({ kind: 'error', message: RESTART_ERROR, ts: at });
         last.events.push({ kind: 'turn-end', stats: ZERO_STATS, ts: at });
-        this.deps.transcripts.saveNow(session.id);
+        try {
+          this.deps.transcripts.commit(session.id);
+        } catch (err) {
+          // The session still becomes interrupted; the next boot closes the entry.
+          this.deps.log.error('turn.reconcile-failed', err, { sessionId: session.id });
+        }
+      }
+      if (session.status === 'running') {
+        session.status = 'interrupted';
+        touched.push(session);
+        dirty = true;
       }
     }
-    if (touched.length) this.deps.sessions.save();
+    if (dirty) this.deps.sessions.save();
     this.restoreQueues();
+    this.endOrphanTurns();
     return touched;
+  }
+
+  /** Publish a `turn.end` for every retained `turn.start` that has none. */
+  private endOrphanTurns(): void {
+    const open = new Map<string, { sessionId: string; turnId: string }>();
+    for (const ev of this.deps.retained()) {
+      if (ev.kind === 'turn.start') open.set(ev.turnId, { sessionId: ev.sessionId, turnId: ev.turnId });
+      else if (ev.kind === 'turn.end') open.delete(ev.turnId);
+    }
+    const running = new Set([...this.active.values()].map((t) => t.turnId));
+    for (const { sessionId, turnId } of open.values()) {
+      if (running.has(turnId) || this.unsentEnds.has(turnId) || this.heldEnds.has(turnId)) continue;
+      this.publishEnd({ kind: 'turn.end', sessionId, turnId, stats: this.statsFor(sessionId, turnId) });
+    }
+  }
+
+  /** Stats of a clean transcript turn-end, or zeros when the turn did not finish. */
+  private statsFor(sessionId: string, turnId: string): TurnStats {
+    if (!this.get(sessionId)) return { ...ZERO_STATS };
+    const log = this.deps.transcripts.get(sessionId).log;
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i];
+      if (entry.kind !== 'turn' || entry.turnId !== turnId) continue;
+      return finishedStats(entry.events) ?? { ...ZERO_STATS };
+    }
+    return { ...ZERO_STATS };
+  }
+
+  /** Append a `turn.end`. One the event log refuses is kept and retried until it lands. */
+  private publishEnd(ev: TurnEndEvent): void {
+    this.unsentEnds.set(ev.turnId, ev);
+    this.sendEnds(ev.sessionId);
+  }
+
+  /** Retry held `turn.end`s (one session's, or all). True when none of them is left. */
+  private sendEnds(sessionId?: string): boolean {
+    let left = false;
+    for (const [turnId, ev] of [...this.unsentEnds]) {
+      if (sessionId !== undefined && ev.sessionId !== sessionId) continue;
+      try {
+        this.deps.emit(ev);
+        this.unsentEnds.delete(turnId);
+      } catch (err) {
+        left = true;
+        this.deps.log.error('turn.end-unrecorded', err, { sessionId: ev.sessionId, turnId });
+      }
+    }
+    this.armEndRetry();
+    return !left;
+  }
+
+  private needsRelease(sessionId: string): boolean {
+    for (const held of this.heldEnds.values()) if (held.ev.sessionId === sessionId && !held.released) return true;
+    return false;
+  }
+
+  private shouldWake(session: SessionRecord): boolean {
+    if ((this.queues.get(session.id)?.length ?? 0) > 0) return true;
+    return session.kind === 'orchestrator' && this.deps.peekNotices().length > 0;
+  }
+
+  private releaseTurn(session: SessionRecord): Promise<boolean> {
+    const existing = this.releasing.get(session.id);
+    if (existing) return existing;
+    let resolve: (ok: boolean) => void = () => undefined;
+    const job = new Promise<boolean>((r) => {
+      resolve = r;
+    });
+    this.releasing.set(session.id, job);
+    void this.finishRelease(session).then(
+      (ok) => {
+        if (this.releasing.get(session.id) === job) this.releasing.delete(session.id);
+        resolve(ok);
+      },
+      (err) => {
+        if (this.releasing.get(session.id) === job) this.releasing.delete(session.id);
+        this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+        resolve(false);
+      },
+    );
+    return job;
+  }
+
+  private async finishRelease(session: SessionRecord): Promise<boolean> {
+    const held = [...this.heldEnds.values()].find((h) => h.ev.sessionId === session.id && !h.released);
+    if (!held) return true;
+    if (!held.landed) {
+      try {
+        this.deps.transcripts.commit(session.id);
+        held.landed = true;
+      } catch (err) {
+        this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+        return false;
+      }
+    }
+    if (!held.finalized) {
+      held.finalized = true;
+      if (this.deps.onTurnEnd) {
+        try {
+          await this.deps.onTurnEnd(session, held.outcome);
+        } catch (err) {
+          this.deps.log.error('turn.end-hook-failed', err, { sessionId: session.id });
+        }
+      }
+    }
+    const previousStatus = session.status;
+    const previousHandoff = session.handoff;
+    if (session.status !== 'closed') session.status = held.status;
+    delete session.handoff;
+    try {
+      this.deps.sessions.commit();
+    } catch (err) {
+      session.status = previousStatus;
+      if (previousHandoff) session.handoff = previousHandoff;
+      else delete session.handoff;
+      this.deps.log.error('turn.end-failed', err, { sessionId: session.id });
+      return false;
+    }
+    held.released = true;
+    this.heldEnds.delete(held.ev.turnId);
+    this.publishEnd(held.ev);
+    return true;
+  }
+
+  private afterHeld(session: SessionRecord, ok: boolean): void {
+    if (!ok || this.endHeld(session.id)) {
+      this.blockedStarts.add(session.id);
+      this.armEndRetry();
+      return;
+    }
+    this.blockedStarts.delete(session.id);
+    if (session.status === 'closed' || !this.accepting || this.active.has(session.id) || !this.canStart(session)) return;
+    if (this.shouldWake(session) && this.startTurn(session) === null) {
+      this.blockedStarts.add(session.id);
+      this.armEndRetry();
+    }
+  }
+
+  private async retryHeld(): Promise<void> {
+    const ids = new Set<string>(this.blockedStarts);
+    for (const held of this.heldEnds.values()) if (!held.released) ids.add(held.ev.sessionId);
+    for (const sessionId of ids) {
+      const session = this.get(sessionId);
+      if (session && this.needsRelease(sessionId)) await this.releaseTurn(session);
+    }
+    this.sendEnds();
+    for (const sessionId of [...this.blockedStarts]) {
+      if (this.endHeld(sessionId)) continue;
+      this.blockedStarts.delete(sessionId);
+      const session = this.get(sessionId);
+      if (!session || session.status === 'closed' || !this.accepting || this.active.has(sessionId) || !this.canStart(session)) continue;
+      if (this.shouldWake(session) && this.startTurn(session) === null) this.blockedStarts.add(sessionId);
+    }
+    this.armEndRetry();
+  }
+
+  private armEndRetry(): void {
+    if (this.unsentEnds.size === 0 && this.blockedStarts.size === 0 && this.heldEnds.size === 0) {
+      if (this.endTimer) clearTimeout(this.endTimer);
+      this.endTimer = null;
+      return;
+    }
+    if (this.endTimer) return;
+    this.endTimer = setTimeout(() => {
+      this.endTimer = null;
+      void this.retryHeld();
+    }, this.deps.endRetryMs ?? END_RETRY_MS);
+    this.endTimer.unref?.();
   }
 
   private restoreQueues(): void {
@@ -327,8 +566,9 @@ export class Turns {
   }
 
   /**
-   * Queue an input. Starts a turn right away when the session is idle;
-   * otherwise the input waits for the running turn to end.
+   * Queue an input. Starts a turn right away when the session is idle and
+   * its previous end has been released, including `turn.end`; otherwise
+   * the input waits.
    */
   send(sessionId: string, text: string, author: EntryAuthor = 'user'): { queued: boolean; turnId?: string } {
     const session = this.get(sessionId);
@@ -339,11 +579,41 @@ export class Turns {
     queue.push({ text, author });
     this.queues.set(sessionId, queue);
     this.persistQueue(session);
-    if (this.active.has(sessionId) || !this.canStart(session)) {
+    if (this.active.has(sessionId)) {
       this.upsert(session);
       return { queued: true };
     }
-    return { queued: false, turnId: this.startTurn(session) };
+    if (this.needsRelease(sessionId)) {
+      this.blockedStarts.add(sessionId);
+      void this.releaseTurn(session).then((ok) => this.afterHeld(session, ok));
+      this.armEndRetry();
+      this.upsert(session);
+      return { queued: true };
+    }
+    if (this.endHeld(sessionId)) {
+      this.blockedStarts.add(sessionId);
+      this.armEndRetry();
+      this.upsert(session);
+      return { queued: true };
+    }
+    if (!this.canStart(session)) {
+      this.upsert(session);
+      return { queued: true };
+    }
+    const turnId = this.startTurn(session);
+    if (turnId === null) {
+      this.blockedStarts.add(sessionId);
+      this.armEndRetry();
+      this.upsert(session);
+      return { queued: true };
+    }
+    return { queued: false, turnId };
+  }
+
+  private endHeld(sessionId: string): boolean {
+    if (this.needsRelease(sessionId)) return true;
+    for (const ev of this.unsentEnds.values()) if (ev.sessionId === sessionId) return true;
+    return false;
   }
 
   /**
@@ -355,9 +625,7 @@ export class Turns {
     const session = this.get(sessionId);
     if (!session || session.status === 'closed' || !this.accepting) return null;
     if (this.active.has(sessionId) || !this.canStart(session)) return null;
-    const queued = this.queues.get(sessionId)?.length ?? 0;
-    const notices = session.kind === 'orchestrator' ? this.deps.peekNotices().length : 0;
-    if (!queued && !notices) return null;
+    if (!this.shouldWake(session)) return null;
     return this.startTurn(session);
   }
 
@@ -411,9 +679,14 @@ export class Turns {
     await this.idle();
   }
 
-  /** Resolves once no turn is running (queued inputs still start turns while accepting). */
+  /** Resolves once no turn is running and no end release is in flight (queued inputs still start turns while accepting). */
   async idle(): Promise<void> {
-    while (this.active.size) await Promise.allSettled([...this.active.values()].map((t) => t.done));
+    for (;;) {
+      const pending = [...this.active.values()].map((t) => t.done);
+      const settling = [...this.releasing.values()];
+      if (pending.length === 0 && settling.length === 0) return;
+      await Promise.allSettled([...pending, ...settling]);
+    }
   }
 
   answer(
@@ -508,7 +781,21 @@ export class Turns {
     }));
   }
 
-  private startTurn(session: SessionRecord): string {
+  private startTurn(session: SessionRecord): string | null {
+    const running = this.active.get(session.id);
+    if (running) return running.turnId;
+    if (this.needsRelease(session.id)) {
+      void this.releaseTurn(session).then((ok) => this.afterHeld(session, ok));
+      return null;
+    }
+    // The event log must close the previous turn before this one is allocated.
+    // The inputs stay queued for a later start.
+    if (!this.sendEnds(session.id)) {
+      this.blockedStarts.add(session.id);
+      this.armEndRetry();
+      this.deps.log.error('turn.start-failed', undefined, { sessionId: session.id, reason: 'previous turn.end unrecorded' });
+      return null;
+    }
     const turnId = newId('trn', this.now());
     const turn: ActiveTurn = {
       turnId,
@@ -526,15 +813,16 @@ export class Turns {
       .finally(() => {
         this.active.delete(session.id);
         const next = this.queues.get(session.id);
-        if (turn.started && next?.length && this.accepting && session.status !== 'closed' && this.canStart(session)) {
-          this.startTurn(session);
+        const chain = turn.started && !!next?.length && this.accepting && session.status !== 'closed' && this.canStart(session);
+        if (chain) {
+          if (this.startTurn(session) !== null) return;
+          this.blockedStarts.add(session.id);
+          this.armEndRetry();
         }
-        else {
-          try {
-            this.upsert(session);
-          } catch (err) {
-            this.deps.log.error('turn.event-failed', err, { sessionId: session.id });
-          }
+        try {
+          this.upsert(session);
+        } catch (err) {
+          this.deps.log.error('turn.event-failed', err, { sessionId: session.id });
         }
       });
     return turnId;
@@ -552,10 +840,8 @@ export class Turns {
     let startWritten = false;
     const failStart = (err: unknown): void => {
       this.dropTurnEntry(session.id, turn.turnId);
-      if (startWritten) {
-        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats: { ...ZERO_STATS } });
-      }
       this.abortUnhanded(session, inputs);
+      if (startWritten) this.publishEnd({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats: { ...ZERO_STATS } });
       log.error('turn.start-failed', err, { sessionId: session.id });
     };
     try {
@@ -699,20 +985,32 @@ export class Turns {
         if (tokens > 0) session.lastTurnTokens = tokens;
         if (typeof stats.costUsd === 'number') session.costUsd += stats.costUsd;
         session.lastActiveAt = this.now();
-        // Cut off by shutdown or upgrade: the next boot resumes it.
-        if (session.status === 'running') session.status = turn.reason === 'restart' ? 'interrupted' : 'idle';
-        delete session.handoff;
         const t = transcripts.get(session.id);
         t.turns = session.turns;
         t.lastTurnTokens = session.lastTurnTokens;
         t.lastActiveAt = session.lastActiveAt;
-        transcripts.saveNow(session.id);
+        // Cut off by shutdown or upgrade: the next boot resumes it.
+        const held: HeldEnd = {
+          ev: { kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats },
+          status: turn.reason === 'restart' ? 'interrupted' : 'idle',
+          outcome: {
+            turnId: turn.turnId,
+            error: turn.interrupted ? null : lastError,
+            interrupted: turn.interrupted ? turn.reason ?? 'user' : null,
+            entry: record,
+            notices,
+          },
+          landed: false,
+          finalized: false,
+          released: false,
+        };
+        this.heldEnds.set(turn.turnId, held);
         try {
-          this.deps.sessions.commit();
+          transcripts.commit(session.id);
+          held.landed = true;
         } catch (err) {
           log.error('turn.end-failed', err, { sessionId: session.id });
         }
-        this.emitSafe({ kind: 'turn.end', sessionId: session.id, turnId: turn.turnId, stats });
         log.info('turn.end', {
           sessionId: session.id,
           turnId: turn.turnId,
@@ -721,18 +1019,14 @@ export class Turns {
           inputTokens: stats.inputTokens,
           outputTokens: stats.outputTokens,
         });
-        if (this.deps.onTurnEnd) {
-          const outcome: TurnOutcome = {
-            turnId: turn.turnId,
-            error: turn.interrupted ? null : lastError,
-            interrupted: turn.interrupted ? turn.reason ?? 'user' : null,
-            entry: record,
-            notices,
-          };
-          try {
-            await this.deps.onTurnEnd(session, outcome);
-          } catch (err) {
-            log.error('turn.end-hook-failed', err, { sessionId: session.id });
+        if (!held.landed) {
+          this.blockedStarts.add(session.id);
+          this.armEndRetry();
+        } else {
+          const released = await this.releaseTurn(session);
+          if (!released) {
+            this.blockedStarts.add(session.id);
+            this.armEndRetry();
           }
         }
       }
@@ -818,12 +1112,23 @@ export class Turns {
     }
   }
 
+  /**
+   * Record this turn's notice and user lines in the transcript before
+   * publishing them. Lines a failed attempt left durable are reused, and
+   * republished first when the event log does not hold them yet.
+   */
   private recordDurable(session: SessionRecord, inputs: QueuedInput[], notices: Notice[], at: number): void {
     if (inputs.length === 0 && notices.length === 0) return;
     const { transcripts, emit } = this.deps;
     const log = transcripts.get(session.id).log;
-    const missing = missingInputs(userTail(log), inputs);
-    const noticeMissing = notices.length > 0 && !log.some((entry) => entry.kind === 'notice' && sameNotices(entry.notices, notices));
+    const tail = userTail(log);
+    const durable = durableInputs(tail.map(copyInput), inputs);
+    const missing = inputs.slice(durable);
+    const recordedNotice = notices.length > 0 ? log.find((entry) => entry.kind === 'notice' && sameNotices(entry.notices, notices)) : undefined;
+    const noticeMissing = notices.length > 0 && !recordedNotice;
+    const reused: TranscriptEntry[] = tail.slice(tail.length - durable);
+    if (recordedNotice) reused.push(recordedNotice);
+    if (reused.length) this.republish(session.id, log, reused);
     if (missing.length === 0 && !noticeMissing) return;
     const start = log.length;
     const added: TranscriptEntry[] = [];
@@ -842,14 +1147,40 @@ export class Turns {
         if (entry.kind === 'notice') emit({ kind: 'turn.notice', sessionId: session.id, entry });
         else if (entry.kind === 'user') emit({ kind: 'turn.user', sessionId: session.id, entry });
       } catch (err) {
-        log.splice(start + i);
+        const removed = log.splice(start + i);
         try {
           transcripts.commit(session.id);
         } catch (commitErr) {
+          // The lines stay durable, so keep them in memory too; the next
+          // delivery reuses them and publishes the ones the log lacks.
+          log.push(...removed);
           this.deps.log.error('turn.start-failed', commitErr, { sessionId: session.id });
         }
         throw err;
       }
+    }
+  }
+
+  /** Publish, in transcript order, each reused line the event log does not already hold. */
+  private republish(sessionId: string, log: TranscriptEntry[], reused: TranscriptEntry[]): void {
+    const unused = this.deps.retained().filter((ev) => 'sessionId' in ev && ev.sessionId === sessionId);
+    const take = (entry: TranscriptEntry): boolean => {
+      const index = unused.findIndex((ev) => {
+        if (ev.kind === 'turn.user' && entry.kind === 'user') {
+          return ev.entry.ts === entry.ts && ev.entry.text === entry.text && ev.entry.author === entry.author;
+        }
+        return ev.kind === 'turn.notice' && entry.kind === 'notice' && sameNotices(ev.entry.notices, entry.notices);
+      });
+      if (index < 0) return false;
+      unused.splice(index, 1);
+      return true;
+    };
+    for (const entry of log) {
+      if (entry.kind !== 'user' && entry.kind !== 'notice') continue;
+      const matched = take(entry);
+      if (!reused.includes(entry) || matched) continue;
+      if (entry.kind === 'notice') this.deps.emit({ kind: 'turn.notice', sessionId, entry });
+      else this.deps.emit({ kind: 'turn.user', sessionId, entry });
     }
   }
 
@@ -902,8 +1233,8 @@ function sawProvider(events: TurnEntry['events']): boolean {
 }
 
 /** User lines of the in-flight turn. A finished turn ends the tail; a restart-closed one does not. */
-function userTail(log: TranscriptEntry[]): QueuedInput[] {
-  const inputs: QueuedInput[] = [];
+function userTail(log: TranscriptEntry[]): UserEntry[] {
+  const lines: UserEntry[] = [];
   for (let i = log.length - 1; i >= 0; i--) {
     const entry = log[i];
     if (entry.kind === 'notice') continue;
@@ -912,21 +1243,31 @@ function userTail(log: TranscriptEntry[]): QueuedInput[] {
       continue;
     }
     if (entry.kind !== 'user') break;
-    inputs.unshift({ text: entry.text, author: entry.author });
+    lines.unshift(entry);
   }
-  return inputs;
+  return lines;
 }
 
 function finishedTurn(events: TurnEntry['events']): boolean {
-  const ended = events.some((event) => event.kind === 'turn-end');
-  const restarted = events.some((event) => event.kind === 'error' && event.message === RESTART_ERROR);
-  return ended && !restarted;
+  return finishedStats(events) !== null;
 }
 
-function missingInputs(tail: QueuedInput[], inputs: QueuedInput[]): QueuedInput[] {
-  if (tail.length <= inputs.length && startsWithInputs(inputs, tail)) return inputs.slice(tail.length);
-  if (tail.length >= inputs.length && startsWithInputs(tail.slice(tail.length - inputs.length), inputs)) return [];
-  return inputs;
+function finishedStats(events: TurnEntry['events']): TurnStats | null {
+  const ended = events.some((event) => event.kind === 'turn-end');
+  const restarted = events.some((event) => event.kind === 'error' && event.message === RESTART_ERROR);
+  if (!ended || restarted) return null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === 'turn-end') return { ...event.stats };
+  }
+  return null;
+}
+
+/** How many of `inputs`, from the front, the tail already records (as its last lines). */
+function durableInputs(tail: QueuedInput[], inputs: QueuedInput[]): number {
+  if (tail.length <= inputs.length && startsWithInputs(inputs, tail)) return tail.length;
+  if (tail.length >= inputs.length && startsWithInputs(tail.slice(tail.length - inputs.length), inputs)) return inputs.length;
+  return 0;
 }
 
 function sameNotices(recorded: Notice[], notices: Notice[]): boolean {
