@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProviderInfo } from '../../src/harness/bridge';
 import { initSettingsModal } from '../../src/renderer/settings/modal';
-import { runnersInfo, runnersState } from './runners-fixtures';
+import { runnerRow, runnersInfo, runnersState } from './runners-fixtures';
 import { fakeBridge } from './v2-fixtures';
 
 const flush = async (): Promise<void> => {
@@ -105,6 +105,49 @@ describe('settings modal', () => {
     expect(text).toContain('Sign in to Puck with GitHub on the Providers page to add runners.');
     expect(text).not.toContain('Integrations below');
     expect([...byId('rn').querySelectorAll('button')].some((b) => b.textContent === 'Add runner')).toBe(false);
+  });
+
+  it('keeps an unsaved rename or labels edit across the focus refresh and a runner push', async () => {
+    const { modal, byId } = setup();
+    modal.show('runners');
+    await flush();
+    const press = (text: string): void => {
+      const found = [...byId('rn').querySelectorAll('button')].find((b) => b.textContent === text);
+      if (!found) throw new Error(`no ${text} button`);
+      found.click();
+    };
+    const editor = (): HTMLInputElement => byId('rn').querySelector('form.rn-edit input') as HTMLInputElement;
+
+    press('Rename');
+    await flush();
+    let input = editor();
+    expect(input.value).toBe('build-box');
+    input.value = 'big-box';
+    input.focus();
+
+    modal.refresh();
+    await flush();
+    input = editor();
+    expect(input.value).toBe('big-box');
+    expect(document.activeElement).toBe(input);
+
+    modal.runnersChanged(runnersState({ runners: [runnerRow({ name: 'server-name' })] }));
+    await flush();
+    input = editor();
+    expect(input.value).toBe('big-box');
+    expect(document.activeElement).toBe(input);
+
+    press('Labels');
+    await flush();
+    input = editor();
+    expect(input.value).toBe('gpu');
+    input.value = '';
+    input.focus();
+    modal.refresh();
+    await flush();
+    input = editor();
+    expect(input.value).toBe('');
+    expect(document.activeElement).toBe(input);
   });
 
   it('shows the support facts, and hands nav and close to the owner', async () => {

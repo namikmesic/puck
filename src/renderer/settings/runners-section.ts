@@ -37,9 +37,17 @@ export function initRunnersSection(ctx: RunnersSectionContext) {
       });
       const info = infos.find((p): p is EnvironmentProviderInfo => p.kind === 'environment');
       els.cards.removeAttribute('aria-busy');
-      els.cards.textContent = '';
-      if (info) els.cards.appendChild(view.card(info));
-      shown = !!info;
+      if (!info) {
+        els.cards.textContent = '';
+        shown = false;
+        return;
+      }
+      const card = view.card(info);
+      if (card.parentElement !== els.cards) {
+        els.cards.textContent = '';
+        els.cards.appendChild(card);
+      }
+      shown = true;
     },
     runnersChanged(state: RunnersState): void {
       if (shown) view.update(state);

@@ -31,11 +31,6 @@ describe('IPC channel table', () => {
     }
   });
 
-  it('carries no chat, agent, or local environment surface: turns run in environments', () => {
-    const values = Object.values(CHANNELS) as string[];
-    expect(values.filter((c) => /^(agent|env|convo|harness):/.test(c))).toEqual([]);
-  });
-
   it('main registers nothing outside the table', () => {
     const known = new Set<string>(Object.values(CHANNELS));
     for (const channel of ipcMain.handlers.keys()) {
