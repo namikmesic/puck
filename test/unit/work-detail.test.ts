@@ -12,7 +12,7 @@ import type { ItemStatus, PullView, WorkItem } from '../../src/harness/daemon-pr
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { initSessionView } from '../../src/renderer/session-view';
 import { compareUrl, initWorkDetail, ITEM_ACTIONS, type ItemAction } from '../../src/renderer/work-detail';
-import { ENV, item, session, snap, WORKER } from './v2-fixtures';
+import { ENV, item, ORCH, session, snap, WORKER } from './v2-fixtures';
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -91,7 +91,7 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
   });
   const actions = () => [...byId('actions').querySelectorAll<HTMLButtonElement>('button')].map((b) => b.dataset.action);
   const action = (a: string) => byId('actions').querySelector<HTMLButtonElement>(`[data-action="${a}"]`) as HTMLButtonElement;
-  return { store, wd, daemon, composer, onTab, close, openExternal, say, byId, actions, action, history };
+  return { store, wd, daemon, composer, onTab, close, openExternal, say, byId, actions, action, history, sessions };
 }
 
 const TRIGGER: Partial<Record<ItemAction, ItemTrigger>> = {
@@ -274,6 +274,48 @@ describe('work detail', () => {
     wd.render();
     const repo = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
     expect([...repo.options].map((o) => o.value)).toEqual(['web', 'api']);
+  });
+
+  it('keeps the worker thread when the orchestrator is already mounted', async () => {
+    const it0 = item({ number: 1, status: 'running', sessionId: WORKER });
+    const { wd, byId, sessions } = setup([it0]);
+    const orch = document.createElement('div');
+    sessions.mount(ORCH, orch);
+    wd.show(it0.id, 'conversation');
+    await flush();
+    const marker = document.createElement('i');
+    byId('thread').appendChild(marker);
+    wd.render();
+    expect(marker.isConnected).toBe(true);
+    expect(byId('thread').contains(marker)).toBe(true);
+  });
+
+  it('closes the sheet when the open item is deleted', () => {
+    const it0 = item({ number: 1, title: 'Still here' });
+    const { wd, store, close, byId } = setup([it0]);
+    wd.show(it0.id, 'conversation');
+    byId('thread').appendChild(document.createElement('p'));
+    store.applyEvent(2, { kind: 'item.removed', itemId: it0.id }, ENV);
+    wd.render();
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('offers Unassign and every agent only when a queued item has no session', () => {
+    const open = item({ number: 2, status: 'queued', agent: 'implementer' });
+    const held = item({ number: 3, status: 'queued', agent: 'implementer', sessionId: WORKER });
+    const stranded = item({ number: 4, status: 'backlog', sessionId: WORKER });
+    const { wd, byId } = setup([open, held, stranded]);
+    const options = (): string[] => [...byId('details').querySelectorAll<HTMLOptionElement>('.wd-agent-select option')].map((o) => o.value);
+    wd.show(open.id, 'details');
+    expect(byId('details').querySelector('[data-action="unassign"]')).not.toBeNull();
+    expect(options()).toEqual(['', 'implementer', 'reviewer']);
+    wd.show(held.id, 'details');
+    expect(byId('details').querySelector('[data-action="unassign"]')).toBeNull();
+    expect(options()).toEqual(['implementer']);
+    expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).disabled).toBe(true);
+    wd.show(stranded.id, 'details');
+    expect(options()).toEqual(['implementer']);
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('edits details when not running, and assigns from the definition agents', async () => {

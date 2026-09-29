@@ -10,6 +10,7 @@ import type { ItemStatus } from '../../src/harness/daemon-protocol';
 import {
   armsFirst,
   assignable,
+  canUnassign,
   CARD_ACTIONS,
   capacityText,
   columnItems,
@@ -104,6 +105,9 @@ describe('card actions', () => {
     expect(assignable(item({ status: 'queued', agent: 'implementer' }), agents)).toEqual(['reviewer']);
     expect(assignable(item({ status: 'backlog', agent: 'reviewer', sessionId: 's' }), agents)).toEqual(['reviewer']);
     expect(assignable(item({ status: 'queued', agent: 'reviewer', sessionId: 's' }), agents)).toEqual([]);
+    expect(assignable(item({ status: 'backlog', sessionId: 's' }), agents)).toEqual([]);
+    expect(assignable(item({ status: 'backlog', sessionId: 's' }), agents, 'reviewer')).toEqual(['reviewer']);
+    expect(assignable(item({ status: 'queued', sessionId: 's' }), agents, 'reviewer')).toEqual([]);
     expect(assignable(item({ status: 'running', agent: 'reviewer' }), agents)).toEqual([]);
   });
 });
@@ -118,6 +122,11 @@ describe('drag and drop', () => {
       }
     }
     expect(allowed).toEqual(['backlog→backlog:reorder', 'backlog→ready:assign', 'queued→backlog:unassign', 'queued→ready:reorder']);
+    // A queued item that already has a session stays in Ready: it can reorder, not unassign.
+    expect(dropAction('queued', 'backlog', 'ses')).toBeNull();
+    expect(dropAction('queued', 'ready', 'ses')).toBe('reorder');
+    expect(canUnassign(item({ status: 'queued' }))).toBe(true);
+    expect(canUnassign(item({ status: 'queued', sessionId: 'ses' }))).toBe(false);
     // Each drop that changes status is a real transition.
     expect(nextStatus('backlog', 'assign')).toBe('queued');
     expect(nextStatus('queued', 'unassign')).toBe('backlog');

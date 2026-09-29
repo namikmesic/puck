@@ -9,9 +9,12 @@
  *   out: every status has a column.
  * - Card actions are the ones the daemon's state machine allows from the
  *   status (a unit test holds this table to its transitions). Delete, and
- *   cancelling work that has started, arm on first click.
+ *   cancelling work that has started, arm on first click. A queued item
+ *   that already has a session is not offered Unassign, and an assign
+ *   picker offers only that session's agent.
  * - Drags only where a transition or a reorder exists: within Backlog or
- *   Ready (reorder), Backlog → Ready (assign), Ready → Backlog (unassign).
+ *   Ready (reorder), Backlog → Ready (assign), Ready → Backlog (unassign,
+ *   only when the item has no session yet).
  */
 
 import type { Capacity, ItemStatus, WorkItem } from '../harness/daemon-protocol';
@@ -85,11 +88,24 @@ export function armsFirst(action: CardAction, status: ItemStatus): boolean {
   return action === 'cancel' && (status === 'running' || status === 'needs-input' || status === 'review');
 }
 
-/** The agents an item can be assigned to: an item with a session keeps its agent (the daemon refuses another). */
-export function assignable(item: Pick<WorkItem, 'status' | 'agent' | 'sessionId'>, agents: readonly string[]): string[] {
+/**
+ * The agents an item can be assigned to. An item with a session keeps that
+ * agent (`sessionAgent` when the item's own agent was cleared): a queued
+ * one is already on it, and a backlog one can only be assigned back to it.
+ */
+export function assignable(item: Pick<WorkItem, 'status' | 'agent' | 'sessionId'>, agents: readonly string[], sessionAgent: string | null = null): string[] {
   if (item.status !== 'backlog' && item.status !== 'queued') return [];
-  if (item.sessionId && item.agent) return item.status === 'queued' ? [] : agents.filter((a) => a === item.agent);
+  if (item.sessionId) {
+    const agent = item.agent ?? sessionAgent;
+    if (item.status === 'queued' || !agent) return [];
+    return agents.filter((a) => a === agent);
+  }
   return agents.filter((a) => !(item.status === 'queued' && a === item.agent));
+}
+
+/** Ready → Backlog. A queued item that already has a session is not offered this. */
+export function canUnassign(item: Pick<WorkItem, 'status' | 'sessionId'>): boolean {
+  return item.status === 'queued' && !item.sessionId;
 }
 
 export type DropAction = 'reorder' | 'assign' | 'unassign';
@@ -99,12 +115,12 @@ export function canDrag(status: ItemStatus): boolean {
 }
 
 /** What dropping an item on a column does, or null when no transition allows it. */
-export function dropAction(status: ItemStatus, target: ColumnId): DropAction | null {
+export function dropAction(status: ItemStatus, target: ColumnId, sessionId: string | null = null): DropAction | null {
   const from = COLUMN_OF[status];
   if (!canDrag(status)) return null;
   if (from === target) return 'reorder';
   if (from === 'backlog' && target === 'ready') return 'assign';
-  if (from === 'ready' && target === 'backlog') return 'unassign';
+  if (from === 'ready' && target === 'backlog' && canUnassign({ status, sessionId })) return 'unassign';
   return null;
 }
 

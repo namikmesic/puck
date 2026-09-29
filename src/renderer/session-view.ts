@@ -429,10 +429,9 @@ export function initSessionView(ctx: SessionViewContext) {
       for (const host of hosts.values()) if (closeChildIn(host)) return true;
       return false;
     },
-    /** The session `scroller` shows (the first host's without one). */
-    mountedSession(scroller?: HTMLElement): string | null {
-      const host = scroller ? hosts.get(scroller) : hosts.values().next().value;
-      return host?.mounted?.sessionId ?? null;
+    /** The session this host shows. */
+    mountedSession(scroller: HTMLElement): string | null {
+      return hosts.get(scroller)?.mounted?.sessionId ?? null;
     },
     /** A daemon event, in seq order (the store already applied it). */
     apply(seq: number, ev: DaemonEvent): void {

@@ -9,16 +9,17 @@
  *   state, the failure or cancel reason. A click or Enter opens the item
  *   in the side sheet; the open item's card is highlighted.
  * - "…" (or Shift+F10 on a focused card) opens the actions the state
- *   machine allows: Assign (one entry per agent), Unassign, Stop, Accept,
- *   Publish, Retry, Cancel and Delete. Delete, and cancelling started
- *   work, arm on the first click.
+ *   machine allows: Assign (one entry per agent, or only the session's
+ *   agent once a session exists), Unassign (a queued item with no session),
+ *   Stop, Accept, Publish, Retry, Cancel and Delete. Delete, and cancelling
+ *   started work, arm on the first click.
  * - Keyboard: one tab stop for the cards; arrows move between cards and
  *   columns, Home and End jump within a column, Alt+↑/↓ reorders Backlog
  *   and Ready.
  * - Drag and drop only where a transition exists: reorder within Backlog
  *   or Ready, Backlog → Ready assigns (an agent picker when several could
- *   take it), Ready → Backlog unassigns. While dragging, the columns that
- *   accept the card are outlined and the rest dim.
+ *   take it), Ready → Backlog unassigns an item that has no session yet.
+ *   While dragging, the columns that accept the card are outlined and the rest dim.
  * - Closed (failed and cancelled) is a narrow rail with its counts until
  *   expanded; Done shows its latest 20 until "Show all".
  * - The header: agent capacity, the paused scheduler with Resume, Import
@@ -36,6 +37,7 @@ import {
   assignable,
   CARD_ACTIONS,
   canDrag,
+  canUnassign,
   capacitySlots,
   capacityText,
   columnItems,
@@ -189,7 +191,7 @@ export function initBoard(ctx: BoardContext) {
 
   /* ---------- Actions ---------- */
 
-  async function run(item: WorkItem, action: CardAction, agent?: string): Promise<void> {
+  async function run(item: WorkItem, action: CardAction, agent?: string): Promise<boolean> {
     try {
       switch (action) {
         case 'assign':
@@ -207,7 +209,7 @@ export function initBoard(ctx: BoardContext) {
         case 'publish': {
           const res = await ctx.daemon('item.publish', { itemId: item.id });
           ctx.say(`Published: ${res.prUrl}`);
-          return;
+          return true;
         }
         case 'retry':
           await ctx.daemon('item.retry', { itemId: item.id });
@@ -220,9 +222,15 @@ export function initBoard(ctx: BoardContext) {
           break;
       }
       ctx.say('');
+      return true;
     } catch (err) {
       ctx.say(`W-${item.number}: ${errText(err)}`);
+      return false;
     }
+  }
+
+  function choicesFor(item: WorkItem): string[] {
+    return assignable(item, agents(), item.sessionId ? (store.session(item.sessionId)?.agent ?? null) : null);
   }
 
   /** The "…" menu entries for an item: Open, then what its status allows. */
@@ -230,9 +238,17 @@ export function initBoard(ctx: BoardContext) {
     const entries: MenuEntry[] = [{ label: 'Open', hint: '↵', action: 'open', run: () => ctx.openItem(item.id) }];
     let grouped = false;
     for (const action of CARD_ACTIONS[item.status]) {
+      if (action === 'unassign' && !canUnassign(item)) continue;
       if (action === 'assign') {
-        for (const agent of assignable(item, agents())) {
-          entries.push({ label: `${item.status === 'queued' ? 'Reassign' : 'Assign'} to ${agent}`, action: `assign:${agent}`, group: !grouped, run: () => run(item, 'assign', agent) });
+        for (const agent of choicesFor(item)) {
+          entries.push({
+            label: `${item.status === 'queued' ? 'Reassign' : 'Assign'} to ${agent}`,
+            action: `assign:${agent}`,
+            group: !grouped,
+            run: () => {
+              void run(item, 'assign', agent);
+            },
+          });
           grouped = true;
         }
         continue;
@@ -245,7 +261,9 @@ export function initBoard(ctx: BoardContext) {
         danger: destructive,
         confirm: armsFirst(action, item.status) ? `Confirm: ${action === 'delete' ? 'delete' : 'cancel'} W-${item.number}` : undefined,
         group: destructive ? !entries.some((e) => e.danger) : !grouped,
-        run: () => run(item, action),
+        run: () => {
+          void run(item, action);
+        },
       });
       if (!destructive) grouped = true;
     }
@@ -262,10 +280,9 @@ export function initBoard(ctx: BoardContext) {
 
   /** Pick an agent for a Backlog item dropped on Ready (or assign straight away when only one can take it). */
   function assignPicked(item: WorkItem, position: ItemPosition | null, at: DOMRect | null): void {
-    const choices = assignable(item, agents());
+    const choices = choicesFor(item);
     const finish = async (agent: string): Promise<void> => {
-      await run(item, 'assign', agent);
-      if (position) await move(item.id, position);
+      if ((await run(item, 'assign', agent)) && position) await move(item.id, position);
     };
     if (!choices.length) {
       ctx.say(`No agent in this environment can take W-${item.number}.`);
@@ -404,7 +421,7 @@ export function initBoard(ctx: BoardContext) {
       li.classList.add('dragging');
       ev.dataTransfer?.setData('text/plain', `W-${item.number}`);
       if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
-      for (const [id, parts] of cols) parts.section.dataset.drop = dropAction(item.status, id) ? 'ok' : 'no';
+      for (const [id, parts] of cols) parts.section.dataset.drop = dropAction(item.status, id, item.sessionId) ? 'ok' : 'no';
       els.columns.classList.add('dragging');
       closePopup();
     });
@@ -520,7 +537,7 @@ export function initBoard(ctx: BoardContext) {
 
   function wireDrop(section: HTMLElement, column: ColumnId): void {
     section.addEventListener('dragover', (ev) => {
-      if (!dragging || !dropAction(dragging.status, column)) return;
+      if (!dragging || !dropAction(dragging.status, column, dragging.sessionId)) return;
       ev.preventDefault();
       if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
       const parts = cols.get(column);
@@ -542,7 +559,7 @@ export function initBoard(ctx: BoardContext) {
       const item = dragging;
       const parts = cols.get(column);
       if (!item || !parts) return;
-      const action = dropAction(item.status, column);
+      const action = dropAction(item.status, column, item.sessionId);
       const before = dropBefore(parts.list, ev.clientY);
       const cards = [...parts.list.querySelectorAll<HTMLElement>('.bd-card:not(.dragging)')];
       const after = before ? cards[cards.indexOf(before) - 1] : cards[cards.length - 1];
@@ -557,8 +574,7 @@ export function initBoard(ctx: BoardContext) {
       } else if (action === 'assign') assignPicked(item, position, at);
       else if (action === 'unassign') {
         void (async () => {
-          await run(item, 'unassign');
-          if (position) await move(item.id, position);
+          if ((await run(item, 'unassign')) && position) await move(item.id, position);
         })();
       }
     });
@@ -729,10 +745,12 @@ export function initBoard(ctx: BoardContext) {
     const cards = [...els.columns.querySelectorAll<HTMLElement>('.bd-card')];
     const keep = active && cards.some((n) => n.dataset.item === active) ? active : (cards[0]?.dataset.item ?? null);
     if (keep) setActive(keep);
-    // A rebuilt column drops the focused card: focus its replacement.
-    const restore = focusAfter ?? focusedCard;
+    // Keyboard reorder asks for the card back. A rebuild drops whatever was
+    // focused; a control that is still in the card keeps the focus it has.
+    const pending = focusAfter;
     focusAfter = null;
-    if (restore && document.activeElement !== els.columns.querySelector(`.bd-card[data-item="${CSS.escape(restore)}"]`)) focusCard(restore);
+    if (pending) focusCard(pending);
+    else if (focused && !focused.isConnected && focusedCard) focusCard(focusedCard);
   }
 
   /* ---------- New item and import ---------- */

@@ -11,7 +11,7 @@ import type { WorkItem } from '../../src/harness/daemon-protocol';
 import { initBoard } from '../../src/renderer/board';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { closePopup } from '../../src/renderer/popup';
-import { ENV, item, snap } from './v2-fixtures';
+import { ENV, item, session, snap } from './v2-fixtures';
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 const NOW = 10_000_000;
@@ -223,6 +223,24 @@ describe('board', () => {
     expect(daemon).toHaveBeenCalledWith('item.assign', { itemId: 'itm_2', agent: null });
   });
 
+  it('does not offer Unassign for a queued item that already has a session, and assigns only that agent', () => {
+    const { card, col, daemon, store } = setup([
+      item({ number: 1, status: 'backlog', sessionId: 's1' }),
+      item({ number: 2, status: 'queued', agent: 'implementer', sessionId: 's2' }),
+    ]);
+    store.applyEvent(2, { kind: 'session.upsert', session: session({ id: 's1', kind: 'worker', agent: 'reviewer' }) }, ENV);
+    drag('dragstart', card('itm_2'));
+    expect(col('backlog').dataset.drop).toBe('no');
+    expect(col('ready').dataset.drop).toBe('ok');
+    expect(drag('dragover', col('backlog').querySelector('.bd-list') as HTMLElement).defaultPrevented).toBe(false);
+    drag('drop', col('backlog').querySelector('.bd-list') as HTMLElement, 999);
+    expect(daemon).not.toHaveBeenCalled();
+    (card('itm_2').querySelector('.bd-more') as HTMLButtonElement).click();
+    expect(menuItems()).toEqual(['open', 'cancel']);
+    (card('itm_1').querySelector('.bd-more') as HTMLButtonElement).click();
+    expect(menuItems()).toEqual(['open', 'assign:reviewer', 'cancel', 'delete']);
+  });
+
   it('arms Delete, and cancelling started work, on the first click', async () => {
     const { card, daemon } = setup([item({ number: 1, status: 'backlog' }), item({ number: 3, status: 'running', sessionId: 's3' })]);
     (card('itm_1').querySelector('.bd-more') as HTMLButtonElement).click();
@@ -319,6 +337,34 @@ describe('board', () => {
     expect(daemon).toHaveBeenCalledWith('item.move', { itemId: 'itm_1', position: { before: 'itm_2' } });
   });
 
+  it('does not reorder when assign or unassign fails', async () => {
+    const { card, col, daemon, ids, say } = setup(
+      [item({ number: 1, status: 'queued', agent: 'implementer' }), item({ number: 2 }), item({ number: 3, status: 'queued', agent: 'implementer' })],
+      { agents: ['implementer'] },
+    );
+    box(card('itm_1'), 0);
+    daemon.mockRejectedValueOnce(new Error('choose the repo before assigning'));
+    drag('dragstart', card('itm_2'));
+    drag('drop', col('ready').querySelector('.bd-list') as HTMLElement, 0);
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.assign', { itemId: 'itm_2', agent: 'implementer' });
+    expect(daemon).not.toHaveBeenCalledWith('item.move', expect.anything());
+    expect(ids('backlog')).toEqual(['itm_2']);
+    expect(ids('ready')).toEqual(['itm_1', 'itm_3']);
+    expect(say).toHaveBeenCalledWith('W-2: choose the repo before assigning');
+
+    daemon.mockClear();
+    daemon.mockRejectedValueOnce(new Error('no'));
+    box(card('itm_2'), 0);
+    drag('dragstart', card('itm_3'));
+    drag('drop', col('backlog').querySelector('.bd-list') as HTMLElement, 0);
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.assign', { itemId: 'itm_3', agent: null });
+    expect(daemon).not.toHaveBeenCalledWith('item.move', expect.anything());
+    expect(ids('backlog')).toEqual(['itm_2']);
+    expect(ids('ready')).toEqual(['itm_1', 'itm_3']);
+  });
+
   it('unassigns on a drop into Backlog, and reorders within a column', async () => {
     const { card, col, daemon, ids } = setup([item({ number: 1 }), item({ number: 2 }), item({ number: 3, status: 'queued', agent: 'implementer' })]);
     drag('dragstart', card('itm_3'));
@@ -331,6 +377,27 @@ describe('board', () => {
     drag('drop', col('backlog').querySelector('.bd-list') as HTMLElement, 999);
     expect(daemon).toHaveBeenCalledWith('item.move', { itemId: 'itm_1', position: { after: 'itm_2' } });
     expect(ids('backlog')).toEqual(['itm_2', 'itm_1']);
+  });
+
+  it('keeps focus on a card control while the board redraws, and restores the card when that control is rebuilt', () => {
+    const { card, store } = setup([
+      item({
+        number: 3,
+        status: 'running',
+        agent: 'implementer',
+        sessionId: 's3',
+        pr: { number: 4, url: 'https://github.com/octo/web/pull/4', draft: false, lastPushedSha: 'abc' },
+      }),
+    ]);
+    const pr = () => card('itm_3').querySelector('.bd-chip.pr') as HTMLButtonElement;
+    card('itm_3').focus();
+    pr().focus();
+    store.applyEvent(2, { kind: 'capacity', agents: { implementer: { running: 1, max: 2 } }, workers: { running: 1, max: 3 }, paused: false }, ENV);
+    expect(document.activeElement).toBe(pr());
+    pr().focus();
+    store.applyEvent(3, { kind: 'turn.start', sessionId: 's3', turnId: 't' }, ENV);
+    store.applyEvent(4, { kind: 'turn.event', sessionId: 's3', turnId: 't', event: { kind: 'tool-start', toolId: 'x', tool: 'Read', summary: 'a.ts', input: '' } }, ENV);
+    expect(document.activeElement).toBe(card('itm_3'));
   });
 
   it('keeps focus on a card when its column rebuilds', () => {

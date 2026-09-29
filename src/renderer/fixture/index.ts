@@ -16,9 +16,11 @@
  * a fixture cannot do rejects with a sentence saying so.
  */
 
+// eslint-disable-next-line no-restricted-imports
+import { nextStatus, type ItemTrigger } from '../../daemon/items';
 import type { DaemonEventPayload, InstanceEvent, ProviderInfo, PuckBridge, RunnerEvent, RunnersState } from '../../harness/bridge';
 import type { DaemonEvent, ItemPosition, OpArgs, OpResult, RendererOp, WorkItem } from '../../harness/daemon-protocol';
-import { buildWorld, ENV_ID, FIXTURE_MOVES, ORCH, SCENARIOS, type Scenario } from './data';
+import { buildWorld, ENV_ID, ORCH, SCENARIOS, type Scenario } from './data';
 
 const PAGE = 14;
 
@@ -94,11 +96,10 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
     return { ...it };
   }
 
-  function move(it: WorkItem, trigger: keyof typeof FIXTURE_MOVES, patch: Partial<WorkItem> = {}): WorkItem {
-    const row = FIXTURE_MOVES[trigger];
-    if (!row.from.includes(it.status)) throw new Error(`Cannot ${trigger} an item that is ${it.status}.`);
-    if (row.to === 'removed') throw new Error('unreachable');
-    return change(it, { ...patch, status: row.to });
+  function move(it: WorkItem, trigger: ItemTrigger, patch: Partial<WorkItem> = {}): WorkItem {
+    const to = nextStatus(it.status, trigger);
+    if (to === 'removed') throw new Error(`Cannot ${trigger} an item that is ${it.status}.`);
+    return change(it, { ...patch, status: to });
   }
 
   function place(itemId: string, position: ItemPosition): void {
@@ -225,7 +226,7 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
       }
       case 'item.delete': {
         const it = find(String(a.itemId));
-        if (!FIXTURE_MOVES.delete.from.includes(it.status)) throw new Error(`Cannot delete an item that is ${it.status}.`);
+        nextStatus(it.status, 'delete');
         snap.items = snap.items.filter((i) => i.id !== it.id);
         snap.order = snap.order.filter((id) => id !== it.id);
         emit({ kind: 'item.removed', itemId: it.id });

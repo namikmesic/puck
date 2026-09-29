@@ -8,7 +8,7 @@
  */
 
 import type { InstanceInfo } from '../../harness/bridge';
-import type { Capacity, ItemStatus, OpenAsk, PullView, SessionSummary, Snapshot, WorkItem } from '../../harness/daemon-protocol';
+import type { Capacity, OpenAsk, PullView, SessionSummary, Snapshot, WorkItem } from '../../harness/daemon-protocol';
 import type { TranscriptEntry } from '../../harness/transcript';
 import type { AskQuestion, HarnessEvent } from '../../harness/types';
 
@@ -464,13 +464,3 @@ export function buildWorld(scenario: Scenario, now = Date.now()): FixtureWorld {
   };
   return { instances: instances(scenario), snapshot, transcripts, pulls };
 }
-
-/** Statuses the fixture's item commands move between (the daemon's rows for user commands). */
-export const FIXTURE_MOVES: Record<'assign' | 'unassign' | 'cancel' | 'accept' | 'retry' | 'delete', { from: readonly ItemStatus[]; to: ItemStatus | 'removed' }> = {
-  assign: { from: ['backlog', 'queued'], to: 'queued' },
-  unassign: { from: ['queued'], to: 'backlog' },
-  cancel: { from: ['running', 'needs-input', 'queued', 'backlog', 'review'], to: 'cancelled' },
-  accept: { from: ['backlog', 'queued', 'running', 'needs-input', 'review', 'failed', 'cancelled'], to: 'done' },
-  retry: { from: ['failed', 'cancelled'], to: 'queued' },
-  delete: { from: ['backlog', 'done', 'failed', 'cancelled'], to: 'removed' },
-};

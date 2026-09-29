@@ -12,7 +12,8 @@
  *   Changes (summary, commits, diff stat, uncommitted files, the pull
  *   request with its CI checks and review feedback, "Compare on GitHub"),
  *   Details (editable title and body when not running, the agent and repo
- *   pickers, timestamps, creator, last error).
+ *   pickers, timestamps, creator, last error). Once an item has a session,
+ *   the agent picker offers only that agent, and Unassign is not offered.
  * - A pending question shows a banner: "Waiting on the orchestrator" with
  *   "Answer myself", or the question card when it is routed to the user.
  *   On the Conversation tab, where the thread already shows the card, the
@@ -23,6 +24,7 @@
 
 import type { ItemStatus, OpArgs, OpResult, PullView, RendererOp, WorkItem } from '../harness/daemon-protocol';
 import { askCard } from './ask-card';
+import { assignable, canUnassign } from './board-model';
 import { armDelete, el } from './dom';
 import { fmtTime, relTime } from './format';
 import type { InstanceStore } from './instance-store';
@@ -312,7 +314,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       els.thread.appendChild(el('p', 'wd-empty', 'No conversation yet: the item has not started.'));
       return;
     }
-    if (mountedSession !== it.sessionId || ctx.sessions.mountedSession() !== it.sessionId) {
+    if (mountedSession !== it.sessionId || ctx.sessions.mountedSession(els.thread) !== it.sessionId) {
       mountedSession = it.sessionId;
       ctx.sessions.mount(it.sessionId, els.thread);
     }
@@ -468,7 +470,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   }
 
   function renderDetails(it: WorkItem): void {
-    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos]);
+    const knownAgent = it.agent ?? (it.sessionId ? (store.session(it.sessionId)?.agent ?? null) : null);
+    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos, knownAgent]);
     if (built.details === key) return;
     built.details = key;
     const host = els.details;
@@ -526,20 +529,30 @@ export function initWorkDetail(ctx: WorkDetailContext) {
 
     // Assignment: the agents the environment's definition assigns.
     const agents = Object.keys(store.capacity().agents).sort();
+    const choices = assignable(it, agents, it.sessionId ? knownAgent : null);
     const assign = el('div', 'wd-assign');
     assign.appendChild(el('label', 'wd-label', 'Agent'));
     const pick = el('select', 'wd-agent-select');
     pick.setAttribute('aria-label', 'Agent');
-    const none = el('option', '', 'Unassigned');
-    none.value = '';
-    pick.appendChild(none);
-    for (const a of agents) {
-      const o = el('option', '', a);
-      o.value = a;
-      pick.appendChild(o);
+    if (it.sessionId) {
+      if (knownAgent) {
+        const o = el('option', '', knownAgent);
+        o.value = knownAgent;
+        pick.appendChild(o);
+      }
+      pick.value = knownAgent ?? '';
+    } else {
+      const none = el('option', '', 'Unassigned');
+      none.value = '';
+      pick.appendChild(none);
+      for (const a of agents) {
+        const o = el('option', '', a);
+        o.value = a;
+        pick.appendChild(o);
+      }
+      pick.value = it.agent ?? '';
     }
-    pick.value = it.agent ?? '';
-    const canAssign = it.status === 'backlog' || it.status === 'queued';
+    const canAssign = it.sessionId ? choices.includes(pick.value) : it.status === 'backlog' || it.status === 'queued';
     pick.disabled = !canAssign;
     const row = el('div', 'wd-row');
     row.appendChild(pick);
@@ -555,7 +568,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
     });
     row.appendChild(assignBtn);
-    if (it.status === 'queued') {
+    if (canUnassign(it)) {
       const un = button('btn-ghost', 'Unassign');
       un.dataset.action = 'unassign';
       un.addEventListener('click', async () => {
@@ -610,7 +623,11 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   function render(): void {
     const it = item();
     if (!it) {
-      els.title.textContent = itemId ? 'This item was deleted' : '';
+      if (itemId && store.hasSnapshot()) {
+        ctx.close();
+        return;
+      }
+      els.title.textContent = '';
       els.id.textContent = '';
       els.status.textContent = '';
       els.actions.textContent = '';
