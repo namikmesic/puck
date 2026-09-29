@@ -21,6 +21,7 @@
 
 import type {
   EnvironmentProviderInfo,
+  ProviderStatus,
   PuckBridge,
   RunnerAsset,
   RunnerRegistration,
@@ -82,6 +83,16 @@ export function runnerMeta(r: RunnerRow): string {
   const custom = r.labels.filter((l) => l !== r.os && l !== r.arch);
   if (custom.length) parts.push(custom.join(', '));
   return parts.join(' · ');
+}
+
+/** Header for a pushed runner list, once that list is known. */
+function runnerHeaderStatus(s: RunnersState): ProviderStatus {
+  if (!s.signedIn) return { state: 'disconnected', detail: 'Sign in to Puck to use your runners' };
+  if (s.connection === 'offline') return { state: 'error', detail: `Can't reach the Puck server at ${s.server}; Puck keeps trying.` };
+  const online = s.runners.filter((r) => r.status !== 'offline').length;
+  const n = s.runners.length;
+  if (n === 0) return { state: 'disconnected', detail: 'No runners yet' };
+  return { state: 'connected', detail: `${n} ${n === 1 ? 'runner' : 'runners'}, ${online} online` };
 }
 
 /** Idle, Active · 2 environments, Offline. */
@@ -516,21 +527,26 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     sub.textContent = s?.detail ?? '';
   }
 
+  function redraw(): void {
+    for (const id of [...removals.keys()]) if (state && !state.runners.some((r) => r.id === id)) removals.delete(id);
+    drawHead();
+    drawList();
+    drawFoot();
+    watchNew();
+    if (add && add.platform === 'this-mac') drawAdd();
+  }
+
   const view: RunnersView = {
     card(next) {
       info = next;
-      view.update(next.runners);
+      state = next.runners;
+      redraw();
       return root;
     },
     update(next) {
       state = next;
-      if (info) info = { ...info, runners: next };
-      for (const id of [...removals.keys()]) if (!next.runners.some((r) => r.id === id)) removals.delete(id);
-      drawHead();
-      drawList();
-      drawFoot();
-      watchNew();
-      if (add && add.platform === 'this-mac') drawAdd();
+      if (info) info = { ...info, runners: next, status: runnerHeaderStatus(next) };
+      redraw();
     },
     close() {
       if (add) closeAdd();

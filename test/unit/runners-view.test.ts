@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import type { PuckBridge, RunnerRegistration, RunnersState } from '../../src/harness/bridge';
+import type { EnvironmentProviderInfo, PuckBridge, RunnerRegistration, RunnersState } from '../../src/harness/bridge';
 import { commandsFor, initRunnersView, runnerMeta, statusWord } from '../../src/renderer/settings/runners';
 import { LOCAL_ID, RID, runnerRow, runnersInfo, runnersState } from './runners-fixtures';
 
@@ -23,7 +23,7 @@ const registration = (over: Partial<RunnerRegistration> = {}): RunnerRegistratio
   ...over,
 });
 
-function mount(state: RunnersState = runnersState(), over: Partial<PuckBridge> = {}) {
+function mount(state: RunnersState = runnersState(), over: Partial<PuckBridge> = {}, status?: EnvironmentProviderInfo['status']) {
   const bridge = {
     runners: vi.fn(async () => state),
     runnerRegistrationToken: vi.fn(async () => registration()),
@@ -38,7 +38,7 @@ function mount(state: RunnersState = runnersState(), over: Partial<PuckBridge> =
   const say = vi.fn();
   const copy = vi.fn(async () => undefined);
   const view = initRunnersView({ bridge, say, copy, now: () => NOW });
-  const card = view.card({ ...runnersInfo(), runners: state });
+  const card = view.card({ ...runnersInfo(), runners: state, ...(status ? { status } : {}) });
   document.body.textContent = '';
   document.body.appendChild(card);
   return { bridge, say, copy, view, card };
@@ -130,6 +130,23 @@ describe('runner rows', () => {
     const { card } = mount(runnersState({ signedIn: false, runners: [] }));
     expect(card.textContent).toMatch(/Sign in to Puck with GitHub/);
     expect(btn(card, 'Add runner')).toBeUndefined();
+  });
+
+  it('refreshes the card header when a runner appears after an empty list', () => {
+    const { card, view } = mount(runnersState({ runners: [] }), {}, { state: 'disconnected', detail: 'No runners yet' });
+    expect(card.querySelector('.card-head .status')?.textContent).toBe('not set up');
+    expect(card.querySelector('.card-sub')?.textContent).toBe('No runners yet');
+
+    view.update(runnersState({ runners: [runnerRow()] }));
+    expect(card.querySelector('.rn-name')?.textContent).toBe('build-box');
+    expect(card.querySelector('.card-head .status')?.textContent).toBe('connected');
+    expect(card.querySelector('.card-head .status')?.classList.contains('on')).toBe(true);
+    expect(card.querySelector('.card-sub')?.textContent).toBe('1 runner, 1 online');
+
+    view.update(runnersState({ runners: [] }));
+    expect(card.querySelector('.rn-name')).toBeNull();
+    expect(card.querySelector('.card-head .status')?.textContent).toBe('not set up');
+    expect(card.querySelector('.card-sub')?.textContent).toBe('No runners yet');
   });
 });
 
