@@ -2,7 +2,6 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createGitHubClient } from '../../src/harness/github';
 import {
   blobUrl,
   compareSemver,
@@ -11,88 +10,14 @@ import {
   parseSemverTag,
   sortTags,
 } from '../../src/main/config-repo';
+import { fakeConfigRepo } from './config-repo-fakes';
 import { blobSha, ENV, exampleFiles, patchYaml, type Files } from './definitions-fixtures';
-import { fakeGitHub, type Recorded, type Scripted } from './github-fakes';
+import type { Recorded } from './github-fakes';
 
 const API = 'https://api.github.com/repos/acme/config';
 const V1 = '1'.repeat(40);
 const V2 = '2'.repeat(40);
 const MAIN = '3'.repeat(40);
-
-interface Commit {
-  files: Files;
-  /** Tree sizes that differ from the content (to simulate huge files). */
-  sizes?: Record<string, number>;
-  /** Path → link target. Emitted as a mode 120000 blob whose content is that target. */
-  symlinks?: Record<string, string>;
-}
-
-/**
- * A fake GitHub serving a config repo: refs, the commits they point at,
- * recursive trees and raw blobs, all built from file maps.
- */
-function fakeConfigRepo(opts: {
-  commits: Record<string, Commit>;
-  tags?: Record<string, string>;
-  branches?: Record<string, string>;
-}) {
-  const tags = opts.tags ?? {};
-  const branches = opts.branches ?? {};
-  const blobs = new Map<string, string>();
-  for (const c of Object.values(opts.commits)) {
-    for (const [p, t] of Object.entries(c.files)) blobs.set(blobSha(p + t), t);
-    for (const [p, target] of Object.entries(c.symlinks ?? {})) blobs.set(blobSha(p + target), target);
-  }
-
-  const handler = (req: Recorded): Scripted => {
-    const path = req.url.replace(API, '');
-    let m: RegExpExecArray | null;
-    if (path === '/tags?per_page=100') {
-      return { body: Object.entries(tags).map(([name, sha]) => ({ name, commit: { sha } })) };
-    }
-    if (path === '/branches?per_page=100') {
-      return { body: Object.entries(branches).map(([name, sha]) => ({ name, commit: { sha } })) };
-    }
-    if ((m = /^\/commits\/(.+)$/.exec(path))) {
-      const ref = decodeURIComponent(m[1]);
-      const sha = ref.startsWith('tags/')
-        ? tags[ref.slice(5)]
-        : ref.startsWith('heads/')
-          ? branches[ref.slice(6)]
-          : Object.keys(opts.commits).find((s) => s.startsWith(ref));
-      return sha ? { body: sha } : { status: 404, body: { message: 'No commit found for SHA' } };
-    }
-    if ((m = /^\/git\/trees\/([0-9a-f]{40})\?recursive=1$/.exec(path))) {
-      const c = opts.commits[m[1]];
-      if (!c) return { status: 404, body: { message: 'Not Found' } };
-      const tree = Object.entries(c.files).map(([p, t]) => ({
-        path: p,
-        mode: '100644',
-        type: 'blob',
-        sha: blobSha(p + t),
-        size: c.sizes?.[p] ?? Buffer.byteLength(t),
-      }));
-      for (const [p, target] of Object.entries(c.symlinks ?? {})) {
-        tree.push({
-          path: p,
-          mode: '120000',
-          type: 'blob',
-          sha: blobSha(p + target),
-          size: Buffer.byteLength(target),
-        });
-      }
-      return { body: { tree, truncated: false } };
-    }
-    if ((m = /^\/git\/blobs\/([0-9a-f]{40})$/.exec(path))) {
-      const text = blobs.get(m[1]);
-      return text === undefined ? { status: 404, body: { message: 'Not Found' } } : { body: text };
-    }
-    throw new Error(`unexpected request ${req.url}`);
-  };
-  const gh = fakeGitHub(handler);
-  const client = createGitHubClient({ token: async () => 'token', deps: gh.deps });
-  return { gh, client };
-}
 
 const paths = (reqs: Recorded[]) => reqs.map((r) => r.url.replace(API, ''));
 
