@@ -10,11 +10,15 @@
  *   click). This Mac's Remove uninstalls it.
  * - Add runner, GitHub's self-hosted runner flow: pick This Mac or a
  *   platform, copy the download, checksum, configure and run commands with
- *   a one-hour registration token (Cancel revokes it), and watch the runner
- *   come online with its Docker version and capacity. A platform the server
- *   publishes no package for says so and waits for nothing; a token no
- *   platform can use is revoked at once. A loopback server URL warns that a
- *   runner on another machine cannot reach it there.
+ *   a one-hour registration token (Cancel or Close revokes one still
+ *   outstanding), and watch the runner come online with its Docker version
+ *   and capacity. A platform the server publishes no package for says so
+ *   and waits for nothing. That note mentions development mode only when
+ *   the server publishes no packages at all; a token no platform can use
+ *   is revoked at once. A loopback server URL warns that a runner on
+ *   another machine cannot reach it there, and adds that This Mac still
+ *   works only when This Mac is already installed or the server publishes
+ *   a macOS ARM64 package.
  *
  * A controller that survives re-renders: a runner-list push or a focus
  * refresh redraws the list and restores an open dialog and a half-typed

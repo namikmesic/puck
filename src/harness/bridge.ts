@@ -140,7 +140,7 @@ export interface EnvironmentProviderInfo {
 
 /** A registration token and what the Add runner dialog needs to show the commands. */
 export interface RunnerRegistration {
-  /** Revokes the token (Cancel in the dialog). */
+  /** Passed to `runnerRegistrationCancel`. */
   id: string;
   token: string;
   expiresAt: number;
@@ -307,7 +307,7 @@ export interface PuckBridge {
   runners(): Promise<RunnersState>;
   /** A one-hour registration token for `config.sh`, with the release to download. */
   runnerRegistrationToken(): Promise<RunnerRegistration>;
-  /** Revokes a registration token (the Add runner dialog's Cancel). */
+  /** Revokes a registration token. */
   runnerRegistrationCancel(tokenId: string): Promise<void>;
   /** A one-hour removal token and the `config.sh remove` command for a runner. */
   runnerRemovalToken(runnerId: string): Promise<RunnerRemoval>;

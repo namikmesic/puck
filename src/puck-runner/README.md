@@ -7,7 +7,7 @@ It registers with the Puck server the way a GitHub self-hosted runner registers 
 
 - Linux x64, Linux ARM64, or macOS on Apple silicon.
 - Docker Engine 24 or newer that the runner's user can use without sudo (Docker Desktop or colima on macOS).
-- Outbound HTTPS to the Puck server.
+- Outbound access to the Puck server, over HTTP or HTTPS as that server's URL says.
 
 The runner brings its own Node runtime (`bin/node`); nothing else needs installing.
 
