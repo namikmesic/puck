@@ -221,6 +221,20 @@ export class Credentials {
     this.deps.log.info('credentials.harness', { id });
   }
 
+  /** Deletes a harness credential file (the user signed out of that harness in the app), and any staged copy. */
+  async removeHarness(id: string): Promise<void> {
+    const file = this.harnessFile(id);
+    if (!file) throw new Error(`Unknown harness ${id}.`);
+    fs.rmSync(this.stagedFile(id), { force: true });
+    const r = await this.deps.run(['rm', '-f', '--', file], {
+      ...this.deps.asPuck,
+      env: { PATH: '/usr/local/bin:/usr/bin:/bin' },
+      timeoutMs: 15_000,
+    });
+    if (r.code !== 0) throw new Error(`Could not remove the ${id} credential file (exit ${String(r.code)}).`);
+    this.deps.log.info('credentials.harness-removed', { id });
+  }
+
   /** Reads the harness credential files the CLIs hold now (for adopt-back), as the puck user. */
   async getHarness(ids: string[]): Promise<{ id: string; content: string }[]> {
     const out: { id: string; content: string }[] = [];

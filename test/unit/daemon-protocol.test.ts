@@ -93,6 +93,8 @@ describe('daemon command validation', () => {
     expect(VALIDATORS['logs.tail']({})).toEqual({ lines: 200 });
     expect(invalid('logs.tail', { lines: 2001 })).toBe('invalid-args');
     expect(invalid('credentials.put', { harness: [{ id: '../x', content: '{}' }] })).toBe('invalid-args');
+    expect(invalid('credentials.put', { harness: [{ id: 'codex', content: 42 }] })).toBe('invalid-args');
+    expect(VALIDATORS['credentials.put']({ harness: [{ id: 'codex', content: null }] })).toEqual({ harness: [{ id: 'codex', content: null }] });
     expect(invalid('definition.apply', { definition: {}, pin: { kind: 'tag', name: 'v1', sha: 'nothex' } })).toBe('invalid-args');
     expect(invalid('snapshot.get', 'x')).toBe('invalid-args');
   });

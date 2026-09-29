@@ -1,8 +1,8 @@
 /**
- * The Puck GitHub App's public identity. Sign-in uses the OAuth device
- * flow, which needs only the client id - there is no client secret
- * anywhere in Puck. User tokens reach only the repositories where the app
- * is installed.
+ * The Puck GitHub App's public identity, for the link that installs it on
+ * an account. Signing in goes through the Puck server, which holds the
+ * App's client secret and private key; the desktop app holds neither. User
+ * tokens reach only the repositories where the app is installed.
  *
  * The app is "Puck Agents" (github.com/apps/puck-agents). It requests
  * repository permissions Contents, Pull requests, Issues, Workflows and

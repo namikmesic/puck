@@ -1,14 +1,15 @@
 /**
- * Settings → Providers → Integrations → GitHub. Signed out: device-flow
- * sign-in (the code, "Copy code and open github.com/login/device"). Signed
- * in: the login, the app installations with Manage links and "Install Puck
- * on an account", the config-repo picker with "Open repo", and Sign out. Tokens never reach this
- * module; main returns the login and settings only. Context in, elements
- * built here, no DOM lookups.
+ * Settings → Providers → Integrations → GitHub: signing in to Puck with
+ * GitHub. Signed out: "Sign in with GitHub" opens GitHub's sign-in page in
+ * the browser, through the Puck server; while it is open, a waiting line
+ * and Cancel. Signed in: the login, the app installations with Manage
+ * links and "Install Puck on an account", the config-repo picker with
+ * "Open repo", and "Sign out of Puck". Tokens never reach this module; main
+ * returns the login and settings only. Context in, elements built here, no
+ * DOM lookups.
  */
 
 import type {
-  DeviceCodePrompt,
   GithubInstallation,
   GithubRepo,
   IntegrationProviderInfo,
@@ -28,34 +29,6 @@ export interface GitHubCardContext {
   /** A sign-in started: poll until it settles. */
   onSignInStarted(providerId: string): void;
   copy(text: string): Promise<void>;
-}
-
-function codeBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo, code: DeviceCodePrompt): HTMLElement {
-  const box = el('div', 'pv-device');
-  box.appendChild(el('div', 'pv-subhead', 'Enter this code on GitHub'));
-  box.appendChild(el('div', 'pv-user-code', code.userCode));
-  box.appendChild(
-    el('div', 'card-sub', `Waiting for approval — the code expires at ${new Date(code.expiresAt).toLocaleTimeString()}`),
-  );
-  const foot = el('div', 'card-foot');
-  const open = button('btn-primary', 'Copy code and open github.com/login/device');
-  open.addEventListener('click', async () => {
-    try {
-      await ctx.copy(code.userCode);
-    } catch {
-      /* the code is on screen; opening the page still helps */
-    }
-    await ctx.bridge.openExternal(code.verificationUri);
-  });
-  const cancel = button('btn-ghost', 'Cancel');
-  cancel.addEventListener('click', async () => {
-    cancel.disabled = true;
-    await ctx.bridge.providerAuthCancel(info.id).catch((err: unknown) => (ctx.say(errText(err))));
-    ctx.onChange();
-  });
-  foot.append(open, cancel);
-  box.appendChild(foot);
-  return box;
 }
 
 function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo): HTMLElement {
@@ -166,17 +139,28 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
   });
   card.classList.add('pv-card', 'pv-github');
   card.dataset.provider = info.id;
-  card.appendChild(el('div', 'card-sub', auth.detail));
+  const waiting = auth.pending && !auth.connected;
+  card.appendChild(
+    el('div', 'card-sub', waiting ? 'Waiting for the sign-in in your browser… come back here when done' : auth.detail),
+  );
 
-  if (github.pendingCode && !auth.connected) {
-    card.appendChild(codeBlock(ctx, info, github.pendingCode));
+  if (waiting) {
+    const foot = el('div', 'card-foot');
+    const cancel = button('btn-ghost', 'Cancel');
+    cancel.addEventListener('click', async () => {
+      cancel.disabled = true;
+      await ctx.bridge.providerAuthCancel(info.id).catch((err: unknown) => ctx.say(errText(err)));
+      ctx.onChange();
+    });
+    foot.appendChild(cancel);
+    card.appendChild(foot);
     return card;
   }
 
   if (!auth.connected) {
+    card.appendChild(el('p', 'pv-note', `Puck signs you in through its server at ${github.server}; your runners and environments belong to that account.`));
     const foot = el('div', 'card-foot');
     const signIn = button('btn-primary', 'Sign in with GitHub');
-    signIn.disabled = !github.appConfigured;
     signIn.addEventListener('click', async () => {
       signIn.disabled = true;
       ctx.say('');
@@ -200,7 +184,7 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
   card.appendChild(configRepoBlock(ctx, info));
 
   const foot = el('div', 'card-foot');
-  const signOut = button('btn-ghost', 'Sign out');
+  const signOut = button('btn-ghost', 'Sign out of Puck');
   signOut.addEventListener('click', async () => {
     signOut.disabled = true;
     ctx.say('');

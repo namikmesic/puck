@@ -1,6 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { BridgeEventPayload, EnvironmentConfig, EnvLifecycleEvent, PuckBridge } from './harness/bridge';
-import { CHANNELS, ENV_EVENT_CHANNEL, EVENT_CHANNEL, FLUSH_CHANNEL, FLUSHED_CHANNEL } from './harness/channels';
+import type {
+  BridgeEventPayload,
+  DaemonEventPayload,
+  EnvironmentConfig,
+  EnvLifecycleEvent,
+  InstanceEvent,
+  PuckBridge,
+  RunnerEvent,
+} from './harness/bridge';
+import {
+  CHANNELS,
+  DAEMON_EVENT_CHANNEL,
+  ENV_EVENT_CHANNEL,
+  EVENT_CHANNEL,
+  FLUSH_CHANNEL,
+  FLUSHED_CHANNEL,
+  INSTANCE_EVENT_CHANNEL,
+  RUNNER_EVENT_CHANNEL,
+} from './harness/channels';
 
 const bridge: PuckBridge = {
   status: () => ipcRenderer.invoke(CHANNELS.status),
@@ -14,9 +31,32 @@ const bridge: PuckBridge = {
   providerAuthStart: (id) => ipcRenderer.invoke(CHANNELS.providerAuthStart, id),
   providerAuthCancel: (id) => ipcRenderer.invoke(CHANNELS.providerAuthCancel, id),
   providerAuthLogout: (id) => ipcRenderer.invoke(CHANNELS.providerAuthLogout, id),
-  sshHostAdd: (host) => ipcRenderer.invoke(CHANNELS.sshHostAdd, host),
-  sshHostRemove: (id) => ipcRenderer.invoke(CHANNELS.sshHostRemove, id),
-  targetHealth: (providerId, targetId) => ipcRenderer.invoke(CHANNELS.targetHealth, { providerId, targetId }),
+  runners: () => ipcRenderer.invoke(CHANNELS.runners),
+  runnerRegistrationToken: () => ipcRenderer.invoke(CHANNELS.runnerRegistrationToken),
+  runnerRegistrationCancel: (tokenId) => ipcRenderer.invoke(CHANNELS.runnerRegistrationCancel, tokenId),
+  runnerRemovalToken: (runnerId) => ipcRenderer.invoke(CHANNELS.runnerRemovalToken, runnerId),
+  runnerForceRemove: (runnerId) => ipcRenderer.invoke(CHANNELS.runnerForceRemove, runnerId),
+  runnerUpdate: (runnerId, patch) => ipcRenderer.invoke(CHANNELS.runnerUpdate, { runnerId, patch }),
+  runnerInstallLocal: () => ipcRenderer.invoke(CHANNELS.runnerInstallLocal),
+  runnerUninstallLocal: () => ipcRenderer.invoke(CHANNELS.runnerUninstallLocal),
+  onRunnerEvent: (cb) => {
+    ipcRenderer.on(RUNNER_EVENT_CHANNEL, (_event, payload: RunnerEvent) => cb(payload));
+  },
+  instanceList: () => ipcRenderer.invoke(CHANNELS.instanceList),
+  instanceStart: (spec) => ipcRenderer.invoke(CHANNELS.instanceStart, spec),
+  instanceOpen: (envId) => ipcRenderer.invoke(CHANNELS.instanceOpen, envId),
+  instanceStop: (envId) => ipcRenderer.invoke(CHANNELS.instanceStop, envId),
+  instanceResume: (envId) => ipcRenderer.invoke(CHANNELS.instanceResume, envId),
+  instanceRebuild: (envId) => ipcRenderer.invoke(CHANNELS.instanceRebuild, envId),
+  instanceDelete: (envId) => ipcRenderer.invoke(CHANNELS.instanceDelete, envId),
+  instanceForget: (envId) => ipcRenderer.invoke(CHANNELS.instanceForget, envId),
+  onInstanceEvent: (cb) => {
+    ipcRenderer.on(INSTANCE_EVENT_CHANNEL, (_event, payload: InstanceEvent) => cb(payload));
+  },
+  daemon: (envId, op, args) => ipcRenderer.invoke(CHANNELS.daemon, { envId, op, args }),
+  onDaemonEvent: (cb) => {
+    ipcRenderer.on(DAEMON_EVENT_CHANNEL, (_event, payload: DaemonEventPayload) => cb(payload));
+  },
   githubInstallations: () => ipcRenderer.invoke(CHANNELS.githubInstallations),
   githubRepos: () => ipcRenderer.invoke(CHANNELS.githubRepos),
   githubSetConfigRepo: (fullName) => ipcRenderer.invoke(CHANNELS.githubSetConfigRepo, fullName),

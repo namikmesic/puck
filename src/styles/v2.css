@@ -1,0 +1,128 @@
+/* Runner shell (PUCK_UI=v2). The settings modal reuses the shared stylesheet. */
+
+#v2-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--cream);
+  color: var(--charcoal);
+  font-family: var(--font-ui);
+}
+
+.v2-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px 8px;
+  -webkit-app-region: drag;
+}
+
+.v2-top button {
+  -webkit-app-region: no-drag;
+  margin-left: auto;
+}
+
+.v2-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  padding: 8px 20px 20px;
+}
+
+.v2-side,
+.v2-main {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.v2-envs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+
+.v2-env {
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--white);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.v2-env.selected {
+  border-color: var(--emerald);
+}
+
+.v2-start,
+.v2-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.v2-start select,
+.v2-secret input,
+.v2-composer textarea {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--white);
+  color: inherit;
+}
+
+.v2-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.v2-chat {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  padding: 12px 14px;
+}
+
+.v2-line {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.v2-line.user {
+  font-weight: 600;
+}
+
+.v2-line.note,
+.v2-empty,
+.v2-progress,
+.v2-error {
+  color: var(--gray);
+  font-size: 13px;
+}
+
+.v2-error:empty,
+.v2-progress:empty {
+  display: none;
+}
+
+.v2-composer {
+  flex-direction: row;
+  align-items: flex-end;
+}
+
+.v2-composer textarea {
+  flex: 1;
+  resize: none;
+}

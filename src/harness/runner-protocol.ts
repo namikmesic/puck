@@ -1,7 +1,7 @@
 /**
  * The runner control protocol: what the app says to a puck-runner over a
- * `control` channel, declared once here so the runner and (later) the app
- * compile against the same table.
+ * `control` channel, declared once here so the runner and the app compile
+ * against the same table.
  *
  * A control channel is an end-to-end encrypted byte stream (src/channel)
  * carrying NDJSON, in the daemon protocol's style. On open the runner sends
@@ -179,6 +179,19 @@ export type ControlRunnerFrame =
   | { t: 'res'; id: string; ok: false; error: { code: RunnerErrorCode; message: string } }
   | { t: 'event'; ev: ControlEvent }
   | { t: 'error'; code: 'bad-frame' | 'protocol-mismatch'; message: string };
+
+/**
+ * This Mac's runner also listens on a local unix socket (0600, in the
+ * runner's own directory), where file permissions authenticate and nothing
+ * is encrypted or relayed. Each connection is one channel: the app sends
+ * one `LocalOpen` line, the runner answers one `LocalAnswer` line, and on
+ * `accept` the connection carries exactly what a relay channel of that kind
+ * carries (control NDJSON, or the raw attach pipe).
+ */
+export type LocalOpen = { t: 'open'; kind: 'control' } | { t: 'open'; kind: 'attach'; envId: string };
+export type LocalAnswer = { t: 'accept' } | { t: 'close'; reason: string };
+/** The open line is small; anything longer is refused. */
+export const LOCAL_OPEN_MAX_BYTES = 1024;
 
 /** Environment ids as the Puck server mints them. */
 export const ENV_ID_RE = /^env_[0-9A-HJKMNP-TV-Z]{26}$/;

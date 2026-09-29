@@ -17,12 +17,28 @@ export const CHANNELS = {
   providerAuthStart: 'provider:auth-start',
   providerAuthCancel: 'provider:auth-cancel',
   providerAuthLogout: 'provider:auth-logout',
-  sshHostAdd: 'provider:ssh-host-add',
-  sshHostRemove: 'provider:ssh-host-remove',
-  targetHealth: 'provider:target-health',
   githubInstallations: 'github:installations',
   githubRepos: 'github:repos',
   githubSetConfigRepo: 'github:set-config-repo',
+
+  runners: 'runner:list',
+  runnerRegistrationToken: 'runner:registration-token',
+  runnerRegistrationCancel: 'runner:registration-cancel',
+  runnerRemovalToken: 'runner:removal-token',
+  runnerForceRemove: 'runner:force-remove',
+  runnerUpdate: 'runner:update',
+  runnerInstallLocal: 'runner:install-local',
+  runnerUninstallLocal: 'runner:uninstall-local',
+
+  instanceList: 'instance:list',
+  instanceStart: 'instance:start',
+  instanceOpen: 'instance:open',
+  instanceStop: 'instance:stop',
+  instanceResume: 'instance:resume',
+  instanceRebuild: 'instance:rebuild',
+  instanceDelete: 'instance:delete',
+  instanceForget: 'instance:forget',
+  daemon: 'daemon:command',
 
   definitionRefs: 'defs:refs',
   definitionsAt: 'defs:at',
@@ -54,7 +70,10 @@ export const CHANNELS = {
   startTurn: 'harness:start-turn',
   interrupt: 'harness:interrupt',
   answerAsk: 'harness:answer-ask',
-} as const satisfies Record<Exclude<keyof PuckBridge, 'onEvent' | 'onFlush' | 'onEnvEvent'>, string>;
+} as const satisfies Record<
+  Exclude<keyof PuckBridge, 'onEvent' | 'onFlush' | 'onEnvEvent' | 'onRunnerEvent' | 'onInstanceEvent' | 'onDaemonEvent'>,
+  string
+>;
 
 /* Push channels (main → renderer) live outside the invoke table. */
 
@@ -62,6 +81,12 @@ export const CHANNELS = {
 export const EVENT_CHANNEL = 'harness:event';
 /** Environment lifecycle progress (`EnvLifecycleEvent`). */
 export const ENV_EVENT_CHANNEL = 'env:lifecycle';
+/** Runner list, This Mac and server-connection changes (`RunnerEvent`). */
+export const RUNNER_EVENT_CHANNEL = 'runner:event';
+/** Environment changes (`InstanceEvent`). */
+export const INSTANCE_EVENT_CHANNEL = 'instance:event';
+/** The attached environment's daemon events (`DaemonEventPayload`). */
+export const DAEMON_EVENT_CHANNEL = 'daemon:event';
 /** Main is about to quit: persist everything pending (payload: a token). */
 export const FLUSH_CHANNEL = 'app:flush';
 /** The renderer's one-way reply once its saves settled (payload: that token). */

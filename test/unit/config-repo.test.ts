@@ -159,6 +159,8 @@ describe('definitionsAt', () => {
         startable: true,
         orchestrator: 'lead',
         agents: ['implementer', 'reviewer'],
+        secrets: [],
+        resources: { cpus: 4, memory: '8g' },
       },
     ]);
     expect(listing.agents.map((a) => [a.name, a.harness, a.valid])).toEqual([

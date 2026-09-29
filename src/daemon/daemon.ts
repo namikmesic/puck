@@ -623,7 +623,8 @@ export class Daemon {
     'credentials.put': async ({ harness }) => {
       for (const { id, content } of harness) {
         try {
-          await this.credentials.putHarness(id, content, this.homeReady);
+          if (content === null) await this.credentials.removeHarness(id);
+          else await this.credentials.putHarness(id, content, this.homeReady);
         } catch (err) {
           throw new OpError('invalid-args', (err as Error).message);
         }

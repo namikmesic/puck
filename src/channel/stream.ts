@@ -1,6 +1,6 @@
 /**
- * One relay channel as a byte stream, for either end (the runner today, the
- * app later): encryption with the channel's cipher (e2e.ts), framing into
+ * One relay channel as a byte stream, for either end (the runner and the
+ * app): encryption with the channel's cipher (e2e.ts), framing into
  * data frames of at most MAX_PLAINTEXT_BYTES, and the credit arithmetic of
  * wire.ts, which the Puck server enforces.
  *

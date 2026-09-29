@@ -187,6 +187,42 @@ describe('config.sh', { timeout: 20_000 }, () => {
   });
 });
 
+describe('config.sh --local-socket', { timeout: 20_000 }, () => {
+  it('records the socket for the app on this machine, and refuses a path unix sockets cannot hold', async () => {
+    const session = await signIn(h, 'octo');
+    const socket = path.join(dir, 'runner', 'local.sock');
+    await configure(
+      { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: socket, labels: 'local', serviceLabel: 'com.puck.runner.abcd1234' },
+      { paths, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' }, hostname: 'mbp' },
+    );
+    expect(readConfig(paths)).toMatchObject({ localSocket: socket, labels: ['macos', 'arm64', 'local'], serviceLabel: 'com.puck.runner.abcd1234' });
+
+    const other = runnerPaths(path.join(dir, 'other'));
+    await expect(
+      configure(
+        { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: `/${'x'.repeat(120)}.sock` },
+        { paths: other, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' } },
+      ),
+    ).rejects.toThrow(/longer than 103 bytes/);
+    expect(isConfigured(other)).toBe(false);
+
+    const dotdot = runnerPaths(path.join(dir, 'dotdot'));
+    await expect(
+      configure(
+        { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: `${dir}/unused/../local.sock` },
+        { paths: dotdot, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' } },
+      ),
+    ).rejects.toThrow(/normalized/);
+    expect(isConfigured(dotdot)).toBe(false);
+    expect(fs.existsSync(`${dir}/unused`)).toBe(false);
+  });
+
+  it('reads older .runner files without the field as off', () => {
+    fs.writeFileSync(paths.config, JSON.stringify({ runnerId: 'rnr_x', name: 'a', serverUrl: 'http://s' }));
+    expect(readConfig(paths).localSocket).toBeNull();
+  });
+});
+
 describe('config.sh remove', { timeout: 20_000 }, () => {
   async function registered(session: SignedIn) {
     await configure(

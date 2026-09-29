@@ -1,8 +1,8 @@
 /**
  * The environment daemon's client protocol, declared once in this module.
- * puckd imports it, and so does puck-runner for its own short connections
- * (GitHub token pushes). The desktop app does not import it yet and still
- * talks to the container runner.
+ * puckd imports it, and so do puck-runner, for its own short connections
+ * (GitHub token pushes), and the desktop app, whose daemon client attaches
+ * to environments through their runner.
  *
  * Transport: one NDJSON stream per attach. The runner hosting the
  * environment runs `docker exec -i <container> node /opt/puck/puckd.js
@@ -304,7 +304,8 @@ export interface OpMap {
     result: Record<string, never>;
   };
   'definition.apply': { args: { definition: unknown; pin: Pin }; result: { classes: string[] } };
-  'credentials.put': { args: { harness: { id: string; content: string }[] }; result: Record<string, never> };
+  /** Fresh harness credential files from the app; `content: null` removes one (the user signed out of it). */
+  'credentials.put': { args: { harness: { id: string; content: string | null }[] }; result: Record<string, never> };
   'credentials.get': { args: Record<string, never>; result: { harness: { id: string; content: string }[] } };
   'github.put': { args: { grants: GithubGrant[] }; result: Record<string, never> };
   'secrets.put': { args: { values: Record<string, string> }; result: Record<string, never> };

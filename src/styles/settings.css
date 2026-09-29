@@ -417,30 +417,6 @@
   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
 }
 
-.pv-target {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.pv-target-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.pv-target-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .pv-health-msg {
   font-size: 12px;
   line-height: 1.45;
@@ -451,16 +427,10 @@
   display: none;
 }
 
-.pv-add-host,
 .pv-repo-row {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.pv-add-host input {
-  flex: 1 1 160px;
-  min-width: 0;
 }
 
 .pv-repo-row select {
@@ -516,17 +486,144 @@
   overflow-x: auto;
 }
 
-.pv-user-code {
-  font-family: var(--font-mono);
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: 0.12em;
-  color: var(--charcoal);
-}
-
 .pv-note {
   margin: 0;
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--gray);
+}
+
+/* ---------- Runners (rn-*): the machines that host environments ---------- */
+
+.rn-card {
+  grid-column: 1 / -1;
+}
+
+.rn-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.rn-row {
+  border-top: 1px solid var(--line);
+  padding: 9px 0 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rn-row-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rn-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gray-light);
+}
+
+.rn-dot.on {
+  border-color: var(--emerald);
+  background: var(--emerald);
+}
+
+.rn-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rn-status {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--gray);
+}
+
+.rn-active .rn-status {
+  color: var(--emerald);
+}
+
+.rn-details {
+  margin: 2px 0;
+}
+
+.rn-edit {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rn-edit input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.rn-add {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rn-os {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rn-commands,
+.rn-removal,
+.rn-this-mac {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rn-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rn-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rn-block .pv-code {
+  white-space: pre;
+}
+
+.rn-expiry {
+  font-size: 12px;
+  color: var(--gray);
+}
+
+.rn-waiting,
+.rn-online {
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.rn-waiting {
+  color: #8a6d1d;
+}
+
+.rn-waiting:empty {
+  display: none;
+}
+
+.rn-online {
+  color: var(--emerald);
 }

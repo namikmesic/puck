@@ -118,14 +118,15 @@
                 <p class="page-sub">
                   Sign in once per provider. The sign-in opens in your browser. Tokens are stored
                   in the OS keychain (Electron safeStorage). Harness tokens are copied into every
-                  environment; the GitHub sign-in stays in the app. If the keychain is unavailable,
-                  Puck refuses to store tokens rather than fall back to plaintext. Disconnect removes
-                  Puck's tokens and the copies in running environments.
+                  environment. Signing in to Puck with GitHub goes through the Puck server, which
+                  keeps your GitHub tokens; the app keeps only its Puck session. If the keychain is
+                  unavailable, Puck refuses to store tokens rather than fall back to plaintext.
+                  Disconnect removes Puck's tokens and the copies in running environments.
                 </p>
                 <div class="form-msg" id="provider-msg"></div>
                 <h3 class="pv-group" id="pv-harness-title">Harnesses</h3>
                 <div class="cards" id="pv-harness-cards"></div>
-                <h3 class="pv-group" id="pv-env-title">Environments</h3>
+                <h3 class="pv-group" id="pv-env-title">Runners</h3>
                 <div class="cards pv-wide" id="pv-env-cards"></div>
                 <h3 class="pv-group" id="pv-integration-title">Integrations</h3>
                 <div class="cards pv-wide" id="pv-integration-cards"></div>

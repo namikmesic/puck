@@ -3,7 +3,7 @@
  *
  *   config.sh  run.sh  svc.sh  VERSION        the scripts and the release version
  *   bin/node  bin/puck-runner.js             the bundled Node runtime and the runner
- *   .runner         { runnerId, name, serverUrl, labels, maxEnvironments, disableUpdate, owner }   0644
+ *   .runner         { runnerId, name, serverUrl, labels, maxEnvironments, disableUpdate, owner, localSocket, serviceLabel }   0644
  *   .credentials    { runnerId, keyFile, keyFingerprint }                                        0600
  *   .runner_key     the runner's Ed25519 private key, PKCS#8 PEM                                0600
  *   .service        the installed service unit, when svc.sh installed one                      0644
@@ -69,6 +69,10 @@ export interface RunnerConfig {
   maxEnvironments: number | null;
   disableUpdate: boolean;
   owner: string | null;
+  /** Where the local socket listens (local.ts), or null when it is off. */
+  localSocket: string | null;
+  /** LaunchAgent label for this install, when it must not follow the runner name. */
+  serviceLabel: string | null;
 }
 
 export interface RunnerCredentials {
@@ -120,6 +124,8 @@ export function readConfig(paths: RunnerPaths): RunnerConfig {
     maxEnvironments: typeof c.maxEnvironments === 'number' ? c.maxEnvironments : null,
     disableUpdate: c.disableUpdate === true,
     owner: typeof c.owner === 'string' ? c.owner : null,
+    localSocket: typeof c.localSocket === 'string' && c.localSocket ? c.localSocket : null,
+    serviceLabel: typeof c.serviceLabel === 'string' && c.serviceLabel ? c.serviceLabel : null,
   };
 }
 

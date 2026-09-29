@@ -12,8 +12,10 @@ import * as configRepo from './main/config-repo';
 import * as conversations from './main/conversations';
 import * as providerRegistry from './main/providers';
 import * as github from './main/providers/github';
-import * as providersStore from './main/providers/providers-store';
 import * as environments from './main/environments';
+import * as instances from './main/instances';
+import * as runners from './main/runners';
+import * as serverApi from './main/server/api';
 import { log } from './main/log';
 import * as runner from './main/runner';
 import * as sessionRegistry from './main/session-registry';
@@ -23,16 +25,29 @@ import * as support from './main/support';
 import {
   agentConfigFrom,
   askAnswersFrom,
+  daemonCallFrom,
+  enrollTokenIdFrom,
   envConfigFrom,
+  instanceIdFrom,
   objArgs,
   pinFrom,
   repoNameFrom,
   requireId,
   requireSecretKey,
   requireString,
-  sshHostFrom,
+  runnerIdFrom,
+  runnerPatchFrom,
+  startSpecFrom,
 } from './main/ipcguard';
-import { CHANNELS, ENV_EVENT_CHANNEL, EVENT_CHANNEL } from './harness/channels';
+import {
+  CHANNELS,
+  DAEMON_EVENT_CHANNEL,
+  ENV_EVENT_CHANNEL,
+  EVENT_CHANNEL,
+  INSTANCE_EVENT_CHANNEL,
+  RUNNER_EVENT_CHANNEL,
+} from './harness/channels';
+import type { RunnerEvent } from './harness/bridge';
 import { dockerLocation } from './main/docker-client';
 import { applyIsolatedLaunch } from './main/isolation';
 
@@ -67,23 +82,46 @@ process.on('uncaughtException', (err) => {
 runner.useExecSpawner(environments.runnerExecSpawner);
 runner.useDisconnectExplainer(environments.explainDisconnect);
 environments.onEnvReset(sessionRegistry.forgetEnvironment);
-environments.onLifecycle((payload) => {
+function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send(ENV_EVENT_CHANNEL, payload);
+    if (!win.isDestroyed()) win.webContents.send(channel, payload);
   }
+}
+environments.onLifecycle((payload) => broadcast(ENV_EVENT_CHANNEL, payload));
+// Environments on runners: runner-list, environment and daemon events stream
+// to the renderer; a harness sign-in or sign-out reaches the attached
+// environment over its daemon connection (the others on their next attach).
+runners.onRunnersChange((e) => {
+  const event: RunnerEvent = e.kind === 'state' ? { kind: 'state', state: runners.state() } : e;
+  broadcast(RUNNER_EVENT_CHANNEL, event);
 });
-providerRegistry.setOnLogin(() =>
+instances.onInstanceEvent((e) => broadcast(INSTANCE_EVENT_CHANNEL, e));
+instances.onDaemonEvent((e) => broadcast(DAEMON_EVENT_CHANNEL, e));
+providerRegistry.setOnLogin(() => {
   environments.injectCredentialsIntoRunning().catch((err) => {
     log.error('Credential push into running environments failed', err);
-  }),
-);
-providerRegistry.setOnLogout((provider) => environments.purgeCredentials(provider));
+  });
+  instances.onHarnessLogin().catch((err) => log.error('Credential push into the attached environment failed', err));
+});
+providerRegistry.setOnLogout(async (provider) => {
+  await instances.onHarnessLogout(provider.id);
+  await environments.purgeCredentials(provider);
+});
 
 // Injected by Forge's webpack plugin: dev-server vs packaged bundle URLs.
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
+declare const MAIN_WINDOW_V2_WEBPACK_ENTRY: string;
+declare const MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY: string;
+
+/** PUCK_UI=v2 loads the runner shell. The legacy window stays the default until cutover. */
+function windowAssets(): { url: string; preload: string } {
+  if (process.env.PUCK_UI === 'v2') return { url: MAIN_WINDOW_V2_WEBPACK_ENTRY, preload: MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY };
+  return { url: MAIN_WINDOW_WEBPACK_ENTRY, preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY };
+}
 
 const createWindow = (): void => {
+  const assets = windowAssets();
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
@@ -94,7 +132,7 @@ const createWindow = (): void => {
     // An isolated launch must not take focus from the person at the desk.
     show: !isolated,
     webPreferences: {
-      preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
+      preload: assets.preload,
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -111,14 +149,14 @@ const createWindow = (): void => {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== MAIN_WINDOW_WEBPACK_ENTRY) {
+    if (url !== assets.url) {
       event.preventDefault();
       if (/^https?:/i.test(url)) void shell.openExternal(url);
     }
   });
 
   if (isolated) mainWindow.once('ready-to-show', () => mainWindow.showInactive());
-  mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
+  mainWindow.loadURL(assets.url);
   log.info('window.created');
 };
 
@@ -147,26 +185,61 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   },
   [CHANNELS.providerAuthStart]: async (_event, id) => {
     const provider = signInProvider(requireId(id, 'provider'));
-    if (provider.kind === 'harness') return { url: await provider.auth.start() };
-    return provider.auth.start();
+    return { url: await provider.auth.start() };
   },
   [CHANNELS.providerAuthCancel]: (_event, id) => {
     signInProvider(requireId(id, 'provider')).auth.cancel();
   },
   [CHANNELS.providerAuthLogout]: (_event, id) => signInProvider(requireId(id, 'provider')).auth.logout(),
-  [CHANNELS.sshHostAdd]: (_event, host) => {
-    providersStore.addSshHost(sshHostFrom(host));
-    return providerRegistry.providerInfos();
+  [CHANNELS.runners]: () => runners.state(),
+  [CHANNELS.runnerRegistrationToken]: async () => {
+    const token = await serverApi.registrationToken();
+    const releases = await serverApi.releases().catch(() => ({ latest: null, assets: [] }));
+    return {
+      id: token.id,
+      token: token.token,
+      expiresAt: token.expiresAt,
+      serverUrl: token.serverUrl,
+      version: releases.latest,
+      assets: releases.assets.filter((a) => a.version === releases.latest),
+    };
   },
-  [CHANNELS.sshHostRemove]: (_event, id) => {
-    providersStore.removeSshHost(requireId(id, 'SSH host'));
-    return providerRegistry.providerInfos();
+  [CHANNELS.runnerRegistrationCancel]: (_event, id) => serverApi.revokeEnrollToken('registration', enrollTokenIdFrom(id)),
+  [CHANNELS.runnerRemovalToken]: async (_event, runnerId) => {
+    runnerIdFrom(runnerId);
+    const token = await serverApi.removalToken();
+    return { id: token.id, token: token.token, expiresAt: token.expiresAt, command: `./config.sh remove --token ${token.token}` };
   },
-  [CHANNELS.targetHealth]: (_event, args) => {
+  [CHANNELS.runnerForceRemove]: async (_event, runnerId) => {
+    await runners.forceRemove(runnerIdFrom(runnerId));
+    return runners.state();
+  },
+  [CHANNELS.runnerUpdate]: async (_event, args) => {
     const a = objArgs(args);
-    const provider = providerRegistry.requireProvider(requireId(a.providerId, 'provider'));
-    if (provider.kind !== 'environment') throw new Error(`${provider.label} has no targets.`);
-    return provider.health(requireId(a.targetId, 'target'));
+    await serverApi.updateRunner(runnerIdFrom(a.runnerId), runnerPatchFrom(a.patch));
+    await runners.refresh();
+    return runners.state();
+  },
+  [CHANNELS.runnerInstallLocal]: async () => {
+    await runners.installLocal();
+    return runners.state();
+  },
+  [CHANNELS.runnerUninstallLocal]: async () => {
+    await runners.uninstallLocal();
+    return runners.state();
+  },
+
+  [CHANNELS.instanceList]: () => instances.list(),
+  [CHANNELS.instanceStart]: (_event, spec) => instances.start(startSpecFrom(spec)),
+  [CHANNELS.instanceOpen]: (_event, envId) => instances.open(instanceIdFrom(envId)),
+  [CHANNELS.instanceStop]: (_event, envId) => instances.stop(instanceIdFrom(envId)),
+  [CHANNELS.instanceResume]: (_event, envId) => instances.resume(instanceIdFrom(envId)),
+  [CHANNELS.instanceRebuild]: (_event, envId) => instances.rebuild(instanceIdFrom(envId)),
+  [CHANNELS.instanceDelete]: (_event, envId) => instances.remove(instanceIdFrom(envId)),
+  [CHANNELS.instanceForget]: (_event, envId) => instances.forget(instanceIdFrom(envId)),
+  [CHANNELS.daemon]: (_event, args) => {
+    const { envId, op, args: opArgs } = daemonCallFrom(args);
+    return instances.daemon(envId, op, opArgs as never);
   },
   [CHANNELS.githubInstallations]: () => github.installations(),
   [CHANNELS.githubRepos]: () => github.repositories(),
@@ -286,10 +359,11 @@ app.on('ready', () => {
       });
     });
   }
-  // A GitHub sign-in saved by the removed personal-token mode reads as
-  // signed out; the stored token is cleared synchronously, before any window.
-  void github.retireLegacyTokenSignIn().catch((err) => log.error('Retiring the GitHub token sign-in failed', err));
   createWindow();
+  // Follow the signed-in user's runners and reattach the environment the
+  // window showed last (it replays from its cursor).
+  runners.start();
+  instances.resumeCurrent();
   // Locate the docker CLI up front (Finder launches do not inherit the shell
   // PATH); a miss is reported by the first environment operation that needs it.
   void dockerLocation().catch((err) => console.error('Docker discovery:', err));
@@ -298,12 +372,24 @@ app.on('ready', () => {
 // Quit is a drain: the first request is held while the renderer flushes its
 // debounced saves and the composer draft and every queued store write
 // settles; then it proceeds (bounded, so a stuck disk cannot wedge quit).
-installQuitDrain(app, { flushRenderers, drainStores: flushWrites, timeoutMs: 5_000 });
+installQuitDrain(app, {
+  flushRenderers,
+  drainStores: async () => {
+    instances.flushSeq();
+    await flushWrites();
+  },
+  timeoutMs: 5_000,
+});
 
 // Kill runner docker-exec children on quit — no orphaned processes.
 app.on('before-quit', () => runner.detachAll());
 // will-quit fires once, after the drain has re-issued quit; before-quit fires twice.
-app.on('will-quit', () => log.info('app.quit'));
+// Environment connections close last: every environment keeps working.
+app.on('will-quit', () => {
+  instances.shutdown();
+  runners.shutdown();
+  log.info('app.quit');
+});
 
 // macOS convention: closing the window keeps the app (and menu bar) alive.
 app.on('window-all-closed', () => {

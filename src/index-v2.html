@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Puck</title>
+  </head>
+  <body>
+    <div id="v2-app">
+      <header class="v2-top">
+        <span class="logo">P</span>
+        <span class="brand-name">puck</span>
+        <button class="icon-btn" id="open-settings" type="button" aria-label="Settings">Settings</button>
+      </header>
+      <div class="v2-body">
+        <aside class="v2-side">
+          <p class="recents-label">Environments</p>
+          <div class="v2-envs" id="v2-envs"></div>
+          <form class="v2-start" id="v2-start">
+            <select id="v2-ref" aria-label="Config ref"></select>
+            <select id="v2-def" aria-label="Environment definition"></select>
+            <select id="v2-runner" aria-label="Runner"></select>
+            <div id="v2-secrets"></div>
+            <button class="btn-primary" id="v2-start-btn" type="submit">Start</button>
+            <p class="v2-progress" id="v2-progress"></p>
+          </form>
+        </aside>
+        <section class="v2-main">
+          <div class="v2-chat" id="v2-chat"></div>
+          <p class="v2-error" id="v2-error"></p>
+          <form class="v2-composer" id="v2-composer">
+            <textarea id="v2-prompt" rows="2" placeholder="Message the orchestrator"></textarea>
+            <button class="btn-primary" id="v2-send" type="submit">Send</button>
+          </form>
+        </section>
+      </div>
+    </div>
+
+    <div class="settings-overlay hidden" id="settings-overlay">
+      <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+        <nav class="sm-menu" id="settings-nav" aria-label="Settings sections">
+          <p class="nav-label">Settings</p>
+          <button class="nav-item" data-section="providers" type="button">Providers</button>
+        </nav>
+        <div class="sm-body">
+          <button class="icon-btn sm-close" id="settings-close" type="button" aria-label="Close settings">Close</button>
+          <div class="sm-page" id="settings-view">
+            <div class="env-page">
+              <div class="settings-section" id="sec-providers">
+                <h2 class="page-title" id="sec-providers-title" tabindex="-1">Providers</h2>
+                <p class="page-sub">
+                  Sign in to Puck with GitHub. The sign-in opens in your browser. Runners host
+                  environments; the app reaches them through the Puck server or This Mac's local socket.
+                </p>
+                <div class="form-msg" id="provider-msg"></div>
+                <h3 class="pv-group" id="pv-harness-title">Harnesses</h3>
+                <div class="cards" id="pv-harness-cards"></div>
+                <h3 class="pv-group" id="pv-env-title">Runners</h3>
+                <div class="cards pv-wide" id="pv-env-cards"></div>
+                <h3 class="pv-group" id="pv-integration-title">Integrations</h3>
+                <div class="cards pv-wide" id="pv-integration-cards"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

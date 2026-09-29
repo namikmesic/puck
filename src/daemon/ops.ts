@@ -185,10 +185,10 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
     return {
       harness: o.harness.map((h: unknown) => {
         const e = obj(h);
-        if (typeof e.id !== 'string' || !NAME_RE.test(e.id) || typeof e.content !== 'string') {
-          bad('each harness credential needs an id and content.');
+        if (typeof e.id !== 'string' || !NAME_RE.test(e.id) || (typeof e.content !== 'string' && e.content !== null)) {
+          bad('each harness credential needs an id and content (null removes it).');
         }
-        return { id: e.id, content: e.content };
+        return { id: e.id, content: e.content as string | null };
       }),
     };
   },

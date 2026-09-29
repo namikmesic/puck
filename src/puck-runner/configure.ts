@@ -39,6 +39,7 @@ import {
   type RunnerPaths,
 } from './files';
 import { createRunnerKey, loadRunnerKey, signAssertion } from './identity';
+import { checkSocketPath } from './local';
 import { readServiceRecord, Service, ServiceError, type ServiceDeps } from './service';
 
 export class ConfigureError extends Error {
@@ -101,6 +102,10 @@ export interface ConfigureOptions {
   unattended: boolean;
   replace: boolean;
   disableUpdate: boolean;
+  /** Also listen on this unix socket for the app on this machine (the This Mac runner). */
+  localSocket?: string;
+  /** LaunchAgent label, when this install must not share the name-derived one. */
+  serviceLabel?: string;
 }
 
 export interface ConfigureDeps {
@@ -125,7 +130,11 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
     throw new ConfigureError('--url must be the Puck server URL, like https://puck.example.com');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new ConfigureError('--url must be an http(s) URL.');
-  if (!/^PRT_[A-Za-z0-9]{16,}$/.test(opts.token)) throw new ConfigureError('--token must be a registration token (PRT_…) from Settings → Runners → Add runner.');
+  if (!/^PRT_[A-Za-z0-9]{16,}$/.test(opts.token)) throw new ConfigureError('--token must be a registration token (PRT_…) from Settings → Providers → Runners → Add runner.');
+  if (opts.localSocket !== undefined) {
+    const problem = checkSocketPath(opts.localSocket);
+    if (problem) throw new ConfigureError(problem);
+  }
 
   io.print(`Puck runner ${deps.version} (${deps.platform.os}-${deps.platform.arch})`);
   io.print('Checking Docker…');
@@ -176,6 +185,8 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
       maxEnvironments,
       disableUpdate: opts.disableUpdate,
       owner: res.owner?.login ?? null,
+      localSocket: opts.localSocket ?? null,
+      serviceLabel: opts.serviceLabel || null,
     });
     writeCredentials(paths, { runnerId: res.runnerId, keyFile: '.runner_key', keyFingerprint: key.fingerprint });
   } catch (err) {
@@ -211,7 +222,7 @@ export async function remove(opts: RemoveOptions, deps: RemoveDeps): Promise<voi
   if (!isConfigured(paths)) throw new ConfigureError('This runner is not configured; there is nothing to remove.');
   const config = readConfig(paths);
   if (opts.token !== undefined && !/^PRR_[A-Za-z0-9]{16,}$/.test(opts.token)) {
-    throw new ConfigureError('--token must be a removal token (PRR_…) from Settings → Runners → Remove.');
+    throw new ConfigureError('--token must be a removal token (PRR_…) from Settings → Providers → Runners → Remove.');
   }
   const ops = new DockerOps(deps.docker);
 

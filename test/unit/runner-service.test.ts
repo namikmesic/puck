@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runnerPaths, type RunnerConfig } from '../../src/puck-runner/files';
-import { launchdPlist, readServiceRecord, Service, serviceSlug, systemdUnit, type ServiceDeps } from '../../src/puck-runner/service';
+import { launchdLabel, launchdPlist, readServiceRecord, Service, serviceSlug, systemdUnit, type ServiceDeps } from '../../src/puck-runner/service';
 
 // svc.sh: the systemd unit and the LaunchAgent the runner installs, and
 // the systemctl / launchctl argv of each command.
@@ -99,6 +99,33 @@ describe('runner service', () => {
     expect(warn.lines.join('\n')).toContain('sudo usermod -aG docker alice');
     const notRoot = deps('linux', 1000);
     await expect(new Service(notRoot.d).install()).rejects.toThrow('sudo ./svc.sh install');
+  });
+
+  it('gives each account its own LaunchAgent and leaves the other in place', async () => {
+    expect(launchdLabel('This Mac (mbp)', 'com.puck.runner.aaaaaaaa')).toBe('com.puck.runner.aaaaaaaa');
+    expect(launchdLabel('This Mac (mbp)', null)).toBe('com.puck.runner.this-mac-mbp');
+    const home = path.join(dir, 'home');
+    const install = async (label: string, root: string): Promise<void> => {
+      const { d } = deps('darwin', 501);
+      await new Service({
+        ...d,
+        homedir: home,
+        paths: runnerPaths(root),
+        config: { ...config, serviceLabel: label, localSocket: null },
+      }).install();
+      fs.mkdirSync(root, { recursive: true });
+    };
+    const aRoot = path.join(dir, 'a');
+    const bRoot = path.join(dir, 'b');
+    fs.mkdirSync(aRoot, { recursive: true });
+    fs.mkdirSync(bRoot, { recursive: true });
+    await install('com.puck.runner.aaaaaaaa', aRoot);
+    await install('com.puck.runner.bbbbbbbb', bRoot);
+    const agents = path.join(home, 'Library', 'LaunchAgents');
+    expect(fs.existsSync(path.join(agents, 'com.puck.runner.aaaaaaaa.plist'))).toBe(true);
+    expect(fs.existsSync(path.join(agents, 'com.puck.runner.bbbbbbbb.plist'))).toBe(true);
+    expect(fs.readFileSync(path.join(agents, 'com.puck.runner.aaaaaaaa.plist'), 'utf8')).toContain(aRoot);
+    expect(fs.readFileSync(path.join(agents, 'com.puck.runner.bbbbbbbb.plist'), 'utf8')).toContain(bRoot);
   });
 
   it('bootstraps a LaunchAgent in the user domain on macOS, without sudo', async () => {

@@ -278,6 +278,10 @@ export interface EnvironmentSummary {
   startable: boolean;
   orchestrator: string | null;
   agents: string[];
+  /** Secret names the start form asks for. Empty when the file did not validate. */
+  secrets: string[];
+  /** What placement checks against a runner. Nulls when the file did not validate. */
+  resources: { cpus: number | null; memory: string | null };
 }
 
 export interface ListedError extends DefinitionError {

@@ -314,7 +314,7 @@ function showView(view: View): void {
   } else if (view === 'agent-detail') {
     agentTitle.focus();
   } else {
-    providersView.stopPolling(); // leaving settings abandons any pending connect poll
+    providersView.close(); // leaving settings abandons any pending connect poll and the Add runner dialog
     void refreshStatus();
     prompt.focus();
   }
@@ -363,6 +363,11 @@ const providersView = initProvidersView({
 // Back from github.com (installing the app, approving a sign-in): re-check.
 window.addEventListener('focus', () => {
   if (navState.view === 'settings' && navState.lastSection === 'providers') void providersView.refresh();
+});
+// Runners come and go (a new one registers, one goes offline): update in place.
+bridge?.onRunnerEvent((e) => {
+  if (e.kind === 'state') providersView.runnersChanged(e.state);
+  else void bridge.runners().then((state) => providersView.runnersChanged(state));
 });
 
 /* ---------- Agents (settings section + detail page) ---------- */

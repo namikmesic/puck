@@ -39,7 +39,7 @@ equivalent to root on this machine: prefer a dedicated user for the runner.
 
 Options:
   --url <url>                 The Puck server, e.g. https://puck.example.com
-  --token <token>             The registration token from Settings → Runners → Add runner (PRT_…)
+  --token <token>             The registration token from Settings → Providers → Runners → Add runner (PRT_…)
   --token-file <file>         Read the token from a file instead of the command line
   --name <name>               Runner name (default: this machine's host name)
   --labels <a,b>              Extra labels, comma-separated
@@ -47,10 +47,13 @@ Options:
   --unattended                Ask nothing; use the flags and the defaults
   --replace                   Replace a runner you registered under the same name
   --disableupdate             Do not update the runner automatically
+  --local-socket <path>       Also listen on this unix socket for Puck on this machine
+                              (the This Mac runner Puck installs uses it)
+  --service-label <label>     LaunchAgent label (com.puck.runner.<name>); This Mac sets one per account
   -h, --help                  Show this help
 
 Remove options:
-  --token <token>             The removal token from Settings → Runners → Remove (PRR_…);
+  --token <token>             The removal token from Settings → Providers → Runners → Remove (PRR_…);
                               without one, the runner signs the request with its own key
   --token-file <file>         Read the token from a file
   --keep-environments         Keep this machine's environments (delete them later with docker)
@@ -110,6 +113,8 @@ async function config(argv: string[]): Promise<number> {
       unattended: { type: 'boolean' },
       replace: { type: 'boolean' },
       disableupdate: { type: 'boolean' },
+      'local-socket': { type: 'string' },
+      'service-label': { type: 'string' },
       'keep-environments': { type: 'boolean' },
       'delete-environments': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -154,6 +159,8 @@ async function config(argv: string[]): Promise<number> {
         unattended: !!values.unattended,
         replace: !!values.replace,
         disableUpdate: !!values.disableupdate,
+        localSocket: values['local-socket'],
+        serviceLabel: values['service-label'],
       },
       { paths, docker: realDocker, io, version: RUNNER_VERSION, platform },
     );
