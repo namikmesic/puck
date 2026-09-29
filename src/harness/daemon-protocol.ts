@@ -457,7 +457,7 @@ export function daemonCommandFrom(op: unknown, args: unknown): { op: RendererOp;
 
 export type DaemonEvent =
   | ({ kind: 'instance.status' } & InstanceState)
-  | { kind: 'instance.definition'; sha: string; pin: Pin; classes: string[] }
+  | { kind: 'instance.definition'; sha: string; pin: Pin; classes: string[]; repos?: { github: string; dir: string }[] }
   | ({ kind: 'github.auth' } & GithubAuth)
   | { kind: 'session.upsert'; session: SessionSummary }
   | { kind: 'turn.user'; sessionId: string; entry: UserEntry }

@@ -30,6 +30,7 @@ import {
   envConfigFrom,
   instanceIdFrom,
   objArgs,
+  appliedPinFrom,
   pinFrom,
   repoNameFrom,
   requireId,
@@ -245,7 +246,7 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.instanceCheckUpdate]: (_event, envId) => instances.checkUpdate(instanceIdFrom(envId)),
   [CHANNELS.instanceApplyUpdate]: (_event, args) => {
     const a = objArgs(args);
-    return instances.applyUpdate(instanceIdFrom(a.envId), pinFrom(a.pin));
+    return instances.applyUpdate(instanceIdFrom(a.envId), appliedPinFrom(a.pin));
   },
   [CHANNELS.instanceUpgradeDaemon]: (_event, args) => {
     const a = objArgs(args);

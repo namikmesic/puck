@@ -811,7 +811,13 @@ describe('definition.apply', () => {
     });
     expect(await c.cmd('definition.apply', { definition: hot, pin })).toEqual({ classes: ['hot'] });
     expect((await c.cmd<Snapshot>('snapshot.get')).capacity.agents.implementer.max).toBe(4);
-    expect(c.events()).toContainEqual({ kind: 'instance.definition', sha: 'def5678', pin, classes: ['hot'] });
+    expect(c.events()).toContainEqual({
+      kind: 'instance.definition',
+      sha: 'def5678',
+      pin,
+      classes: ['hot'],
+      repos: [{ github: 'octo/app', dir: 'app' }],
+    });
 
     const rebuild = await c.raw('definition.apply', { definition: { ...hot, image: 'node:24' }, pin });
     expect(rebuild).toMatchObject({ ok: false, error: { code: 'invalid-state', message: expect.stringContaining('image') } });
@@ -837,6 +843,25 @@ describe('definition.apply', () => {
     await vi.waitFor(() => expect(orchestratorCalls).toHaveLength(1));
     await c.cmd('item.create', { title: 'Keeps going', agent: 'implementer' });
     await until(c, 1, 'review');
+  });
+
+  it('publishes repositories added by a definition update on the definition event and the snapshot', async () => {
+    const c = client();
+    const pin = { kind: 'tag' as const, name: 'v2', sha: 'def5678' };
+    const repos = [
+      { github: 'octo/app', dir: 'app' },
+      { github: 'octo/docs', dir: 'docs' },
+    ];
+    const next = quiet({
+      repos: [
+        { github: 'octo/app', dir: 'app', branch: 'main' },
+        { github: 'octo/docs', dir: 'docs', branch: 'main' },
+      ],
+    });
+    expect(await c.cmd('definition.apply', { definition: next, pin })).toEqual({ classes: ['reprovision'] });
+    expect(c.events()).toContainEqual({ kind: 'instance.definition', sha: pin.sha, pin, classes: ['reprovision'], repos });
+    expect((await c.cmd<Snapshot>('snapshot.get')).repos).toEqual(repos);
+    await vi.waitFor(async () => expect((await c.cmd<Snapshot>('snapshot.get')).instance.status).toBe('ready'));
   });
 
   it('waits for an in-flight prepare and starts the worker only after provisioning', async () => {

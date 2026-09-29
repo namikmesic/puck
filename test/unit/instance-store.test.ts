@@ -145,6 +145,32 @@ describe('instance store', () => {
     expect(store.state()?.github.state).toBe('revoked');
   });
 
+  it('refreshes repositories from a definition event and keeps them when repos are omitted', () => {
+    const { store } = setup();
+    store.applySnapshot(snap({ head: 1, repos: [{ github: 'octo/web', dir: 'web' }] }), ENV);
+    const pin = { kind: 'branch' as const, name: 'main', sha: 'b'.repeat(40) };
+    store.applyEvent(2, { kind: 'instance.definition', sha: pin.sha, pin, classes: ['hot'] }, ENV);
+    expect(store.state()?.repos).toEqual([{ github: 'octo/web', dir: 'web' }]);
+    store.applyEvent(
+      3,
+      {
+        kind: 'instance.definition',
+        sha: pin.sha,
+        pin,
+        classes: ['reprovision'],
+        repos: [
+          { github: 'octo/web', dir: 'web' },
+          { github: 'octo/api', dir: 'api' },
+        ],
+      },
+      ENV,
+    );
+    expect(store.state()?.repos).toEqual([
+      { github: 'octo/web', dir: 'web' },
+      { github: 'octo/api', dir: 'api' },
+    ]);
+  });
+
   it('keeps the instance list and resets the daemon state on switch', () => {
     const { store, changes } = setup();
     store.setInstances([instance({ id: ENV2, name: 'zeta' }), instance()]);

@@ -8,7 +8,9 @@
  * - Live events apply as they arrive. While a page loads they wait in the
  *   node; the page reports the last event seq it reflects (`head`), so
  *   the waiting events at or below it are dropped and the rest apply on
- *   top. A failed load keeps them and offers Retry: nothing that arrived
+ *   top. When an older daemon omits `head`, that seq is the store cursor
+ *   from before the request, so events that land during the request stay.
+ *   A failed load keeps them and offers Retry: nothing that arrived
  *   is lost, and nothing is shown twice.
  * - A turn still running when its page loaded keeps streaming into the
  *   same row; its open questions get live cards.
@@ -274,6 +276,7 @@ export function initSessionView(ctx: SessionViewContext) {
   async function load(node: ThreadNode): Promise<void> {
     if (node.state === 'loading' || node.state === 'loaded') return;
     const mine = gen;
+    const cursorBefore = store.cursor();
     node.state = 'loading';
     setStatus(node, 'Loading the conversation…');
     let page: HistoryPage;
@@ -297,8 +300,8 @@ export function initSessionView(ctx: SessionViewContext) {
     node.firstIndex = Math.max(0, page.total - page.entries.length);
     node.hasMore = page.hasMore;
     earlierRow(node);
-    // Without a head (an older daemon) the page is as new as the store was when it came back.
-    const head = page.head ?? store.cursor() ?? Number.MAX_SAFE_INTEGER;
+    // Without a head (an older daemon), only what the store already had before the request is in the page.
+    const head = page.head ?? cursorBefore ?? -1;
     const waiting = node.waiting.splice(0);
     node.state = 'loaded';
     for (const w of waiting) if (w.seq > head) applyLive(node, w.ev);

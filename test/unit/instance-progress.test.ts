@@ -33,6 +33,12 @@ describe('instance progress', () => {
   it('opens the composer only when attached and ready', () => {
     expect(composerGate(undefined, null, null).ready).toBe(false);
     expect(composerGate(instance({ attach: 'unreachable' }), null, 'lead').reason).toBe("Can't reach build-box.");
+    expect(composerGate(instance({ attach: 'incompatible', attachDetail: 'Update Puck to work in it.' }), null, 'lead').reason).toBe('Update Puck to work in it.');
+    expect(composerGate(instance({ attach: 'incompatible' }), null, 'lead').reason).toBe("This environment's daemon needs a newer Puck.");
+    expect(composerGate(instance({ attach: 'detached' }), null, null).reason).toBe('Not connected to example.');
+    expect(composerGate(instance({ attach: 'detached', name: '' }), null, null).reason).toBe('Not connected to this environment.');
+    expect(composerGate(instance({ attach: 'connecting' }), null, null).reason).toBe('Connecting…');
+    expect(composerGate(instance({ attach: 'reconnecting' }), null, null).reason).toBe('Connecting…');
     expect(composerGate(instance(), null, 'lead').reason).toBe('Loading…');
     expect(composerGate(instance(), { status: 'provisioning', stage: 'syncing-repos' }, 'lead').reason).toBe('The environment is syncing repositories…');
     expect(composerGate(instance(), { status: 'ready' }, 'lead')).toEqual({ ready: true, placeholder: 'Message lead', reason: '' });

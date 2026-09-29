@@ -218,7 +218,31 @@ describe('work detail', () => {
     expect(host.querySelector('.wd-reviews h5')?.textContent).toBe('Reviews and comments · rounds 1 of 5');
     const compare = [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Compare on GitHub');
     compare?.click();
-    expect(openExternal).toHaveBeenCalledWith('https://github.com/octo/web/compare/main...puck%2FW-3-docs');
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/octo/web/compare/main...puck/W-3-docs');
+  });
+
+  it('shows a repository added by a definition update without reopening', () => {
+    const it0 = item({ number: 4, status: 'backlog' });
+    const { wd, byId, store } = setup([it0]);
+    wd.show(it0.id, 'details');
+    expect(byId('details').querySelector('.wd-repo-select')).toBeNull();
+    store.applyEvent(
+      2,
+      {
+        kind: 'instance.definition',
+        sha: 'b'.repeat(40),
+        pin: { kind: 'branch', name: 'main', sha: 'b'.repeat(40) },
+        classes: ['reprovision'],
+        repos: [
+          { github: 'octo/web', dir: 'web' },
+          { github: 'octo/api', dir: 'api' },
+        ],
+      },
+      ENV,
+    );
+    wd.render();
+    const repo = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
+    expect([...repo.options].map((o) => o.value)).toEqual(['web', 'api']);
   });
 
   it('edits details when not running, and assigns from the definition agents', async () => {
@@ -279,6 +303,10 @@ describe('work detail', () => {
     expect(compareUrl(item({ branch: 'b', base: { branch: 'main', sha: 'x' } }), 'o/r')).toBeNull();
     expect(compareUrl(item({ branch: 'b', base: { branch: 'main', sha: 'x' }, pr: { number: 1, url: 'u', draft: false, lastPushedSha: 'x' } }), 'o/r')).toBe(
       'https://github.com/o/r/compare/main...b',
+    );
+    const pr = { number: 1, url: 'u', draft: false, lastPushedSha: 'x' };
+    expect(compareUrl(item({ branch: 'puck/W-12-fix login', base: { branch: 'release/1', sha: 'x' }, pr }), 'o/r')).toBe(
+      'https://github.com/o/r/compare/release/1...puck/W-12-fix%20login',
     );
   });
 });

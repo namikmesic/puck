@@ -63,17 +63,41 @@ describe('definition updates', () => {
 
   it('applies a hot change through the daemon and records the new pin', async () => {
     const d = deps(bumpParallel);
-    expect(await applyUpdate(ENV, { kind: 'tag', name: 'v1.1.0' }, d)).toBe('hot');
+    expect(await applyUpdate(ENV, NEW, d)).toBe('hot');
+    expect(d.resolve).toHaveBeenCalledWith({ kind: 'commit', name: NEW.sha }, 'example');
     expect(d.apply).toHaveBeenCalledWith(ENV, expect.objectContaining({ source: expect.objectContaining({ pin: NEW }) }));
     expect(d.rebuild).not.toHaveBeenCalled();
     expect(d.applied).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the commit the check diffed when the branch has since moved', async () => {
+    const moved = 'c'.repeat(40);
+    const branch: Pin = { kind: 'branch', name: 'main', sha: NEW.sha };
+    const d = deps(bumpParallel);
+    d.resolve.mockImplementation(async (spec: PinSpec) => {
+      if (spec.kind === 'commit' && spec.name === OLD.sha) return resolved(OLD);
+      if (spec.kind === 'commit' && spec.name === NEW.sha) return resolved(NEW, bumpParallel);
+      return resolved({ kind: 'branch', name: 'main', sha: moved }, (env) => {
+        env.image = 'node:99';
+      });
+    });
+    expect(await applyUpdate(ENV, branch, d)).toBe('hot');
+    expect(d.resolve.mock.calls.map((c) => c[0])).toEqual([
+      { kind: 'commit', name: NEW.sha },
+      { kind: 'commit', name: OLD.sha },
+    ]);
+    const applied = d.apply.mock.calls[0]?.[1] as ResolvedEnvironment;
+    expect(applied.source.pin).toEqual(branch);
+    expect(applied.image).not.toBe('node:99');
+    expect(d.rebuild).not.toHaveBeenCalled();
+    expect(d.applied).toHaveBeenCalledWith(ENV, expect.objectContaining({ source: expect.objectContaining({ pin: branch }) }));
   });
 
   it('rebuilds for a change a running container cannot take', async () => {
     const d = deps((env) => {
       env.image = 'node:24-bookworm';
     });
-    expect(await applyUpdate(ENV, { kind: 'tag', name: 'v1.1.0' }, d)).toBe('rebuild');
+    expect(await applyUpdate(ENV, NEW, d)).toBe('rebuild');
     expect(d.rebuild).toHaveBeenCalledTimes(1);
     expect(d.apply).not.toHaveBeenCalled();
   });
@@ -81,7 +105,7 @@ describe('definition updates', () => {
   it('keeps the old pin when the daemon refuses', async () => {
     const d = deps(bumpParallel);
     d.apply.mockRejectedValueOnce(new Error('Open this environment and wait until it is connected, then apply the update.'));
-    await expect(applyUpdate(ENV, { kind: 'tag', name: 'v1.1.0' }, d)).rejects.toThrow(/wait until it is connected/);
+    await expect(applyUpdate(ENV, NEW, d)).rejects.toThrow(/wait until it is connected/);
     expect(d.applied).not.toHaveBeenCalled();
   });
 });

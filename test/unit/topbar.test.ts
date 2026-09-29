@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { InstanceInfo, InstanceUpdate } from '../../src/harness/bridge';
 import { createInstanceStore } from '../../src/renderer/instance-store';
-import { attachViewOf } from '../../src/renderer/instance-sync';
+import { attachViewOf, type AttachView } from '../../src/renderer/instance-sync';
 import { instanceOps } from '../../src/renderer/instance-menu';
 import { initTopbar } from '../../src/renderer/topbar';
 import { ENV, ENV2, fakeBridge, instance, snap } from './v2-fixtures';
@@ -21,7 +21,7 @@ const UPDATE: InstanceUpdate = {
   changes: { hot: [{ field: 'agents[implementer].maxParallel', class: 'hot', summary: 'implementer runs up to 3 at once' }], reprovision: [], rebuild: [] },
 };
 
-function setup(list: InstanceInfo[] = [instance()]) {
+function setup(list: InstanceInfo[] = [instance()], attach?: () => AttachView) {
   document.body.innerHTML = `
     <button id="env"><span id="name"></span></button><div id="menu" class="hidden"></div>
     <div id="status"></div><div id="chips"></div><div id="banner" class="hidden"></div><div id="dialog" class="hidden"></div>`;
@@ -44,7 +44,7 @@ function setup(list: InstanceInfo[] = [instance()]) {
     els: { env: byId('env'), envName: byId('name'), menu: byId('menu'), status: byId('status'), chips: byId('chips'), banner: byId('banner'), dialog: byId('dialog') },
     bridge: fake.bridge,
     store,
-    attach: () => attachViewOf(store.instance(ENV), store.hasSnapshot()),
+    attach: attach ?? (() => attachViewOf(store.instance(ENV), store.hasSnapshot())),
     open,
     reconnect,
     startFlow,
@@ -87,7 +87,7 @@ describe('top bar', () => {
     expect(dialog.querySelector('.tb-dialog-group.hot')?.textContent).toContain('implementer runs up to 3 at once');
     (dialog.querySelector('.btn-primary') as HTMLButtonElement).click();
     await flush();
-    expect(bridge.instanceApplyUpdate).toHaveBeenCalledWith(ENV, { kind: 'tag', name: 'v1.1.0' });
+    expect(bridge.instanceApplyUpdate).toHaveBeenCalledWith(ENV, UPDATE.pin);
     expect(dialog.classList.contains('hidden')).toBe(true);
     expect(byId('chips').querySelector('.tb-chip.update')).toBeNull();
   });
@@ -98,6 +98,20 @@ describe('top bar', () => {
     tb.render();
     const chips = [...byId('chips').querySelectorAll('.tb-chip')].map((c) => c.textContent);
     expect(chips).toEqual(['Reconnecting', 'GitHub access revoked']);
+  });
+
+  it('shows a failed snapshot load with Reconnect', () => {
+    const { tb, byId, reconnect } = setup([instance()], () => ({
+      phase: 'snapshot-failed',
+      text: "Couldn't load the environment: snapshot broke",
+      retry: true,
+    }));
+    tb.render();
+    const banner = byId('banner');
+    expect(banner.classList.contains('hidden')).toBe(false);
+    expect(banner.textContent).toContain('snapshot broke');
+    (banner.querySelector('button') as HTMLButtonElement).click();
+    expect(reconnect).toHaveBeenCalled();
   });
 
   it('shows the unreachable banner with Reconnect', () => {

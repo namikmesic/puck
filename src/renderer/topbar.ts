@@ -137,7 +137,7 @@ export function initTopbar(ctx: TopbarContext) {
       cancel.disabled = true;
       const { pin } = u.info;
       try {
-        await bridge.instanceApplyUpdate(u.envId, { kind: pin.kind, name: pin.kind === 'commit' ? pin.sha : pin.name });
+        await bridge.instanceApplyUpdate(u.envId, pin);
         if (update === u) update = null;
         closeDialog();
         ctx.say('');
@@ -261,7 +261,12 @@ export function initTopbar(ctx: TopbarContext) {
   function renderBanner(): void {
     const view = ctx.attach();
     els.banner.textContent = '';
-    const show = view.phase === 'unreachable' || view.phase === 'incompatible' || view.phase === 'detached' || view.phase === 'lost';
+    const show =
+      view.phase === 'unreachable' ||
+      view.phase === 'incompatible' ||
+      view.phase === 'detached' ||
+      view.phase === 'lost' ||
+      view.phase === 'snapshot-failed';
     els.banner.classList.toggle('hidden', !show);
     if (!show) return;
     els.banner.dataset.phase = view.phase;

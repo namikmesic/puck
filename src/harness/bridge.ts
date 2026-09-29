@@ -482,11 +482,12 @@ export interface PuckBridge {
   /** A newer definition for the environment's pin, or null when it runs the newest. */
   instanceCheckUpdate(envId: string): Promise<InstanceUpdate | null>;
   /**
-   * Moves the environment to `pin`. Hot and reprovision changes go to the
-   * attached daemon (nothing running is interrupted); a change that needs a
-   * rebuild rebuilds the container at the new pin.
+   * Moves the environment to `pin`: the tag or branch `instanceCheckUpdate`
+   * diffed, with that commit's sha. The definition is resolved at the sha.
+   * Hot and reprovision changes go to the attached daemon (nothing running
+   * is interrupted); a change that needs a rebuild rebuilds the container.
    */
-  instanceApplyUpdate(envId: string, pin: PinSpec): Promise<void>;
+  instanceApplyUpdate(envId: string, pin: Pin): Promise<void>;
   /**
    * Updates the attached environment's daemon to the build this app
    * carries: the runner stages it, then the daemon swaps it in after its

@@ -123,6 +123,41 @@ describe('instance sync', () => {
     expect(sync.view().phase).toBe('none');
   });
 
+  it('shows a retriable banner when the snapshot fails while already attached, and opening again reads it', async () => {
+    let calls = 0;
+    const { sync, store, say } = setup(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('snapshot broke');
+      return snap({ head: 1, items: [item()] });
+    });
+    store.setInstances([instance()]);
+    await sync.open(ENV);
+    expect(store.hasSnapshot()).toBe(false);
+    expect(sync.view()).toEqual({ phase: 'snapshot-failed', text: "Couldn't load the environment: snapshot broke", retry: true });
+    expect(say).not.toHaveBeenCalledWith('snapshot broke');
+    await sync.open(ENV);
+    expect(calls).toBe(2);
+    expect(store.hasSnapshot()).toBe(true);
+    expect(store.items()).toHaveLength(1);
+    expect(sync.view().phase).toBe('ready');
+  });
+
+  it('toasts a failed resync without replacing a snapshot that already landed', async () => {
+    let fail = false;
+    const { sync, store, say, daemonEvent } = setup(async () => {
+      if (fail) throw new Error('resync broke');
+      return snap({ head: 1, items: [item()] });
+    });
+    store.setInstances([instance()]);
+    await sync.open(ENV);
+    fail = true;
+    daemonEvent(4, { kind: 'item.upsert', item: item({ number: 3 }) });
+    await flush();
+    expect(say).toHaveBeenCalledWith('resync broke');
+    expect(sync.view().phase).toBe('ready');
+    expect(store.items()).toHaveLength(1);
+  });
+
   it('names lost and orphaned environments', () => {
     expect(attachViewOf(instance({ status: 'lost', runnerName: 'a removed runner' }), false).text).toMatch(/^Its runner was removed/);
     expect(attachViewOf(instance({ status: 'orphaned' }), false).phase).toBe('lost');

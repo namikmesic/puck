@@ -52,7 +52,7 @@ export interface EnvDaemonState {
   capacity: Capacity;
   /** Set by `daemon.upgrading` until the next snapshot. */
   upgrading: 'drain' | 'now' | null;
-  /** The definition's repositories, as of the snapshot. */
+  /** The definition's repositories, from the snapshot or the latest `instance.definition`. */
   repos: { github: string; dir: string }[];
 }
 
@@ -131,6 +131,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         break;
       case 'instance.definition':
         state.instance = { ...state.instance, pin: ev.pin, sha: ev.sha };
+        if (ev.repos !== undefined) state.repos = ev.repos.map((r) => ({ github: r.github, dir: r.dir }));
         break;
       case 'github.auth':
         state.github = { state: ev.state, login: ev.login, expiresAt: ev.expiresAt };

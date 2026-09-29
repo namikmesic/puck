@@ -5,10 +5,12 @@
  * newer semver tag exists; the definition is resolved at both commits and
  * diffed, so the apply dialog can say what each change does.
  *
- * Apply: resolve the definition at the chosen pin. Hot and reprovision
- * changes go to the attached daemon as `definition.apply` (the daemon
- * applies them in place and interrupts nothing that runs); a change that
- * needs a new container rebuilds it at the new pin, keeping the volumes.
+ * Apply: resolve the definition at the pin's commit (the sha the check
+ * diffed) and record that tag or branch at that commit. Hot and
+ * reprovision changes go to the attached daemon as `definition.apply`
+ * (the daemon applies them in place and interrupts nothing that runs); a
+ * change that needs a new container rebuilds it at the new pin, keeping
+ * the volumes.
  * The pin the app remembers moves only once the daemon or the rebuild took
  * the new definition.
  */
@@ -63,11 +65,13 @@ export async function upgradeDaemon(envId: string, mode: 'drain' | 'now', deps: 
   await deps.upgrade(envId, mode);
 }
 
-export async function applyUpdate(envId: string, spec: PinSpec, deps: UpdateDeps): Promise<'hot' | 'reprovision' | 'rebuild' | 'none'> {
+export async function applyUpdate(envId: string, pin: Pin, deps: UpdateDeps): Promise<'hot' | 'reprovision' | 'rebuild' | 'none'> {
   const name = deps.definition(envId);
-  const next = await deps.resolve(spec, name);
-  const pin = deps.pin(envId);
-  const prev = pin ? await deps.resolve(atCommit(pin), name) : null;
+  const recorded: Pin = { kind: pin.kind, name: pin.name, sha: pin.sha.toLowerCase() };
+  const resolved = await deps.resolve(atCommit(recorded), name);
+  const next: ResolvedEnvironment = { ...resolved, source: { ...resolved.source, pin: recorded } };
+  const current = deps.pin(envId);
+  const prev = current ? await deps.resolve(atCommit(current), name) : null;
   const cls = prev ? updateClass(diffEnvironments(prev, next)) : 'rebuild';
   if (cls === 'rebuild') {
     await deps.rebuild(envId, next);

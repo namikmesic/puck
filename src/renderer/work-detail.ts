@@ -78,10 +78,13 @@ export function statusTone(status: ItemStatus): 'busy' | 'ask' | 'on' | 'bad' | 
   }
 }
 
+/** Encode a git ref for a GitHub path. Slashes stay, so `puck/W-1` and `release/1` are branch paths. */
+const encodeRef = (ref: string): string => ref.split('/').map(encodeURIComponent).join('/');
+
 /** `https://github.com/{owner/name}/compare/{base}...{branch}` once the branch is published. */
 export function compareUrl(item: WorkItem, github: string | null): string | null {
   if (!item.pr || !item.branch || !item.base || !github) return null;
-  return `https://github.com/${github}/compare/${encodeURIComponent(item.base.branch)}...${encodeURIComponent(item.branch)}`;
+  return `https://github.com/${github}/compare/${encodeRef(item.base.branch)}...${encodeRef(item.branch)}`;
 }
 
 export interface WorkDetailElements {

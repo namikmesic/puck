@@ -147,7 +147,10 @@ export function composerGate(info: InstanceInfo | undefined, live: InstanceState
   if (!info) return blocked('Start an environment to talk to its orchestrator.');
   if (info.status !== 'active') return blocked('Its runner was removed from Puck.');
   if (info.op && !info.op.error) return blocked(`The environment is ${OP_WORDS[info.op.kind]}…`);
-  if (info.attach !== 'attached') return blocked(info.attach === 'unreachable' ? `Can't reach ${info.runnerName}.` : 'Connecting…');
+  if (info.attach === 'unreachable') return blocked(`Can't reach ${info.runnerName}.`);
+  if (info.attach === 'incompatible') return blocked(info.attachDetail || "This environment's daemon needs a newer Puck.");
+  if (info.attach === 'detached') return blocked(`Not connected to ${info.name || 'this environment'}.`);
+  if (info.attach !== 'attached') return blocked('Connecting…');
   if (!live) return blocked('Loading…');
   if (live.status === 'provisioning') return blocked(`The environment is ${provisionStageLabel(live.stage) || 'provisioning'}…`);
   if (live.status === 'stopping') return blocked('The environment is stopping.');

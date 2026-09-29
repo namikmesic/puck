@@ -93,6 +93,17 @@ describe('session view', () => {
     expect(texts(host)).toEqual(['in the page', 'after the page']);
   });
 
+  it('keeps an event that arrives during a history load when an older daemon omits head', async () => {
+    let resolve: (p: Page) => void = () => undefined;
+    const { view, host, live, store } = setup(() => new Promise((r) => (resolve = r)));
+    view.mount(ORCH, host);
+    live(11, { kind: 'turn.user', sessionId: ORCH, entry: { kind: 'user', text: 'during the request', author: 'user', ts: 50 } });
+    expect(store.cursor()).toBe(11);
+    resolve({ entries: [user('already in the page', 1)], total: 1, hasMore: false });
+    await flush();
+    expect(texts(host)).toEqual(['already in the page', 'during the request']);
+  });
+
   // Follow-up v2-history-failure-drops-replay: a failed history load keeps
   // the events that arrived meanwhile, and a retry shows the page plus them.
   // The replay cursor no longer depends on history at all: the store's

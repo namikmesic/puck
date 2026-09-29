@@ -14,7 +14,7 @@
  *   runner's (control channel); the app never runs docker.
  */
 
-import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, InstanceUpdate, PinSpec, StartSpec } from '../../harness/bridge';
+import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, InstanceUpdate, Pin, StartSpec } from '../../harness/bridge';
 import type { DaemonEvent, InstanceState, Op, OpArgs, OpResult, RendererOp } from '../../harness/daemon-protocol';
 import type { ResolvedEnvironment } from '../../harness/definitions/types';
 import type { InstanceStage } from '../../harness/runner-protocol';
@@ -469,7 +469,7 @@ export function checkUpdate(envId: string): Promise<InstanceUpdate | null> {
 }
 
 /** Moves the environment to `pin`: in place when the daemon can, else by a rebuild. */
-export function applyUpdate(envId: string, pin: PinSpec): Promise<void> {
+export function applyUpdate(envId: string, pin: Pin): Promise<void> {
   return serial(envId, async () => {
     const cls = await applyDefinitionUpdate(envId, pin, updateDeps());
     log.info('instance.update-applied', { envId, class: cls });

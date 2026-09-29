@@ -389,7 +389,13 @@ export class Daemon {
       this.applyInstance({ envId: record.envId, name: record.name, pin, sha: pin.sha, definition: raw });
       this.definition = next;
       this.opts.log.info('definition.apply', { sha: pin.sha, classes, changes: changes.length });
-      this.emit({ kind: 'instance.definition', sha: pin.sha, pin, classes });
+      this.emit({
+        kind: 'instance.definition',
+        sha: pin.sha,
+        pin,
+        classes,
+        repos: next.repos.map((r) => ({ github: r.github, dir: r.dir })),
+      });
       if (changes.length) {
         const shown = changes.slice(0, 8).map((c) => c.summary);
         const more = changes.length > shown.length ? `; and ${changes.length - shown.length} more` : '';

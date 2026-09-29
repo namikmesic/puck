@@ -6,10 +6,12 @@
  * Opening an environment asks main to attach and returns at once; the
  * snapshot is read as soon as the attach is up (right away when main is
  * already attached, else on the `attached` instance event), and again
- * whenever the store finds a gap in seq. Nothing waits on the attach: an
- * attach that ends unreachable, incompatible or detached is state the
- * window shows (`attachView`), and reopening tries again. Context in,
- * controller out.
+ * whenever the store finds a gap in seq. A read that fails while already
+ * attached, before any snapshot has landed, is a retriable banner;
+ * opening the environment again reads the snapshot once more. Nothing
+ * waits on the attach: an attach that ends unreachable, incompatible or
+ * detached is state the window shows (`attachView`), and reopening tries
+ * again. Context in, controller out.
  */
 
 import type { AttachState, InstanceInfo, PuckBridge } from '../harness/bridge';
@@ -25,7 +27,8 @@ export type AttachPhase =
   | 'unreachable'
   | 'incompatible'
   | 'detached'
-  | 'lost';
+  | 'lost'
+  | 'snapshot-failed';
 
 export interface AttachView {
   phase: AttachPhase;
@@ -81,6 +84,7 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
   let gen = 0;
   let flight: { envId: string; gen: number; promise: Promise<void>; ticket: object } | null = null;
   let lastView: AttachView | null = null;
+  let snapshotError: string | null = null;
 
   function current(): InstanceInfo | undefined {
     const id = store.envId();
@@ -88,7 +92,11 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
   }
 
   function view(): AttachView {
-    return attachViewOf(current(), store.hasSnapshot());
+    const base = attachViewOf(current(), store.hasSnapshot());
+    if (snapshotError && base.phase === 'loading') {
+      return { phase: 'snapshot-failed', text: `Couldn't load the environment: ${snapshotError}`, retry: true };
+    }
+    return base;
   }
 
   function notify(): void {
@@ -108,11 +116,17 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
         const snap = await bridge.daemon(envId, 'snapshot.get', {});
         if (mine !== gen || store.envId() !== envId) return;
         store.applySnapshot(snap, envId);
+        snapshotError = null;
         ctx.say('');
       } catch (err) {
         if (mine !== gen || store.envId() !== envId) return;
         // Not attached (yet): the `attached` instance event brings the next try.
-        if (store.instance(envId)?.attach === 'attached') ctx.say(errText(err));
+        if (store.instance(envId)?.attach !== 'attached') return;
+        if (store.hasSnapshot()) ctx.say(errText(err));
+        else {
+          snapshotError = errText(err);
+          ctx.say('');
+        }
       } finally {
         if (flight?.ticket === ticket) flight = null;
         notify();
@@ -166,6 +180,7 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
     async open(envId: string): Promise<void> {
       gen++;
       flight = null;
+      snapshotError = null;
       store.reset(envId);
       notify();
       await bridge.instanceOpen(envId);
@@ -177,6 +192,7 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
     close(): void {
       gen++;
       flight = null;
+      snapshotError = null;
       store.reset(null);
       notify();
     },
