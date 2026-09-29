@@ -212,9 +212,11 @@ describe('Add runner', () => {
     btn(card.querySelector('#rn-add') as Element, 'Linux ARM64').click();
     const panel = card.querySelector('#rn-add') as HTMLElement;
     const note = panel.querySelector('.rn-no-package')?.textContent ?? '';
-    expect(note).toMatch(/^This Puck server has no runner package for Linux ARM64\. Runner downloads come only from a Puck server in development mode\./);
+    expect(note).toBe(
+      'This Puck server has no runner package for Linux ARM64. With a package, this panel shows the commands to download it and to configure it with this server\'s address, https://puck.example.com, and a registration token.',
+    );
+    expect(note).not.toContain('development mode');
     expect(note).not.toContain('PUCK_RUNNER_DOWNLOADS');
-    expect(note).toContain('https://puck.example.com');
     expect(panel.querySelector('.pv-code')).toBeNull();
     expect(panel.querySelector('#rn-add-status')?.textContent).toBe('');
     expect(btn(panel, 'Cancel')).toBeUndefined();
@@ -232,7 +234,9 @@ describe('Add runner', () => {
     expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
     expect(bridge.runnerRegistrationCancel).toHaveBeenCalledWith('reg_01J8Z3X0000000000000000000');
     const panel = card.querySelector('#rn-add') as HTMLElement;
-    expect(panel.querySelector('.rn-no-package')?.textContent).toMatch(/no runner package for Linux x64/);
+    expect(panel.querySelector('.rn-no-package')?.textContent).toBe(
+      'This Puck server has no runner package for Linux x64. Runner downloads come only from a Puck server in development mode. With a package, this panel shows the commands to download it and to configure it with this server\'s address, https://puck.example.com, and a registration token.',
+    );
     expect(panel.querySelector('#rn-add-status')?.textContent).toBe('');
     btn(panel, 'Close').click();
     expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
@@ -247,7 +251,7 @@ describe('Add runner', () => {
     expect(panel.textContent).not.toContain('HTTPS');
     const warn = panel.querySelector('#rn-add-unreachable')?.textContent ?? '';
     expect(warn).toMatch(/^A runner on another machine can't reach this Puck server at localhost:8765: on that machine, localhost is the machine itself\./);
-    expect(warn).toContain('PUCK_SERVER_URL');
+    expect(warn.endsWith('(PUCK_SERVER_URL). This Mac still works as a runner.')).toBe(true);
     // The commands still show: the address may be reachable some other way.
     expect(panel.querySelectorAll('.pv-code')).toHaveLength(3);
     expect(panel.querySelector('#rn-add-status')?.textContent).toBe('◌ Waiting for a runner to register…');
@@ -260,6 +264,26 @@ describe('Add runner', () => {
     panel = hosted.card.querySelector('#rn-add') as HTMLElement;
     expect(panel.textContent).toContain('outbound HTTPS to puck.example.com.');
     expect(panel.querySelector('#rn-add-unreachable')).toBeNull();
+  });
+
+  it('claims This Mac still works on a loopback server only when it is installed or a macOS package is published', async () => {
+    const linuxOnly = registration({ serverUrl: 'http://localhost:8765', assets: [registration().assets[0]] });
+    const missing = mount(runnersState(), { runnerRegistrationToken: vi.fn(async () => linuxOnly) });
+    btn(missing.card, 'Add runner').click();
+    await settle();
+    let warn = missing.card.querySelector('#rn-add-unreachable')?.textContent ?? '';
+    expect(warn).toContain('PUCK_SERVER_URL');
+    expect(warn.endsWith('(PUCK_SERVER_URL).')).toBe(true);
+    expect(warn).not.toContain('This Mac still works as a runner.');
+
+    const installed = mount(
+      runnersState({ local: { supported: true, installed: true, runnerId: LOCAL_ID, busy: null, detail: '', error: null } }),
+      { runnerRegistrationToken: vi.fn(async () => linuxOnly) },
+    );
+    btn(installed.card, 'Add runner').click();
+    await settle();
+    warn = installed.card.querySelector('#rn-add-unreachable')?.textContent ?? '';
+    expect(warn.endsWith('This Mac still works as a runner.')).toBe(true);
   });
 
   it('reads the scheme, host and loopback from a server URL, and finds a platform package', () => {

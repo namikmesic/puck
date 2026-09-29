@@ -303,10 +303,11 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
         el('p', 'pv-note', `Needs: Docker Engine 24 or newer that the runner's user can use without sudo, and ${reach}. Membership in the docker group is equivalent to root on that machine; a dedicated user is safer.`),
       );
       if (server?.loopback) {
+        const macWorks = !!state?.local.installed || !!assetFor(add.reg?.assets ?? [], 'macos-arm64');
         const warn = el(
           'div',
           'pv-health-msg rn-unreachable',
-          `A runner on another machine can't reach this Puck server at ${server.host}: on that machine, ${server.host.replace(/:\d+$/, '')} is the machine itself. It needs the server at an address it can reach, set as the server's public URL (PUCK_SERVER_URL). This Mac still works as a runner.`,
+          `A runner on another machine can't reach this Puck server at ${server.host}: on that machine, ${server.host.replace(/:\d+$/, '')} is the machine itself. It needs the server at an address it can reach, set as the server's public URL (PUCK_SERVER_URL).${macWorks ? ' This Mac still works as a runner.' : ''}`,
         );
         warn.id = 'rn-add-unreachable';
         addPanel.appendChild(warn);
@@ -324,11 +325,12 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
         const asset = assetFor(add.reg.assets, add.platform);
         if (!asset) {
           const [os, arch] = add.platform.split('-');
+          const devMode = add.reg.assets.length === 0 ? ' Runner downloads come only from a Puck server in development mode.' : '';
           commands.appendChild(
             el(
               'div',
               'pv-health-msg rn-no-package',
-              `This Puck server has no runner package for ${platformText({ os, arch })}. Runner downloads come only from a Puck server in development mode. With a package, this panel shows the commands to download it and to configure it with this server's address, ${add.reg.serverUrl}, and a registration token.`,
+              `This Puck server has no runner package for ${platformText({ os, arch })}.${devMode} With a package, this panel shows the commands to download it and to configure it with this server's address, ${add.reg.serverUrl}, and a registration token.`,
             ),
           );
         } else {
