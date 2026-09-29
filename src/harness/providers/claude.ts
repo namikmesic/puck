@@ -8,7 +8,7 @@ import type { ProviderOption, SettingsMap } from '../options';
 import { activeSettings, compileGeneric } from '../options';
 import type { HarnessDescriptor } from './index';
 
-/** Built-in tools the editor exposes as per-tool toggles (`tool.<Name>` ids). */
+/** Built-in tools exposed as per-tool options (`tool.<Name>` ids). */
 const CLAUDE_TOOLS: ReadonlyArray<{ name: string; description: string }> = [
   { name: 'Bash', description: 'Run shell commands in the container' },
   { name: 'Read', description: 'Read files' },
@@ -25,8 +25,8 @@ const CLAUDE_TOOLS: ReadonlyArray<{ name: string; description: string }> = [
 
 // Verified against @anthropic-ai/claude-agent-sdk 0.3.280 typings (Options,
 // PermissionMode, ThinkingConfig). Excluded on purpose: includePartialMessages
-// (Puck streaming requires it), resume/session fields (backend-managed),
-// canUseTool (runner-owned Ask bridge), env (environment-level config
+// (Puck streaming requires it), resume/session fields (daemon-managed),
+// canUseTool (the daemon's Ask bridge), env (environment-level config
 // exists), spawnClaudeCodeProcess (the daemon runs the CLI as its own user),
 // agents/hooks/skills (future). cwd and mcpServers are set per session by
 // the environment daemon.

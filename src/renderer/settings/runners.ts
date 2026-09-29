@@ -13,9 +13,10 @@
  *   a one-hour registration token (Cancel revokes it), and watch the runner
  *   come online with its Docker version and capacity.
  *
- * A controller that survives re-renders: runner events update the list in
- * place without losing an open dialog or a half-typed rename. Context in,
- * elements built here, no DOM lookups.
+ * A controller that survives re-renders: a runner-list push or a focus
+ * refresh redraws the list and restores an open dialog and a half-typed
+ * Rename or Labels field (`input[data-keep]`). Context in, elements built
+ * here, no DOM lookups.
  */
 
 import type {

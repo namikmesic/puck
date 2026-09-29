@@ -56,7 +56,7 @@ export type ProviderKind = 'harness' | 'environment' | 'integration';
 /** One provider's state at a glance, whatever its kind. */
 export interface ProviderStatus {
   state: 'connected' | 'disconnected' | 'pending' | 'error';
-  /** One user-facing line, e.g. the signed-in account or where the docker CLI was found. */
+  /** One user-facing line, e.g. the signed-in account or how many runners are online. */
   detail: string;
 }
 
@@ -69,9 +69,9 @@ export interface HarnessProviderInfo {
   models: string[];
   /** Supported thinking/effort levels ("auto" first). */
   thinkingLevels: string[];
-  /** Agent-editor hint: where the system prompt lands for this provider. */
+  /** Where this harness places the agent's instructions. */
   systemPromptHint: string;
-  /** Schema the agent editor renders as the per-provider options form. */
+  /** Per-agent option schema. Definitions are checked against it. */
   configOptions: ProviderOption[];
   capabilities: ProviderCapabilities;
   status: ProviderStatus;

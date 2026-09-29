@@ -2,15 +2,13 @@
  * Schema-driven provider configuration.
  *
  * Each provider declares its configurable surface as `ProviderOption`
- * descriptors; the agent editor renders them generically (toggles, sliders,
- * segmented controls), the main process validates saved values against the
- * schema, and compile turns them into the SDK options fragment the container
- * runner applies. Adding an option is one descriptor entry in the provider's
- * module — UI, validation, persistence, and transport all follow the schema.
+ * descriptors. An agent definition's `options:` are checked strictly
+ * (`checkSettings`), the generated JSON Schema follows those descriptors,
+ * and compile turns sparse overrides into the SDK fragment the environment
+ * daemon applies. Adding an option is one descriptor in the provider module.
  *
- * Values are SPARSE: only user overrides are stored and compiled. The runner
- * keeps encoding the defaults, so untouched agents behave identically across
- * runner versions and SDK default changes are never pinned by the schema.
+ * Values are sparse: only overrides are compiled. The daemon's adapters
+ * encode the defaults, so an untouched agent is not pinned to a schema default.
  */
 
 interface OptionBase {
@@ -18,22 +16,21 @@ interface OptionBase {
   id: string;
   label: string;
   description: string;
-  /** Section heading in the editor; groups render in declaration order. */
+  /** Section heading. Groups stay in declaration order. */
   group: string;
   /**
-   * Named layout slot: options whose group carries this render inside an
-   * existing editor card (e.g. Identity) instead of their own group card.
-   * All options of one group must agree (enforced by provider-settings.test).
+   * Named slot. Every option in one group must use the same slot
+   * (`provider-settings.test.ts`).
    */
   slot?: 'identity';
-  /** Tucked into the group's collapsed "Advanced" disclosure. */
+  /** Marked advanced relative to the other options in its group. */
   advanced?: boolean;
   /**
-   * Show/compile only while another option's effective value matches. Single
+   * Compile only while another option's effective value matches. Single
    * level: a `showIf` target must not itself be conditional.
    */
   showIf?: { optionId: string; equals: string | number | boolean };
-  /** Warning shown while the value is non-default. */
+  /** Warning associated with a non-default value. */
   danger?: string;
   /**
    * Compile mapping: omitted = identity (id as SDK key, dots expanded);
@@ -51,9 +48,9 @@ export interface BooleanOption extends OptionBase {
 export interface EnumOption extends OptionBase {
   kind: 'enum';
   values: string[];
-  /** Display labels parallel to `values` (falls back to the values). */
+  /** Labels parallel to `values` (same length when present). */
   labels?: string[];
-  /** Ordered scale — renders as a discrete slider instead of a segmented control. */
+  /** Ordered scale, rather than an unordered set of values. */
   ordinal?: boolean;
   default: string;
 }
@@ -121,9 +118,10 @@ export function isDefaultValue(opt: ProviderOption, value: unknown): boolean {
 }
 
 /**
- * The persistence/IPC gate. Drops unknown ids, mistyped values, out-of-enum
- * values; clamps and step-snaps numbers; cleans string-lists; drops values
- * equal to their default so the stored record stays sparse. Never throws.
+ * Lenient sanitize before compile. Drops unknown ids, mistyped values, and
+ * out-of-enum values; clamps and step-snaps numbers; cleans string-lists;
+ * drops values equal to their default so only overrides remain. Never throws.
+ * Definitions are checked strictly by `checkSettings` instead.
  */
 export function validateSettings(
   schema: readonly ProviderOption[],
@@ -243,9 +241,8 @@ export function showIfSatisfied(
 }
 
 /**
- * Overrides whose `showIf` is satisfied against effective values. Sanitize
- * keeps unsatisfied entries (so toggling the controller back restores the
- * user's choice); compile filters them here.
+ * Overrides whose `showIf` is satisfied against effective values.
+ * `validateSettings` keeps unsatisfied entries; compile drops them here.
  */
 export function activeSettings(
   schema: readonly ProviderOption[],

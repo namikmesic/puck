@@ -30,28 +30,28 @@ export interface PinnedPackage {
 export interface HarnessPackages {
   /** CLI binary name (empty for API-key-only providers without a CLI). */
   cliBin: string;
-  /** npm -g packages that provide the interactive CLI. */
+  /** npm -g packages that provide the harness CLI. */
   cli: PinnedPackage[];
-  /** npm packages the runner and the daemon load from /opt/puck/node_modules. */
+  /** npm packages the daemon loads from /opt/puck/node_modules. */
   sdk: PinnedPackage[];
 }
 
 export interface HarnessDescriptor {
-  /** Persisted in agent records and runner dispatch - NEVER change. */
+  /** Persisted in stores, definitions, and daemon dispatch — never rename. */
   readonly id: string;
   readonly label: string;
-  /** Model ids for the agent editor, 'auto' first. */
+  /** Known model ids, 'auto' first. */
   readonly models: readonly string[];
   /** Thinking/effort levels, 'auto' first. */
   readonly thinkingLevels: readonly string[];
-  /** Agent-editor hint: where the system prompt lands for this provider. */
+  /** Where this harness places the agent's instructions. */
   readonly systemPromptHint: string;
-  /** Schema-driven per-agent options rendered generically by the agent editor. */
+  /** Per-agent option schema. Definitions are checked against it. */
   readonly configOptions: readonly ProviderOption[];
   readonly capabilities: ProviderCapabilities;
   /**
    * Sparse validated settings → the exact SDK options (Claude) / config
-   * (Codex) fragment the runner applies before the `advanced` passthrough.
+   * (Codex) fragment the daemon applies before the `advanced` passthrough.
    */
   compileSettings(settings: SettingsMap): SettingsMap;
   readonly packages: HarnessPackages;

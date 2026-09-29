@@ -27,10 +27,10 @@ function checkChain(root: string, pkgs: PinnedPackage[]): string {
 }
 
 /**
- * One bootstrap step per package group, run with `sh -lc`: interactive CLIs
- * (docker exec -it … codex login) and the SDKs the runner agent imports
- * under /opt/puck. `check` exits 0 when every package is installed at its
- * pinned version, so an already-provisioned container is a no-op; `install`
+ * One bootstrap step per package group, run with `sh -lc`: the harness CLIs
+ * (`npm -g`) and the SDKs the daemon loads under /opt/puck. `check` exits 0
+ * when every package is installed at its pinned version, so an
+ * already-provisioned container is a no-op; `install`
  * installs the exact pins and runs only when the check fails. Keeping them
  * apart lets the UI say "npm install …" while the install runs instead of
  * pretending it is still checking. Providers without a CLI (API-key-only)
