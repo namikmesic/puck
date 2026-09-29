@@ -14,9 +14,9 @@
  * from a 0600 file (then revoked), and `svc install` + `svc start`. A runner
  * release from before `--app-bundle-id` rejects that option, so `config`
  * runs once more without it. `svc start` kickstarts the LaunchAgent; an
- * older runner release's only loads it, and launchd may hold a freshly
- * loaded job back or keep a previously loaded program, so when
- * `launchctl print` does not show the plist's program running the app
+ * older runner release's `svc start` only loads it, and launchd may hold a
+ * freshly loaded job back or keep a previously loaded program, so when
+ * `launchctl print` does not show the plist's program running, the app
  * kickstarts it itself. That kickstart unloads the recorded agent
  * when one is loaded and bootstraps its plist, so the job that runs is the
  * plist on disk. A LaunchAgent left from an older install — its program is
