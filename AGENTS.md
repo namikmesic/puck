@@ -103,7 +103,7 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
 
 ## Terminology
 
-- *Agent definition* = a `kind: Agent` YAML file in the config repo (harness, model, effort, instructions, options); *environment definition* = a `kind: Environment` file (image, repos, orchestrator, agent assignments with `maxParallel`, policies). Both live in `src/harness/definitions/`.
+- *Agent definition* = a `kind: Agent` YAML file in the Puck home (harness, model, effort, instructions, options); *environment definition* = a `kind: Environment` file (image, repos, orchestrator, agent assignments with `maxParallel`, policies). The definition library is `src/harness/definitions/`.
 - *Environment* (an instance in code, id `env_<ulid>`) = one container and its two volumes, created from a definition at a pin on a runner.
   *Runner* = `puck-runner` (`src/puck-runner/`), installed on a machine that hosts environments; the app reaches it through `src/main/runners/`. See `src/puck-runner/README.md`.
   *Daemon* = `puckd`, the process inside the container that owns all environment state and work.
@@ -130,7 +130,8 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
 - `src/puck-runner/` - the host runner. Contract: `src/puck-runner/README.md`.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.
-- `src/main/config-repo.ts` - the GitHub config repo at a pinned ref: tree and file fetch, tag, branch and commit pins, the SHA cache, and `definitionRefs` / `definitionsAt`.
+- `src/main/config-repo.ts` - the Puck home at a pinned ref: tree and file fetch, tag, branch and commit pins, the SHA cache, and `definitionRefs` / `definitionsAt`.
+- `src/main/home.ts` - connect or initialize that home (`src/main/home-starter.ts` is what initialize commits). The stored key stays `configRepo`.
 - `src/main/instances/` - environments: the start flow, the daemon client (attach, replay from the cursor), credential sync, updates.
 - `src/main/runners/` and `src/main/server/` - the user's runners (This Mac's install, control channels) and the Puck server (session, API, the app's socket).
 - `src/main/shutdown.ts` - the quit drain (`installQuitDrain`) and the renderer flush request (`flushRenderers`).

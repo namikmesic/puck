@@ -79,7 +79,7 @@ export interface RateLimitState {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
   /** Accept header; JSON by default. A non-JSON media type returns the body text. */
   accept?: string;
   body?: unknown;

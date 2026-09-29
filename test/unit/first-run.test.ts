@@ -2,13 +2,14 @@
 
 /**
  * First run walks a new user through sign-in, the app installation, the
- * config repo, Claude Code, a runner and the first environment, one step
+ * Puck home, Claude Code, a runner and the first environment, one step
  * at a time.
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import type { HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, RunnersState } from '../../src/harness/bridge';
-import { currentStep, EXAMPLE_CONFIG_URL, initFirstRun, stepDone, type FirstRunFacts } from '../../src/renderer/first-run';
+import { currentStep, initFirstRun, stepDone, type FirstRunFacts } from '../../src/renderer/first-run';
+import { homeUrl } from '../../src/renderer/home-setup';
 import { runnerRow, runnersState } from './runners-fixtures';
 import { fakeBridge } from './v2-fixtures';
 
@@ -42,15 +43,18 @@ function harness(id: string, connected: boolean, pending = false): HarnessProvid
   };
 }
 
-function setup(state: { providers: ProviderInfo[]; installs?: number; runners?: RunnersState; environments?: number }) {
+type Repo = { fullName: string; private: boolean; defaultBranch: string; htmlUrl: string };
+const repo = (fullName: string): Repo => ({ fullName, private: true, defaultBranch: 'main', htmlUrl: '' });
+
+function setup(state: { providers: ProviderInfo[]; installs?: number; runners?: RunnersState; environments?: number; repos?: Repo[] }) {
   document.body.innerHTML = '<div id="root"></div>';
   const fake = fakeBridge({
     providers: vi.fn(async () => state.providers),
     providerAuthStart: vi.fn(async () => ({ url: 'https://auth' })),
     githubInstallations: vi.fn(async () => Array.from({ length: state.installs ?? 0 }, (_, i) => ({ id: i, account: `acct${i}`, accountType: 'User', manageUrl: '', repositorySelection: 'all' }))),
-    githubRepos: vi.fn(async () => [{ fullName: 'octo/config', private: true, defaultBranch: 'main', htmlUrl: '' }]),
-    githubSetConfigRepo: vi.fn(async () => []),
-    definitionRefs: vi.fn(async () => ({ tags: [{ name: 'v1.0.0', sha: 'a' }], branches: [], defaultTag: 'v1.0.0' })),
+    githubRepos: vi.fn(async () => state.repos ?? [repo('octo/config')]),
+    githubConnectHome: vi.fn(async () => ({ connected: true, providers: [] })),
+    definitionRefs: vi.fn(async () => ({ defaultBranch: 'main', tags: [{ name: 'v1.0.0', sha: 'a' }], branches: [], defaultTag: 'v1.0.0' })),
     definitionsAt: vi.fn(async () => ({ repo: 'octo/config', pin: { kind: 'tag', name: 'v1.0.0', sha: 'a' }, sha: 'a', environments: Array.from({ length: state.environments ?? 1 }, () => ({})), agents: [], errors: [] })),
     runnerInstallLocal: vi.fn(async () => runnersState()),
   } as never);
@@ -74,9 +78,9 @@ describe('first run', () => {
     fr.hide();
   });
 
-  it('moves to the installation, then the config repo, and points an empty repo at the example', async () => {
+  it('moves to the installation, then connects the Puck home', async () => {
     const state = { providers: [github(true), harness('claude-code', false)] as ProviderInfo[], installs: 0, environments: 0 };
-    const { fr, open, bridge } = setup(state);
+    const { fr, open, bridge, root } = setup(state);
     await fr.show();
     expect(open().dataset.step).toBe('install');
     (open().querySelector('.btn-primary') as HTMLButtonElement).click();
@@ -84,23 +88,65 @@ describe('first run', () => {
     state.installs = 1;
     await fr.refresh();
     expect(open().dataset.step).toBe('config-repo');
+    expect(open().querySelector('.fr-step-title')?.textContent).toBe('Connect your Puck home');
     await flush();
-    await fr.refresh();
-    const again = open().querySelector('select') as HTMLSelectElement;
-    expect([...again.options].map((o) => o.value)).toEqual(['', 'octo/config']);
-    again.value = 'octo/config';
-    again.dispatchEvent(new Event('change'));
+    const select = open().querySelector('select[aria-label="Puck home"]') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(['', 'octo/config']);
+    select.value = 'octo/config';
+    select.dispatchEvent(new Event('change'));
     await flush();
-    expect(bridge.githubSetConfigRepo).toHaveBeenCalledWith('octo/config');
+    expect(bridge.githubConnectHome).toHaveBeenCalledWith('octo/config');
     state.providers = [github(true, 'octo/config'), harness('claude-code', false)];
     await fr.refresh();
-    // Claude is the current step now; the config repo step shows the example when opened.
+    // Claude is the current step now; the home step shows the home with Open on GitHub and Change.
     expect(open().dataset.step).toBe('claude');
-    const configHead = document.querySelector('[data-step="config-repo"] .fr-step-head') as HTMLButtonElement;
-    configHead.click();
-    const example = [...open().querySelectorAll('button')].find((b) => b.textContent === 'Open the example config repo');
-    example?.click();
-    expect(bridge.openExternal).toHaveBeenCalledWith(EXAMPLE_CONFIG_URL);
+    (root.querySelector('[data-step="config-repo"] .fr-step-head') as HTMLButtonElement).click();
+    expect(open().querySelector('.home-current')?.textContent).toContain('octo/config');
+    (open().querySelector('.home-open') as HTMLButtonElement).click();
+    expect(bridge.openExternal).toHaveBeenCalledWith(homeUrl('octo/config'));
+    expect(open().querySelector('.home-change')).not.toBeNull();
+  });
+
+  it('lists each repository once, fetches the list again whenever the step opens, and refreshes on demand', async () => {
+    const state = {
+      providers: [github(true), harness('claude-code', false)] as ProviderInfo[],
+      installs: 2,
+      repos: [repo('octo/app'), repo('Octo/Home'), repo('octo/home')],
+    };
+    const { fr, open, bridge, root } = setup(state);
+    await fr.show();
+    await flush();
+    expect(open().dataset.step).toBe('config-repo');
+    const options = () => [...(open().querySelector('select[aria-label="Puck home"]') as HTMLSelectElement).options].map((o) => o.value);
+    expect(options()).toEqual(['', 'octo/app', 'Octo/Home']);
+    expect(bridge.githubRepos).toHaveBeenCalledTimes(1);
+    // A redraw while the step stays open does not fetch again.
+    await fr.refresh();
+    expect(bridge.githubRepos).toHaveBeenCalledTimes(1);
+    // A repository created since then appears when the step is opened again...
+    state.repos = [...state.repos, repo('octo/puck-home')];
+    (root.querySelector('[data-step="install"] .fr-step-head') as HTMLButtonElement).click();
+    (root.querySelector('[data-step="config-repo"] .fr-step-head') as HTMLButtonElement).click();
+    await flush();
+    expect(bridge.githubRepos).toHaveBeenCalledTimes(2);
+    expect(options()).toEqual(['', 'octo/app', 'Octo/Home', 'octo/puck-home']);
+    // ...and on Refresh.
+    state.repos = [...state.repos, repo('octo/later')];
+    (open().querySelector('.home-refresh') as HTMLButtonElement).click();
+    await flush();
+    expect(bridge.githubRepos).toHaveBeenCalledTimes(3);
+    expect(options()).toContain('octo/later');
+    fr.hide();
+  });
+
+  it('asks for the GitHub sign-in before the Puck home', async () => {
+    const { fr, root, bridge } = setup({ providers: [github(false), harness('claude-code', false)] });
+    await fr.show();
+    (root.querySelector('[data-step="config-repo"] .fr-step-head') as HTMLButtonElement).click();
+    expect(root.querySelector('.fr-step.open .fr-note')?.textContent).toMatch(/Sign in with GitHub first/);
+    expect(root.querySelector('.fr-step.open .home-panel')).toBeNull();
+    expect(bridge.githubRepos).not.toHaveBeenCalled();
+    fr.hide();
   });
 
   it('connects Claude Code, sets up This Mac, then starts an environment', async () => {

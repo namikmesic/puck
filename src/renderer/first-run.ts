@@ -4,8 +4,9 @@
  *
  * 1. Sign in with GitHub, through the Puck server.
  * 2. Install the Puck app on an account.
- * 3. Pick the config repo (a repository without environment definitions
- *    points at the example config repo).
+ * 3. Connect your Puck home: connect an existing home or initialize a new
+ *    one (the shared panel in home-setup.ts). The step shows its
+ *    repositories afresh each time it opens.
  * 4. Connect Claude Code: the orchestrator needs it. Codex is optional.
  * 5. Set up a runner: This Mac in one click, or Add runner in Settings.
  * 6. Start an environment (the start flow).
@@ -15,11 +16,13 @@
  * the sequence polls. Context in, controller out; no DOM lookups.
  */
 
-import type { GithubInstallation, GithubRepo, HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../harness/bridge';
+import type { GithubInstallation, HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../harness/bridge';
 import { el } from './dom';
+import { EXAMPLE_HOME_URL, initHomeSetup } from './home-setup';
 import { button, errText } from './util';
 
-export const EXAMPLE_CONFIG_URL = 'https://github.com/namikmesic/puck/tree/main/docs/examples/config-repo';
+/** The example Puck home (kept under its old name for importers). */
+export const EXAMPLE_CONFIG_URL = EXAMPLE_HOME_URL;
 
 export type FirstRunStep = 'sign-in' | 'install' | 'config-repo' | 'claude' | 'runner' | 'start';
 
@@ -51,7 +54,7 @@ export function stepDone(step: FirstRunStep, f: FirstRunFacts): boolean {
 export const STEPS: { id: FirstRunStep; title: string }[] = [
   { id: 'sign-in', title: 'Sign in with GitHub' },
   { id: 'install', title: 'Install Puck on an account' },
-  { id: 'config-repo', title: 'Pick the config repo' },
+  { id: 'config-repo', title: 'Connect your Puck home' },
   { id: 'claude', title: 'Connect Claude Code' },
   { id: 'runner', title: 'Set up a runner' },
   { id: 'start', title: 'Start an environment' },
@@ -74,13 +77,18 @@ export interface FirstRunContext {
 export function initFirstRun(ctx: FirstRunContext) {
   const { bridge, root } = ctx;
   let facts: FirstRunFacts = { github: null, claude: null, codex: null, installations: null, runners: null };
-  let repos: GithubRepo[] | null = null;
-  let hasDefinitions: boolean | null = null;
   let error = '';
   let poll: ReturnType<typeof setInterval> | null = null;
   let shown: FirstRunStep | null = null;
   let active = false;
   let loading: Promise<void> = Promise.resolve();
+  /** Whether the Puck home step was open at the last draw: opening it again fetches the repositories again. */
+  let homeOpen = false;
+  const home = initHomeSetup({
+    bridge,
+    current: () => facts.github?.github.configRepo ?? null,
+    connected: () => void refresh(),
+  });
 
   async function load(): Promise<void> {
     const infos: ProviderInfo[] = await bridge.providers().catch((err: unknown) => {
@@ -92,18 +100,6 @@ export function initFirstRun(ctx: FirstRunContext) {
     let installations: GithubInstallation[] | null = null;
     if (github?.auth.connected) installations = await bridge.githubInstallations().catch(() => null);
     facts = { github, claude: harness('claude-code'), codex: harness('codex'), installations, runners: ctx.runners() };
-    if (github?.auth.connected && !github.github.configRepo && repos === null) repos = await bridge.githubRepos().catch(() => []);
-    if (github?.github.configRepo && hasDefinitions === null) {
-      hasDefinitions = await bridge
-        .definitionRefs()
-        .then(async (refs) => {
-          const tag = refs.defaultTag ?? refs.tags[0]?.name;
-          const pin = tag ? { kind: 'tag' as const, name: tag } : refs.branches[0] ? { kind: 'branch' as const, name: refs.branches[0].name } : null;
-          if (!pin) return false;
-          return (await bridge.definitionsAt(pin)).environments.length > 0;
-        })
-        .catch(() => null);
-    }
     const pending = !!(github?.auth.pending || facts.claude?.auth.pending || facts.codex?.auth.pending || facts.runners?.local.busy);
     if (pending && !poll) poll = setInterval(() => void refresh(), ctx.pollMs ?? 2000);
     if (!pending && poll) {
@@ -155,7 +151,7 @@ export function initFirstRun(ctx: FirstRunContext) {
       case 'install': {
         const installs = facts.installations ?? [];
         if (installs.length) note(`Installed on ${installs.map((i) => i.account).join(', ')}.`);
-        else note('Install the Puck app on the account that owns your config repo and the repositories your agents work on.');
+        else note('Install the Puck app on the account that owns your Puck home and the repositories your agents work on.');
         const url = facts.github?.github.installUrl;
         if (url) {
           const go = button(installs.length ? 'btn-ghost' : 'btn-primary', installs.length ? 'Install on another account' : 'Install Puck on GitHub');
@@ -168,45 +164,17 @@ export function initFirstRun(ctx: FirstRunContext) {
         break;
       }
       case 'config-repo': {
-        const current = facts.github?.github.configRepo;
-        if (current) {
-          note(`Definitions come from ${current}.`);
-          if (hasDefinitions === false) {
-            note('It has no environment definitions yet. Start from the example config repo: copy its agents/ and environments/ folders into yours.');
-            const ex = button('btn-ghost', 'Open the example config repo');
-            ex.addEventListener('click', () => void bridge.openExternal(EXAMPLE_CONFIG_URL));
-            box.appendChild(ex);
-          }
-        } else note('Choose the repository that holds your agent and environment definitions.');
-        const select = el('select', 'fr-repo');
-        select.setAttribute('aria-label', 'Config repo');
-        const blank = el('option', '', repos === null ? 'Loading repositories…' : repos.length ? 'Choose a repository…' : 'No repositories reachable');
-        blank.value = '';
-        select.appendChild(blank);
-        for (const r of repos ?? []) {
-          const o = el('option', '', r.fullName);
-          o.value = r.fullName;
-          select.appendChild(o);
+        if (!facts.github?.auth.connected) {
+          note('Sign in with GitHub first: Puck reads your Puck home through your GitHub sign-in.');
+          break;
         }
-        if (current) {
-          const o = el('option', '', current);
-          o.value = current;
-          select.appendChild(o);
-          select.value = current;
+        if (!facts.github.github.configRepo) {
+          note('Your Puck home is one GitHub repository that holds all your agent and environment definitions. Connect the one you have, or initialize a new one. You change definitions by committing to it.');
         }
-        select.addEventListener('change', async () => {
-          if (!select.value) return;
-          select.disabled = true;
-          error = '';
-          try {
-            await bridge.githubSetConfigRepo(select.value);
-            hasDefinitions = null;
-          } catch (err) {
-            error = errText(err);
-          }
-          await refresh();
-        });
-        box.appendChild(select);
+        if (!homeOpen) void home.show();
+        else home.render();
+        homeOpen = true;
+        box.appendChild(home.root);
         break;
       }
       case 'claude': {
@@ -277,6 +245,7 @@ export function initFirstRun(ctx: FirstRunContext) {
     if (!active) return;
     const current = currentStep(facts);
     const open = shown && STEPS.some((s) => s.id === shown) ? shown : current;
+    if (open !== 'config-repo') homeOpen = false;
     root.textContent = '';
     const wrap = el('div', 'fr-wrap');
     wrap.appendChild(el('h1', 'fr-title', 'Welcome to Puck'));
@@ -313,6 +282,7 @@ export function initFirstRun(ctx: FirstRunContext) {
     loaded: (): Promise<void> => loading,
     hide(): void {
       active = false;
+      homeOpen = false;
       if (poll) clearInterval(poll);
       poll = null;
     },

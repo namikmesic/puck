@@ -41,7 +41,10 @@ describe('IPC channel table', () => {
   it('the provider channels validate their payloads before touching a store or the server', async () => {
     const invoke = (channel: string, args: unknown): unknown =>
       (ipcMain.handlers.get(channel) as (event: unknown, args: unknown) => Promise<unknown>)({}, args);
-    await expect(invoke(CHANNELS.githubSetConfigRepo, 'not a repo')).rejects.toThrow(/Invalid repository name/);
+    await expect(invoke(CHANNELS.githubConnectHome, 'not a repo')).rejects.toThrow(/Invalid repository name/);
+    await expect(invoke(CHANNELS.githubInitHome, { home: 'me/puck-home', envRepo: '../x' })).rejects.toThrow(/Invalid repository name/);
+    await expect(invoke(CHANNELS.githubInitHome, { home: 'not a repo', envRepo: 'me/app' })).rejects.toThrow(/Invalid repository name/);
+    await expect(invoke(CHANNELS.githubInitHome, 'me/puck-home')).rejects.toThrow();
     await expect(invoke(CHANNELS.providerAuthStart, 'runner')).rejects.toThrow(/has no sign-in/);
   });
 
@@ -88,7 +91,7 @@ describe('IPC channel table', () => {
     await expect(invoke(CHANNELS.definitionsAt, { kind: 'branch', name: '../../etc' })).rejects.toThrow(/Invalid branch name/);
     await expect(invoke(CHANNELS.definitionsAt, { kind: 'commit', name: 'HEAD' })).rejects.toThrow(/Invalid commit SHA/);
     // A valid pin with no config repo chosen fails with guidance, not a request.
-    await expect(invoke(CHANNELS.definitionsAt, { kind: 'tag', name: 'v1.0.0' })).rejects.toThrow(/Choose a config repo/);
-    await expect(invoke(CHANNELS.definitionRefs, undefined)).rejects.toThrow(/Choose a config repo/);
+    await expect(invoke(CHANNELS.definitionsAt, { kind: 'tag', name: 'v1.0.0' })).rejects.toThrow(/Connect your Puck home/);
+    await expect(invoke(CHANNELS.definitionRefs, undefined)).rejects.toThrow(/Connect your Puck home/);
   });
 });

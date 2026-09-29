@@ -1,5 +1,7 @@
 /**
- * The config repo, read through the GitHub API at a pinned ref.
+ * The Puck home (the repository of agent and environment definitions),
+ * read through the GitHub API at a pinned ref. Internal names keep the
+ * older "config repo".
  *
  *  - Refs: tags (semver newest first; the default pin is the highest
  *    release tag, or the highest prerelease when no release exists) and
@@ -118,7 +120,7 @@ export function newestTag(tags: readonly RefInfo[], prerelease = false): RefInfo
 
 export interface ConfigRepoDeps {
   client(): GitHubClient;
-  /** `owner/name` of the config repo, null until one is chosen. */
+  /** `owner/name` of the Puck home, null until one is connected. */
   repo(): string | null;
   /** Folder of the on-disk SHA cache; null keeps the cache in memory only. */
   cacheDir(): string | null;
@@ -166,7 +168,7 @@ export function createConfigRepo(deps: ConfigRepoDeps) {
 
   function target(): { repo: string; owner: string; name: string } {
     const repo = deps.repo();
-    if (!repo) throw new Error('Choose a config repo in Settings → Providers → GitHub first.');
+    if (!repo) throw new Error('Connect your Puck home in Settings → Providers → GitHub first.');
     const [owner, name] = repo.split('/');
     return { repo, owner, name };
   }
@@ -174,10 +176,11 @@ export function createConfigRepo(deps: ConfigRepoDeps) {
   async function refs(): Promise<DefinitionRefs> {
     const { owner, name } = target();
     const client = deps.client();
-    const [tags, branches] = await Promise.all([client.tags(owner, name), client.branches(owner, name)]);
+    const [tags, branches, info] = await Promise.all([client.tags(owner, name), client.branches(owner, name), client.repo(owner, name)]);
     const toRef = (r: { name: string; commit: { sha: string } }): RefInfo => ({ name: r.name, sha: r.commit.sha });
     const tagRefs = sortTags(tags.map(toRef));
     return {
+      defaultBranch: info.default_branch,
       tags: tagRefs,
       branches: branches.map(toRef).sort((a, b) => a.name.localeCompare(b.name)),
       defaultTag: (newestTag(tagRefs) ?? newestTag(tagRefs, true))?.name ?? null,

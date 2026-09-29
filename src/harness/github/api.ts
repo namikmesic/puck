@@ -1,7 +1,8 @@
 /**
  * Typed GitHub REST endpoints over the shared transport (http.ts): the
- * user, App installations, repositories, refs, trees, blobs, and pull
- * requests. Only the fields Puck reads are typed.
+ * user, App installations, repositories, refs, trees, blobs, the writes
+ * that commit files (contents, trees, commits, refs), and pull requests.
+ * Only the fields Puck reads are typed.
  */
 
 import { createHttpClient, type HttpClient, type HttpClientOptions } from './http';
@@ -38,6 +39,12 @@ export interface GhTreeEntry {
   size?: number;
 }
 
+/** One entry of a tree Puck writes: a regular file with its text inline. */
+export interface GhNewFile {
+  path: string;
+  content: string;
+}
+
 export interface GhPull {
   number: number;
   html_url: string;
@@ -64,8 +71,24 @@ export interface GitHubClient {
   commitSha(owner: string, repo: string, ref: string): Promise<string>;
   /** Every entry under a tree; a truncated recursive listing is walked level by level. */
   tree(owner: string, repo: string, sha: string): Promise<GhTreeEntry[]>;
+  /** The entries directly under a tree, a commit or a branch name (not recursive). */
+  treeLevel(owner: string, repo: string, treeish: string): Promise<GhTreeEntry[]>;
   /** A blob's raw content. */
   blob(owner: string, repo: string, sha: string): Promise<string>;
+  /** Creates or replaces one file on a branch (the default one when omitted); the only write an empty repository accepts. */
+  putContents(
+    owner: string,
+    repo: string,
+    path: string,
+    file: { message: string; base64: string; branch?: string },
+  ): Promise<{ commit: { sha: string } }>;
+  /** A new tree of regular files (mode 100644), with no base tree. */
+  createTree(owner: string, repo: string, files: readonly GhNewFile[]): Promise<{ sha: string }>;
+  createCommit(owner: string, repo: string, commit: { message: string; tree: string; parents: string[] }): Promise<{ sha: string }>;
+  /** Creates `refs/<ref>` (`heads/x`, `tags/v1`) at a commit. */
+  createRef(owner: string, repo: string, ref: string, sha: string): Promise<void>;
+  /** Moves `refs/<ref>` to a commit; `force` allows a move that is not a fast-forward. */
+  updateRef(owner: string, repo: string, ref: string, sha: string, force: boolean): Promise<void>;
   pulls(owner: string, repo: string, query?: { head?: string; state?: 'open' | 'closed' | 'all' }): Promise<GhPull[]>;
   createPull(
     owner: string,
@@ -117,8 +140,32 @@ export function createGitHubClient(opts: HttpClientOptions): GitHubClient {
       );
       return full.truncated ? walkTree(owner, repo, sha, '') : full.tree;
     },
+    treeLevel: async (owner, repo, treeish) =>
+      (await get<{ tree: GhTreeEntry[] }>(`${repoPath(owner, repo)}/git/trees/${seg(treeish)}`)).tree ?? [],
     blob: (owner, repo, sha) =>
       get<string>(`${repoPath(owner, repo)}/git/blobs/${seg(sha)}`, 'application/vnd.github.raw+json'),
+    putContents: async (owner, repo, path, file) =>
+      (
+        await http.request<{ commit: { sha: string } }>(`${repoPath(owner, repo)}/contents/${refPath(path)}`, {
+          method: 'PUT',
+          body: { message: file.message, content: file.base64, ...(file.branch ? { branch: file.branch } : {}) },
+        })
+      ).data,
+    createTree: async (owner, repo, files) =>
+      (
+        await http.request<{ sha: string }>(`${repoPath(owner, repo)}/git/trees`, {
+          method: 'POST',
+          body: { tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })) },
+        })
+      ).data,
+    createCommit: async (owner, repo, commit) =>
+      (await http.request<{ sha: string }>(`${repoPath(owner, repo)}/git/commits`, { method: 'POST', body: commit })).data,
+    createRef: async (owner, repo, ref, sha) => {
+      await http.request(`${repoPath(owner, repo)}/git/refs`, { method: 'POST', body: { ref: `refs/${ref}`, sha } });
+    },
+    updateRef: async (owner, repo, ref, sha, force) => {
+      await http.request(`${repoPath(owner, repo)}/git/refs/${refPath(ref)}`, { method: 'PATCH', body: { sha, force } });
+    },
     pulls: (owner, repo, query = {}) => {
       const params = new URLSearchParams();
       if (query.head) params.set('head', query.head);

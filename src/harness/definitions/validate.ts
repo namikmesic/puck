@@ -1,5 +1,5 @@
 /**
- * Validation of a config repo snapshot against the definition field tables.
+ * Validation of a Puck home snapshot against the definition field tables.
  *
  * Errors are per file and carry a file, line, column, dotted field path and
  * a stable rule id (RULES); the unit tests hold one passing and one failing

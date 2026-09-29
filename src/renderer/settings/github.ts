@@ -3,20 +3,21 @@
  * GitHub. Signed out: "Sign in with GitHub" opens GitHub's sign-in page in
  * the browser, through the Puck server; while it is open, a waiting line
  * and Cancel. Signed in: the login, the app installations with Manage
- * links and "Install Puck on an account", the config-repo picker with
- * "Open repo", and "Sign out of Puck". Tokens never reach this module; main
+ * links and "Install Puck on an account", the Puck home (home-setup.ts:
+ * "Open on GitHub" and "Change", then Connect or Initialize), and "Sign out
+ * of Puck". Tokens never reach this module; main
  * returns the login and settings only. Context in, elements built here, no
  * DOM lookups.
  */
 
 import type {
   GithubInstallation,
-  GithubRepo,
   IntegrationProviderInfo,
   ProviderInfo,
   PuckBridge,
 } from '../../harness/bridge';
 import { el, statusEl } from '../dom';
+import { initHomeSetup } from '../home-setup';
 import { button, errText } from '../util';
 import { cardShell } from './cards';
 
@@ -52,7 +53,7 @@ function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInf
       list.textContent = '';
       if (!installs.length) {
         list.appendChild(
-          el('li', 'pv-note', 'Puck is not installed on any account yet. Install it where your config repo lives.'),
+          el('li', 'pv-note', 'Puck is not installed on any account yet. Install it where your Puck home lives.'),
         );
       }
       for (const inst of installs) {
@@ -73,61 +74,22 @@ function installationsBlock(ctx: GitHubCardContext, info: IntegrationProviderInf
   return box;
 }
 
-function configRepoBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo): HTMLElement {
-  const box = el('div', 'pv-config-repo config-form');
-  box.appendChild(el('div', 'pv-subhead', 'Config repo'));
-  const current = info.github.configRepo;
-  const select = el('select', '');
-  select.setAttribute('aria-label', 'Config repo');
-  select.disabled = true;
-  const placeholder = el('option', '', current ?? 'Loading repositories…');
-  placeholder.value = current ?? '';
-  select.appendChild(placeholder);
-  const open = button('btn-ghost', 'Open repo');
-  open.disabled = !current;
-  open.addEventListener('click', () => {
-    if (current) void ctx.bridge.openExternal(`https://github.com/${current}`);
+function homeBlock(ctx: GitHubCardContext, info: IntegrationProviderInfo): HTMLElement {
+  const box = el('div', 'pv-home');
+  box.appendChild(el('div', 'pv-subhead', 'Puck home'));
+  if (!info.github.configRepo) {
+    box.appendChild(el('p', 'pv-note', 'The one repository that holds all your agent and environment definitions. Connect the one you have, or initialize a new one.'));
+  }
+  const home = initHomeSetup({
+    bridge: ctx.bridge,
+    current: () => info.github.configRepo,
+    connected: (infos) => {
+      ctx.say('');
+      ctx.onChange(infos);
+    },
   });
-  const row = el('div', 'pv-repo-row');
-  row.append(select, open);
-  box.appendChild(row);
-  if (!current) box.appendChild(el('p', 'pv-note', 'Choose the repository that holds your agent and environment definitions.'));
-
-  void ctx.bridge
-    .githubRepos()
-    .then((repos: GithubRepo[]) => {
-      select.textContent = '';
-      if (!current) {
-        const none = el('option', '', repos.length ? 'Choose a repository…' : 'No repositories reachable');
-        none.value = '';
-        select.appendChild(none);
-      }
-      const names = repos.map((r) => r.fullName);
-      if (current && !names.includes(current)) names.unshift(current);
-      for (const name of names) {
-        const opt = el('option', '', name);
-        opt.value = name;
-        opt.selected = name === current;
-        select.appendChild(opt);
-      }
-      select.disabled = repos.length === 0;
-    })
-    .catch((err: unknown) => {
-      placeholder.textContent = current ?? 'Repositories unavailable';
-      ctx.say(errText(err));
-    });
-
-  select.addEventListener('change', async () => {
-    if (!select.value || select.value === current) return;
-    select.disabled = true;
-    ctx.say('');
-    try {
-      ctx.onChange(await ctx.bridge.githubSetConfigRepo(select.value));
-    } catch (err) {
-      ctx.say(errText(err));
-      select.disabled = false;
-    }
-  });
+  box.appendChild(home.root);
+  void home.show();
   return box;
 }
 
@@ -181,7 +143,7 @@ export function githubCard(ctx: GitHubCardContext, info: IntegrationProviderInfo
   facts.append(el('dt', '', 'Account'), el('dd', '', github.login ?? '—'));
   card.appendChild(facts);
   card.appendChild(installationsBlock(ctx, info));
-  card.appendChild(configRepoBlock(ctx, info));
+  card.appendChild(homeBlock(ctx, info));
 
   const foot = el('div', 'card-foot');
   const signOut = button('btn-ghost', 'Sign out of Puck');

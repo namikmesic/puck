@@ -106,7 +106,8 @@
   color: var(--charcoal);
 }
 
-.sf-empty code {
+.sf-empty code,
+.home-panel code {
   font-family: var(--font-mono);
   font-size: 12px;
 }
@@ -126,7 +127,7 @@
 .sf-ref,
 .sf-sha,
 .sf-secret input,
-.fr-repo {
+.home-repo {
   font: 13px var(--font-ui);
   color: var(--charcoal);
   background: var(--white);
@@ -229,6 +230,24 @@
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
+}
+
+.sf-agent-link {
+  padding: 0;
+  font: inherit;
+  color: var(--emerald);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.sf-agent-link:hover {
+  text-decoration: underline;
+}
+
+.sf-def-edit {
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 .sf-err-where {
@@ -567,4 +586,76 @@
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+
+/* ---------- Puck home panel (first run and Settings) ---------- */
+
+.home-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.home-current {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.home-current-name {
+  margin-right: 4px;
+}
+
+.home-path {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+}
+
+.home-note,
+.home-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--gray);
+}
+
+.home-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.home-label {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.home-row,
+.home-create,
+.home-installs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.home-row .home-repo {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.home-refusal,
+.home-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--red);
+  white-space: pre-wrap;
 }
