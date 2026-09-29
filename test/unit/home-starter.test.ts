@@ -28,6 +28,19 @@ describe('the starter Puck home', () => {
     expect(files['environments/web-app.yaml']).toContain('# cloned to /workspace/web-app');
   });
 
+  it('keeps repository names that YAML would read as scalars as strings the environment can start', () => {
+    for (const repoName of ['2024', 'true', 'false', 'null', '1e2', '0x10']) {
+      const files = starterFiles({ fullName: `me/${repoName}`, defaultBranch: 'main' });
+      const snap = snapshotOf(files);
+      const validated = validateSnapshot(snap);
+      expect(validated.errors, repoName).toEqual([]);
+      const { environments } = summarize(validated);
+      expect(environments.map((e) => [e.name, e.startable]), repoName).toEqual([[repoName, true]]);
+      const env = resolveEnvironment(validated, snap, repoName, { repo: 'me/puck-home', pin });
+      expect(env.repos, repoName).toEqual([{ github: `me/${repoName}`, dir: repoName, branch: 'main' }]);
+    }
+  });
+
   it('keeps a branch name with YAML or replacement characters literal', () => {
     const files = starterFiles({ fullName: 'me/app', defaultBranch: 'feat/$1-#x' });
     expect(files['environments/app.yaml']).toBe(starterEnvironment({ fullName: 'me/app', defaultBranch: 'feat/$1-#x' }).text);

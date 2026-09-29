@@ -65,10 +65,10 @@ export function starterEnvironment(repo: StarterRepo): { path: string; text: str
   const name = nameFrom(repoName, 'example');
   const dir = nameFrom(repoName, 'app');
   let text = STARTER_FILES[EXAMPLE_ENV];
-  text = replaceOnce(text, /^name: example$/m, () => `name: ${name}`);
+  text = replaceOnce(text, /^name: example$/m, () => `name: ${JSON.stringify(name)}`);
   text = replaceOnce(text, /^ *# Replace with a repository your GitHub sign-in can reach\.\n/m, () => '');
   text = replaceOnce(text, /^( *- github: )your-org\/your-app$/m, (lead) => lead + JSON.stringify(repo.fullName));
-  text = replaceOnce(text, /^( *dir: )app( +# cloned to \/workspace\/)app$/m, (lead, mid) => lead + dir + mid + dir);
+  text = replaceOnce(text, /^( *dir: )app( +# cloned to \/workspace\/)app$/m, (lead, mid) => lead + JSON.stringify(dir) + mid + dir);
   text = replaceOnce(text, /^( *branch: )main( +#.*)$/m, (lead, tail) => lead + JSON.stringify(repo.defaultBranch) + tail);
   return { path: `environments/${name}.yaml`, text };
 }
