@@ -81,7 +81,7 @@ export interface CreateInstance {
   runnerId: string;
   definition: string;
   repos: string[];
-  policies?: { github?: Record<string, unknown> };
+  policies?: { github?: object };
 }
 
 /** Records a new environment in the index; the server mints its id and checks every repository. */

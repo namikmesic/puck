@@ -41,7 +41,7 @@ export interface StartDeps {
   /** A fresh credential file for a signed-in harness, or null. */
   harnessCredential(id: string): Promise<string | null>;
   containerEnv(harnessId: string): Record<string, string>;
-  createIndexEntry(req: { runnerId: string; definition: string; repos: string[]; policies?: { github?: Record<string, unknown> } }): Promise<{ envId: string }>;
+  createIndexEntry(req: { runnerId: string; definition: string; repos: string[]; policies?: { github?: object } }): Promise<{ envId: string }>;
   forgetIndexEntry(envId: string): Promise<void>;
   control<O extends ControlOp>(
     runnerId: string,
@@ -130,7 +130,8 @@ export function buildArgs(envId: string, def: ResolvedEnvironment, bundleSha: st
 /** Runs create after a passed preflight; resolves with the new environment's id. */
 export async function create(plan: StartPlan, spec: StartSpec, deps: StartDeps, onCreated: (envId: string) => void): Promise<string> {
   const def = plan.definition;
-  const policies = (def.policies as { github?: Record<string, unknown> }).github;
+  const github = (def.policies as { github?: unknown }).github;
+  const policies = typeof github === 'object' && github !== null && !Array.isArray(github) ? github : undefined;
   const { envId } = await deps.createIndexEntry({
     runnerId: plan.runnerId,
     definition: def.name,

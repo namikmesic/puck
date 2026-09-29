@@ -88,16 +88,17 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
   }
 
   function drain(): void {
-    if (cursor === null) return;
-    while (buffered.has(cursor + 1)) {
-      const seq = cursor + 1;
-      const ev = buffered.get(seq);
-      buffered.delete(seq);
-      cursor = seq;
+    let next = cursor;
+    if (next === null) return;
+    while (buffered.has(next + 1)) {
+      next += 1;
+      const ev = buffered.get(next);
+      buffered.delete(next);
+      cursor = next;
       if (ev) renderEvent(ev);
     }
-    const gap = [...buffered.keys()].some((seq) => seq > (cursor ?? 0) + 1);
-    if (gap && openId && !resyncing && resyncAt !== cursor) void resync(openId);
+    const gap = [...buffered.keys()].some((seq) => seq > next + 1);
+    if (gap && openId && !resyncing && resyncAt !== next) void resync(openId);
   }
 
   async function showSnapshot(envId: string, snapshot: Snapshot): Promise<void> {
