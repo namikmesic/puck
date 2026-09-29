@@ -7,7 +7,7 @@
  *   config.sh remove [options]   deregister it                → puck-runner config remove
  *   run.sh                       run the runner               → puck-runner run
  *   svc.sh <command>             run it as a service          → puck-runner svc
- *   bin/node bin/puck-runner.js version
+ *   bin/node bin/puck-runner.cjs version
  *
  * `--help` works everywhere without Docker, a server, or a configuration.
  */

@@ -114,7 +114,7 @@ export async function applyUpdate(deps: UpdateDeps, asset: ReleaseAsset, beforeS
     if (untar.code !== 0) throw new UpdateError(`Unpacking the update failed: ${untar.stderr.trim().slice(-300)}`);
     const shippedVersion = fs.readFileSync(path.join(staging, 'VERSION'), 'utf8').trim();
     if (shippedVersion !== asset.version) throw new UpdateError(`The update says it is ${shippedVersion}, not ${asset.version}.`);
-    const probe = await exec(path.join(staging, 'bin', 'node'), [path.join(staging, 'bin', 'puck-runner.js'), 'version'], { timeoutMs: 60_000 });
+    const probe = await exec(path.join(staging, 'bin', 'node'), [path.join(staging, 'bin', 'puck-runner.cjs'), 'version'], { timeoutMs: 60_000 });
     if (probe.code !== 0 || !probe.stdout.includes(asset.version)) {
       throw new UpdateError(`The new runner does not start on this machine: ${(probe.stderr || probe.stdout).trim().slice(-300)}`);
     }

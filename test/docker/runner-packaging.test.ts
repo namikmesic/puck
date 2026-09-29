@@ -32,7 +32,7 @@ async function runInLinux(platform: string, target: string): Promise<{ code: num
     `tar xzf /tmp/${path.basename(tarball(target))}`,
     'test ! -e /usr/bin/node && test ! -e /usr/local/bin/node',
     './config.sh --help',
-    'echo "arch=$(./bin/node -p process.arch) version=$(./bin/node bin/puck-runner.js version) node=$(./bin/node --version)"',
+    'echo "arch=$(./bin/node -p process.arch) version=$(./bin/node bin/puck-runner.cjs version) node=$(./bin/node --version)"',
   ].join('\n');
   const id = (await must(['create', '--platform', platform, BASE, 'sh', '-c', script], { timeoutMs: 300_000 })).trim();
   try {

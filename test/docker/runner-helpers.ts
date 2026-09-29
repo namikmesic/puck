@@ -16,7 +16,7 @@ import { call, signIn, startLiveServer, type SignedIn } from '../unit/server-fak
 import type { ControlClient } from '../relay-client';
 
 const ROOT = path.resolve(__dirname, '..', '..');
-export const RUNNER_BUNDLE = path.join(ROOT, '.webpack', 'runner', 'puck-runner.js');
+export const RUNNER_BUNDLE = path.join(ROOT, '.webpack', 'runner', 'puck-runner.cjs');
 
 export type LiveServer = Awaited<ReturnType<typeof startLiveServer>>;
 
@@ -36,7 +36,7 @@ export function runnerDir(): string {
     fs.chmodSync(path.join(dir, script), 0o755);
   }
   fs.mkdirSync(path.join(dir, 'bin'));
-  fs.copyFileSync(RUNNER_BUNDLE, path.join(dir, 'bin', 'puck-runner.js'));
+  fs.copyFileSync(RUNNER_BUNDLE, path.join(dir, 'bin', 'puck-runner.cjs'));
   fs.symlinkSync(process.execPath, path.join(dir, 'bin', 'node'));
   fs.writeFileSync(path.join(dir, 'VERSION'), '0.0.1\n');
   return dir;

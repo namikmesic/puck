@@ -13,7 +13,7 @@
  * current directory:
  *
  *   config.sh  run.sh  svc.sh  VERSION  README.md  LICENSE
- *   bin/node  bin/node.LICENSE  bin/puck-runner.js
+ *   bin/node  bin/node.LICENSE  bin/puck-runner.cjs
  *
  * The Node runtime is the pinned release below, downloaded once into
  * .cache/runner-node/ and checked against the pinned sha256 before use.
@@ -111,7 +111,7 @@ export async function packageRunner({ targets = Object.keys(TARGETS), outDir = p
       { name: 'bin/', type: 'dir', mode: 0o755, mtime },
       entry('bin/node', node, 0o755),
       entry('bin/node.LICENSE', license, 0o644),
-      entry('bin/puck-runner.js', bundle, 0o644),
+      entry('bin/puck-runner.cjs', bundle, 0o644),
     ]);
     const file = `puck-runner-${target.os}-${target.arch}-${version}.tar.gz`;
     const sum = sha256(archive);
