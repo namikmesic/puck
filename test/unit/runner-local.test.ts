@@ -1,5 +1,6 @@
 // A directory LocalListener creates for its socket is mode 0700. An existing
-// directory is left alone, and one other users can access is refused.
+// directory is left alone, and one other users can access is refused. A path
+// that is not already normalized is refused before any directory is created.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -7,7 +8,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Control } from '../../src/puck-runner/control';
 import type { DockerSpawner } from '../../src/puck-runner/docker/client';
-import { LocalListener, type LocalDeps } from '../../src/puck-runner/local';
+import { checkSocketPath, LocalListener, type LocalDeps } from '../../src/puck-runner/local';
 import { nullLogger } from '../../src/puck-runner/log';
 
 let root: string;
@@ -88,5 +89,19 @@ describe('local socket directory', () => {
     await expect(listener.start()).rejects.toThrow(/group- or world-accessible[\s\S]*will not change its permissions/);
     expect(bits(root)).toBe(mode);
     expect(fs.readFileSync(socket, 'utf8')).toBe('keep');
+  });
+
+  it('refuses a .. path before creating a directory or changing the parent mode', async () => {
+    fs.chmodSync(root, 0o755);
+    const socket = `${root}/unused/../puck.sock`;
+    expect(checkSocketPath(socket)).toMatch(/normalized/);
+    expect(checkSocketPath(`${root}/./puck.sock`)).toMatch(/normalized/);
+    expect(checkSocketPath(`${root}//puck.sock`)).toMatch(/normalized/);
+    expect(checkSocketPath(path.join(root, 'puck.sock'))).toBeNull();
+    listener = listen(socket);
+    await expect(listener.start()).rejects.toThrow(/normalized/);
+    expect(bits(root)).toBe(0o755);
+    expect(fs.existsSync(`${root}/unused`)).toBe(false);
+    expect(fs.existsSync(`${root}/puck.sock`)).toBe(false);
   });
 });

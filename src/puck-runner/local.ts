@@ -39,6 +39,9 @@ export interface LocalDeps {
 
 export function checkSocketPath(p: string): string | null {
   if (!path.isAbsolute(p)) return 'The local socket path must be absolute.';
+  if (path.resolve(p) !== p) {
+    return `The local socket path must be normalized (no ".", "..", or repeated slashes): ${p}`;
+  }
   if (Buffer.byteLength(p, 'utf8') > MAX_SOCKET_PATH_BYTES) {
     return `The local socket path is longer than ${MAX_SOCKET_PATH_BYTES} bytes, which unix sockets do not allow: ${p}`;
   }
@@ -57,16 +60,16 @@ function inUse(p: string): Promise<boolean> {
 }
 
 function prepareSocketDir(dir: string): void {
-  const created = fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (created !== undefined) {
-    fs.chmodSync(dir, 0o700);
+  if (fs.existsSync(dir)) {
+    if ((fs.statSync(dir).mode & 0o077) !== 0) {
+      throw new Error(
+        `Refusing to listen: ${dir} is group- or world-accessible. Puck will not change its permissions. Put the local socket in a private directory (mode 0700).`,
+      );
+    }
     return;
   }
-  if ((fs.statSync(dir).mode & 0o077) !== 0) {
-    throw new Error(
-      `Refusing to listen: ${dir} is group- or world-accessible. Puck will not change its permissions. Put the local socket in a private directory (mode 0700).`,
-    );
-  }
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
 }
 
 export class LocalListener {

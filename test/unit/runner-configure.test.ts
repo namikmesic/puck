@@ -205,6 +205,16 @@ describe('config.sh --local-socket', { timeout: 20_000 }, () => {
       ),
     ).rejects.toThrow(/longer than 103 bytes/);
     expect(isConfigured(other)).toBe(false);
+
+    const dotdot = runnerPaths(path.join(dir, 'dotdot'));
+    await expect(
+      configure(
+        { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false, localSocket: `${dir}/unused/../local.sock` },
+        { paths: dotdot, docker: docker().run, io: io(), version: '0.1.0', platform: { os: 'macos', arch: 'arm64' } },
+      ),
+    ).rejects.toThrow(/normalized/);
+    expect(isConfigured(dotdot)).toBe(false);
+    expect(fs.existsSync(`${dir}/unused`)).toBe(false);
   });
 
   it('reads older .runner files without the field as off', () => {
