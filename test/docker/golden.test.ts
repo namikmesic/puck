@@ -275,11 +275,11 @@ describe('golden scenario (fake harness)', () => {
     // Quit: the app's connection goes; the environment keeps working.
     client.stop();
     const at = cursor.seq as number;
-    await waitFor('the item to finish on its own', async () => {
-      const r = await exec(`puck-${envId}`, ['git', '-C', `/workspace/.puck/worktrees/W-${item.number}`, 'log', '-1', '--format=%s']);
-      return r.stdout.trim() === 'Add a changelog';
+    // With no client attached, read the daemon's own backlog store until the item reached review.
+    await waitFor('the item to reach review on its own', async () => {
+      const r = await exec(`puck-${envId}`, ['node', '-p', `require('/puck/state/items.json').items['${item.id}'].status`]);
+      return r.stdout.trim() === 'review';
     }, 60_000);
-    await new Promise((r) => setTimeout(r, 8_000)); // the review notice and the orchestrator's wake turn
 
     // Reopen: everything that happened meanwhile replays from the cursor.
     const replayed: { seq: number; ev: DaemonEvent }[] = [];
@@ -289,14 +289,17 @@ describe('golden scenario (fake harness)', () => {
     expect(replayed.every((e) => e.seq > at)).toBe(true);
     expect(replayed.some((e) => e.ev.kind === 'item.upsert' && e.ev.item.id === item.id && e.ev.item.status === 'review')).toBe(true);
 
-    const history = await client.cmd('session.history', { sessionId: snap.orchestratorSessionId as string, limit: 200 });
-    const entries: TranscriptEntry[] = history.entries;
-    const noticeAt = entries.findIndex(
-      (e) => e.kind === 'notice' && e.notices.some((n) => n.kind === 'item.review' && n.text.includes(`W-${item.number}`)),
-    );
-    expect(noticeAt).toBeGreaterThanOrEqual(0);
-    // The orchestrator woke on that notice and answered it.
-    expect(entries.slice(noticeAt + 1).some((e) => e.kind === 'turn' && e.events.some((ev) => ev.kind === 'text-delta'))).toBe(true);
+    // The orchestrator's transcript holds the review notice, and it woke on that notice and answered it.
+    const reacted = (entries: TranscriptEntry[]): boolean => {
+      const noticeAt = entries.findIndex(
+        (e) => e.kind === 'notice' && e.notices.some((n) => n.kind === 'item.review' && n.text.includes(`W-${item.number}`)),
+      );
+      return noticeAt >= 0 && entries.slice(noticeAt + 1).some((e) => e.kind === 'turn' && e.events.some((ev) => ev.kind === 'text-delta'));
+    };
+    await waitFor('the notice and the orchestrator reaction', async () => {
+      const history = await client.cmd('session.history', { sessionId: snap.orchestratorSessionId as string, limit: 200 });
+      return reacted(history.entries);
+    }, 60_000);
     seen.push(...replayed);
   });
 

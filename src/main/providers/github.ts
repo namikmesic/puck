@@ -52,29 +52,40 @@ let generation = 0;
 let cached: { token: string; expiresAt: number; generation: number } | null = null;
 let fetching: { promise: Promise<string>; generation: number } | null = null;
 
-/** The install link the server gave for this session, once it answered. */
-let installLink: { url: string | null; generation: number } | null = null;
+/** The install link the server gave for this session, once it named one. */
+let installLink: { url: string; generation: number } | null = null;
+let loadingLink: { promise: Promise<void>; generation: number } | null = null;
 
 onSessionChange(() => {
   generation += 1;
   cached = null;
   fetching = null;
   installLink = null;
+  loadingLink = null;
 });
 
 /**
  * Asks the server for the GitHub App's install link once per session, so
- * `state()` can show it; a failure leaves it unknown until the next call.
+ * `state()` can show it; while the server cannot name one, the next call
+ * asks again. Concurrent calls share one request.
  */
-export async function loadInstallLink(): Promise<void> {
-  if (!current() || installLink?.generation === generation) return;
+export function loadInstallLink(): Promise<void> {
+  if (!current() || installLink?.generation === generation) return Promise.resolve();
+  if (loadingLink?.generation === generation) return loadingLink.promise;
   const gen = generation;
-  try {
-    const me = await serverApi.me();
-    if (gen === generation) installLink = { url: me.installUrl, generation: gen };
-  } catch (err) {
-    log.warn('github.install-link-failed', { error: err instanceof Error ? err.message : String(err) });
-  }
+  const promise = serverApi
+    .me()
+    .then((me) => {
+      if (gen === generation && me.installUrl) installLink = { url: me.installUrl, generation: gen };
+    })
+    .catch((err: unknown) => {
+      log.warn('github.install-link-failed', { error: err instanceof Error ? err.message : String(err) });
+    })
+    .finally(() => {
+      if (loadingLink?.promise === promise) loadingLink = null;
+    });
+  loadingLink = { promise, generation: gen };
+  return promise;
 }
 
 async function accessToken(): Promise<string> {

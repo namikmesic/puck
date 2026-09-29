@@ -69,6 +69,20 @@ describe('GitHub App install link', () => {
     await githubProvider.auth.logout();
     expect(githubProvider.state().installUrl).toBeNull();
   });
+
+  it('asks again while the server cannot name it, and shares one request between concurrent calls', async () => {
+    await signIn();
+    h.github.rejectAppJwt = true; // GitHub refuses the App: the server has no slug to offer
+    await loadInstallLink();
+    expect(githubProvider.state().installUrl).toBeNull();
+
+    h.github.rejectAppJwt = false;
+    const appCalls = () => h.github.calls.filter((c) => c.endsWith('/app')).length;
+    const before = appCalls();
+    await Promise.all([loadInstallLink(), loadInstallLink()]);
+    expect(appCalls() - before).toBe(1);
+    expect(githubProvider.state().installUrl).toBe(`${WEB}/apps/${APP_SLUG}/installations/new`);
+  });
 });
 
 describe('signing in to Puck with GitHub', () => {
