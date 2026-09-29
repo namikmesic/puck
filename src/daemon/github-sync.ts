@@ -45,8 +45,8 @@
  *     and the dependents GitHub restarts — and only while that watch still
  *     exists: a new head that arrived meanwhile keeps its own watch. A
  *     job's id is its check run id. Those previous ids stop counting, and
- *     each replaced name stays pending until a kept run of that name is
- *     strictly newer than every superseded run of that name, so an older
+ *     each replaced name stays pending until a kept run of that name has a
+ *     higher check run id than every superseded run of that name, so an older
  *     result is never reported again and every other check still counts.
  *     The re-run's result is reported like a first one, even when it is the
  *     same failure.
@@ -282,7 +282,7 @@ const parseTime = (s: string | null | undefined, fallback: number): number => {
   return Number.isNaN(t) ? fallback : t;
 };
 
-/** One run per check name: the latest `started_at`, which is what GitHub returns for `filter=latest`. */
+/** One run per check name: the highest check run id. GitHub assigns increasing ids, so a queued replacement wins over the run it replaces. */
 function latestCheckRuns(runs: readonly GhCheckRun[]): GhCheckRun[] {
   const best = new Map<string, GhCheckRun>();
   for (const run of runs) {
@@ -293,15 +293,14 @@ function latestCheckRuns(runs: readonly GhCheckRun[]): GhCheckRun[] {
 }
 
 function newerCheck(a: GhCheckRun, b: GhCheckRun): boolean {
-  const delta = parseTime(a.started_at, 0) - parseTime(b.started_at, 0);
-  return delta !== 0 ? delta > 0 : a.id >= b.id;
+  return a.id > b.id;
 }
 
 /**
  * Check runs as a re-run left them. Superseded ids are dropped. A name in
- * `awaiting` stays pending until a kept run of that name is strictly newer
+ * `awaiting` stays pending until a kept run of that name has a higher id
  * than every superseded run of that name still in the payload; until then
- * a queued stand-in outranks every older run of that name.
+ * those kept runs are replaced by a queued stand-in.
  */
 export function afterReruns(runs: readonly GhCheckRun[], superseded: readonly number[], awaiting: readonly string[]): GhCheckRun[] {
   if (!superseded.length && !awaiting.length) return [...runs];
@@ -325,16 +324,12 @@ export function afterReruns(runs: readonly GhCheckRun[], superseded: readonly nu
     if (!arrived) pending.add(name);
   }
   const out = kept.filter((r) => !pending.has(r.name));
-  for (const name of pending) out.push(standIn(name, runs));
+  for (const name of pending) out.push(standIn(name));
   return out;
 }
 
-function standIn(name: string, runs: readonly GhCheckRun[]): GhCheckRun {
-  let ms = 0;
-  for (const run of runs) {
-    if (run.name === name) ms = Math.max(ms, parseTime(run.started_at, 0));
-  }
-  return { id: 0, name, status: 'queued', conclusion: null, html_url: null, started_at: new Date(ms + 1).toISOString() };
+function standIn(name: string): GhCheckRun {
+  return { id: 0, name, status: 'queued', conclusion: null, html_url: null };
 }
 
 function replacedJobs(before: readonly GhJob[], after: readonly GhJob[]): GhJob[] {

@@ -1642,13 +1642,24 @@ describe('CI on the published head', () => {
     expect(
       evaluateChecks(
         [
-          run(1, 'test', 'failure', 'completed', '2026-09-01T10:00:00.000Z'),
+          run(1, 'test', 'failure', 'completed', '2026-09-01T10:05:00.000Z'),
           run(2, 'lint', 'failure', 'completed', '2026-09-01T10:00:00.000Z'),
-          run(3, 'test', 'success', 'completed', '2026-09-01T10:05:00.000Z'),
+          run(3, 'test', 'success', 'completed', '2026-09-01T10:00:00.000Z'),
         ],
         null,
       ),
     ).toMatchObject({ state: 'failure', passed: 1, failing: [{ name: 'lint' }] });
+    expect(
+      evaluateChecks(
+        [
+          run(60, 'test', 'success', 'completed', '2026-09-01T10:05:00.000Z'),
+          run(61, 'lint', 'success'),
+          run(62, 'deploy', 'skipped', 'completed', '2026-09-01T10:00:00.000Z'),
+          run(90, 'deploy', null, 'queued'),
+        ],
+        null,
+      ).state,
+    ).toBe('pending');
   });
 
   it('logTail keeps the end and redacts it', () => {
@@ -1807,6 +1818,30 @@ describe('ci_rerun', () => {
         fake.gh.jobsDownAfterRerun.add(50);
       },
       beforePending: () => undefined,
+    },
+    {
+      name: 'waits out a queued needs-dependent after a stale jobs re-read',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test'],
+      setup: () => {
+        skippedDeploy();
+        fake.gh.jobsStale.add(50);
+      },
+      beforePending: () => completeQueued(50, 'test', 'success'),
+    },
+    {
+      name: 'waits out a queued needs-dependent after a failed jobs re-read',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test'],
+      setup: () => {
+        skippedDeploy();
+        fake.gh.jobsDownAfterRerun.add(50);
+      },
+      beforePending: () => completeQueued(50, 'test', 'success'),
     },
     {
       name: 'passes when deploy was skipped by if and the jobs re-read is stale',
