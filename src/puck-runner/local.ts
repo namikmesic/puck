@@ -56,6 +56,19 @@ function inUse(p: string): Promise<boolean> {
   });
 }
 
+function prepareSocketDir(dir: string): void {
+  const created = fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (created !== undefined) {
+    fs.chmodSync(dir, 0o700);
+    return;
+  }
+  if ((fs.statSync(dir).mode & 0o077) !== 0) {
+    throw new Error(
+      `Refusing to listen: ${dir} is group- or world-accessible. Puck will not change its permissions. Put the local socket in a private directory (mode 0700).`,
+    );
+  }
+}
+
 export class LocalListener {
   private server: net.Server | null = null;
   private readonly sockets = new Set<net.Socket>();
@@ -65,9 +78,7 @@ export class LocalListener {
   async start(): Promise<void> {
     const problem = checkSocketPath(this.deps.path);
     if (problem) throw new Error(problem);
-    const dir = path.dirname(this.deps.path);
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
+    prepareSocketDir(path.dirname(this.deps.path));
     if (fs.existsSync(this.deps.path)) {
       if (await inUse(this.deps.path)) throw new Error(`Another process is listening on ${this.deps.path}.`);
       fs.rmSync(this.deps.path, { force: true });
