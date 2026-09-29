@@ -1180,12 +1180,107 @@ describe('CI on the published head', () => {
     fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA, run_started_at: finished }]);
     clock += POLL.checksMs;
     await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    fake.gh.checkRuns.set(SHA, [run(10, 'test', 'success', 'completed', finished)]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'success', head_sha: SHA, run_started_at: finished }]);
+    clock += POLL.checksMs;
+    await sync.poll();
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
       expect.stringMatching(/1 check failed \(test\)/),
-      expect.stringMatching(/1 check failed \(retry\).*attempt 2 of 2/),
+      'W-1 PR #7: all 1 check passed.',
+    ]);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('success');
+
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(2);
+    expect(followUps).toHaveLength(1);
+  });
+
+  it('a passing re-run keeps every check that was not replaced', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const before = iso(clock - 60_000);
+    fake.gh.checkRuns.set(SHA, [run(1, 'lint', 'success', 'completed', before), run(2, 'test', 'failure', 'completed', before)]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA, run_started_at: before }]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([expect.stringMatching(/1 check failed \(test\)/)]);
+    expect(followUps).toHaveLength(1);
+
+    const requested = clock;
+    expect(await sync.ciRerun(backlog.get(item.id) as ItemRecord)).toEqual({ rerun: 1 });
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    const after = iso(requested + 5_000);
+    fake.gh.checkRuns.set(SHA, [
+      run(1, 'lint', 'success', 'completed', before),
+      run(2, 'test', 'failure', 'completed', before),
+      run(3, 'test', 'success', 'completed', after),
+    ]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'success', head_sha: SHA, run_started_at: after }]);
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/1 check failed \(test\)/),
+      'W-1 PR #7: all 2 checks passed.',
+    ]);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('success');
+
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(2);
+    expect(followUps).toHaveLength(1);
+  });
+
+  it('a check the re-run did not replace stays failing', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const before = iso(clock - 60_000);
+    fake.gh.checkRuns.set(SHA, [run(1, 'lint', 'failure', 'completed', before), run(2, 'test', 'failure', 'completed', before)]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA, run_started_at: before }]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([expect.stringMatching(/2 checks failed \(lint, test\)/)]);
+    expect(followUps).toHaveLength(1);
+
+    const requested = clock;
+    expect(await sync.ciRerun(backlog.get(item.id) as ItemRecord)).toEqual({ rerun: 1 });
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+
+    const after = iso(requested + 5_000);
+    fake.gh.checkRuns.set(SHA, [
+      run(1, 'lint', 'failure', 'completed', before),
+      run(2, 'test', 'failure', 'completed', before),
+      run(3, 'test', 'success', 'completed', after),
+    ]);
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'success', head_sha: SHA, run_started_at: after }]);
+    clock += POLL.checksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/2 checks failed \(lint, test\)/),
+      expect.stringMatching(/1 check failed \(lint\)/),
     ]);
     expect(followUps).toHaveLength(2);
-    expect(followUps[1].text).toContain('- retry:');
+    expect(followUps[1].text).toContain('- lint:');
     expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
 
     clock += POLL.checksMs;
@@ -1296,6 +1391,16 @@ describe('CI on the published head', () => {
     expect(evaluateChecks([run(1, 'a', 'failure')], null, true).state).toBe('failure');
     expect(evaluateChecks([run(1, 'a', 'cancelled')], null).state).toBe('failure');
     expect(evaluateChecks([run(1, 'a', 'timed_out')], { state: 'pending', total_count: 1, statuses: [{ context: 'x', state: 'pending', target_url: null, description: null }] }).state).toBe('pending');
+    expect(
+      evaluateChecks(
+        [
+          run(1, 'test', 'failure', 'completed', '2026-09-01T10:00:00.000Z'),
+          run(2, 'lint', 'failure', 'completed', '2026-09-01T10:00:00.000Z'),
+          run(3, 'test', 'success', 'completed', '2026-09-01T10:05:00.000Z'),
+        ],
+        null,
+      ),
+    ).toMatchObject({ state: 'failure', passed: 1, failing: [{ name: 'lint' }] });
   });
 
   it('logTail keeps the end and redacts it', () => {

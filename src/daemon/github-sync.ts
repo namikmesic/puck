@@ -24,10 +24,11 @@
  *     redacted log tails of failed workflow jobs. A success or failure is
  *     a notice; `ci: fix` also queues a follow-up whenever the item can
  *     take one, up to `maxCiFixAttempts`. After ci_rerun the watch stays
- *     pending until a check or workflow run is still going or started
- *     after the request, so the result that was re-run is not reported
- *     again. Nothing reported settles as neutral and stays watched, so a
- *     check that appears later still reports.
+ *     pending while a check that was failing is still that pre-rerun run,
+ *     until the re-run has replaced one and finished. The notice is the
+ *     latest run of every check name, so a check the re-run did not
+ *     replace still counts. Nothing reported settles as neutral and stays
+ *     watched, so a check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -203,7 +204,7 @@ export function evaluateChecks(
   let pending = 0;
   let passed = 0;
   const failing: PullChecks['failing'] = [];
-  for (const run of runs) {
+  for (const run of latestCheckRuns(runs)) {
     if (run.status !== 'completed') pending++;
     else if (FAILED_CONCLUSIONS.has(run.conclusion ?? '')) {
       const summary = run.output?.title || run.output?.summary || run.conclusion || 'failed';
@@ -251,11 +252,33 @@ const parseTime = (s: string | null | undefined, fallback: number): number => {
   return Number.isNaN(t) ? fallback : t;
 };
 
-function rerunReady(checks: readonly GhCheckRun[], actions: readonly GhRun[], rerunAt: number): boolean {
-  const startedAfter = (value: string | null | undefined): boolean => parseTime(value, 0) > rerunAt;
+/** One run per check name: the latest `started_at`, which is what GitHub returns for `filter=latest`. */
+function latestCheckRuns(runs: readonly GhCheckRun[]): GhCheckRun[] {
+  const best = new Map<string, GhCheckRun>();
+  for (const run of runs) {
+    const prev = best.get(run.name);
+    if (!prev || newerCheck(run, prev)) best.set(run.name, run);
+  }
+  return [...best.values()];
+}
+
+function newerCheck(a: GhCheckRun, b: GhCheckRun): boolean {
+  const delta = parseTime(a.started_at, 0) - parseTime(b.started_at, 0);
+  return delta !== 0 ? delta > 0 : a.id >= b.id;
+}
+
+function rerunReady(checks: readonly GhCheckRun[], actions: readonly GhRun[], rerunAt: number, failingNames: readonly string[]): boolean {
+  const after = (value: string | null | undefined): boolean => parseTime(value, 0) > rerunAt;
   if (checks.some((c) => c.status !== 'completed') || actions.some((r) => r.status !== 'completed')) return false;
-  if (checks.length > 0) return checks.some((c) => startedAfter(c.started_at));
-  return actions.some((r) => startedAfter(r.run_started_at));
+  const watched = failingNames
+    .map((name) => checks.find((c) => oneLine(c.name, 120) === name))
+    .filter((run): run is GhCheckRun => run != null);
+  const fresh = watched.filter((run) => after(run.started_at));
+  if (watched.length > 0 && fresh.length === watched.length) return true;
+  if (fresh.length > 0 && actions.some((r) => after(r.run_started_at))) return true;
+  if (watched.length > 0) return false;
+  if (checks.length > 0) return checks.some((c) => after(c.started_at));
+  return actions.some((r) => after(r.run_started_at));
 }
 
 /* ---------- The workflow ---------- */
@@ -777,8 +800,18 @@ export class GithubSync {
     this.kick();
   }
 
-  private watch(sha: string, rerunAt: number | null = null): CiWatch {
-    return { sha, state: 'pending', since: this.now(), failing: [], logs: [], failedRuns: [], notified: null, rerunAt };
+  private watch(sha: string, rerunAt: number | null = null, rerunFailing: readonly string[] = []): CiWatch {
+    return {
+      sha,
+      state: 'pending',
+      since: this.now(),
+      failing: [],
+      logs: [],
+      failedRuns: [],
+      notified: null,
+      rerunAt,
+      rerunFailing: [...rerunFailing],
+    };
   }
 
   private async pollPull(itemId: string): Promise<void> {
@@ -972,12 +1005,8 @@ export class GithubSync {
     ]);
     if (s.ci !== ci) return;
     const rerunAt = ci.rerunAt;
-    let checks = polled.data ?? [];
-    if (rerunAt != null) {
-      if (!rerunReady(checks, workflowRuns, rerunAt)) return;
-      const fresh = checks.filter((c) => parseTime(c.started_at, 0) > rerunAt);
-      if (fresh.length > 0) checks = fresh;
-    }
+    const checks = latestCheckRuns(polled.data ?? []);
+    if (rerunAt != null && !rerunReady(checks, workflowRuns, rerunAt, ci.rerunFailing)) return;
     const result = evaluateChecks(checks, status.data ?? null, polled.incomplete === true || status.incomplete === true);
     const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
     ci.failing = result.failing;
@@ -1106,7 +1135,7 @@ export class GithubSync {
       );
     }
     const current = this.syncOf(item.id);
-    current.ci = this.watch(ci.sha, this.now());
+    current.ci = this.watch(ci.sha, this.now(), ci.failing.map((f) => f.name));
     this.save();
     this.patchPr(item, { checks: { sha: ci.sha, state: 'pending', failing: [] } });
     this.kick(POLL.checksMs);

@@ -46,6 +46,8 @@ export interface CiWatch {
   notified: string | null;
   /** ci_rerun request time for this sha, or null when none is outstanding. */
   rerunAt: number | null;
+  /** Check names that were failing at `rerunAt`. */
+  rerunFailing: string[];
 }
 
 export interface ItemSync {
@@ -88,6 +90,7 @@ export function emptySync(): ItemSync {
 }
 
 const nums = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number') : []);
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((n): n is string => typeof n === 'string') : []);
 
 function normalizeSync(raw: Partial<ItemSync>): ItemSync {
   const base = emptySync();
@@ -105,7 +108,13 @@ function normalizeSync(raw: Partial<ItemSync>): ItemSync {
     reviewRounds: typeof raw.reviewRounds === 'number' ? raw.reviewRounds : 0,
     ci:
       raw.ci && typeof raw.ci.sha === 'string'
-        ? { ...raw.ci, logs: raw.ci.logs ?? [], failedRuns: nums(raw.ci.failedRuns), rerunAt: typeof raw.ci.rerunAt === 'number' ? raw.ci.rerunAt : null }
+        ? {
+            ...raw.ci,
+            logs: raw.ci.logs ?? [],
+            failedRuns: nums(raw.ci.failedRuns),
+            rerunAt: typeof raw.ci.rerunAt === 'number' ? raw.ci.rerunAt : null,
+            rerunFailing: strs(raw.ci.rerunFailing),
+          }
         : base.ci,
     ciFixAttempts: typeof raw.ciFixAttempts === 'number' ? raw.ciFixAttempts : 0,
   };
