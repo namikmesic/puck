@@ -11,7 +11,6 @@
 import type { PuckBridge } from './bridge';
 
 export const CHANNELS = {
-  status: 'harness:status',
   providers: 'provider:list',
   openExternal: 'shell:open-external',
   providerAuthStart: 'provider:auth-start',
@@ -46,44 +45,15 @@ export const CHANNELS = {
   definitionRefs: 'defs:refs',
   definitionsAt: 'defs:at',
 
-  agentList: 'agent:list',
-  agentCreate: 'agent:create',
-  agentUpdate: 'agent:update',
-  agentDelete: 'agent:delete',
-  agentSelect: 'agent:select',
-
-  envList: 'env:list',
-  envCreate: 'env:create',
-  envUpdate: 'env:update',
-  envDelete: 'env:delete',
-  envStart: 'env:start',
-  envStop: 'env:stop',
-  envRestart: 'env:restart',
-  envRebuild: 'env:rebuild',
-  envSecretSet: 'env:secret-set',
-  envSecretDelete: 'env:secret-delete',
-  envSelect: 'env:select',
-
-  convoSave: 'convo:save',
-  convoLoad: 'convo:load',
-
   supportInfo: 'support:info',
   supportExport: 'support:export',
-
-  startTurn: 'harness:start-turn',
-  interrupt: 'harness:interrupt',
-  answerAsk: 'harness:answer-ask',
 } as const satisfies Record<
-  Exclude<keyof PuckBridge, 'onEvent' | 'onFlush' | 'onEnvEvent' | 'onRunnerEvent' | 'onInstanceEvent' | 'onDaemonEvent'>,
+  Exclude<keyof PuckBridge, 'onFlush' | 'onRunnerEvent' | 'onInstanceEvent' | 'onDaemonEvent'>,
   string
 >;
 
 /* Push channels (main → renderer) live outside the invoke table. */
 
-/** Harness events, tagged with their turnId. */
-export const EVENT_CHANNEL = 'harness:event';
-/** Environment lifecycle progress (`EnvLifecycleEvent`). */
-export const ENV_EVENT_CHANNEL = 'env:lifecycle';
 /** Runner list, This Mac and server-connection changes (`RunnerEvent`). */
 export const RUNNER_EVENT_CHANNEL = 'runner:event';
 /** Environment changes (`InstanceEvent`). */

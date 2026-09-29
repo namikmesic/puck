@@ -19,8 +19,6 @@ jobs:
         run: npm run typecheck
       - name: Lint
         run: npm run lint
-      - name: Container runner syntax
-        run: node --check src/main/runner/runner.js
       - name: Unit tests
         run: npm test
       - name: Definitions schema is current

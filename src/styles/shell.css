@@ -73,29 +73,7 @@ svg {
   flex: none;
 }
 
-/* ---------- Sidebar ---------- */
-
-.sidebar {
-  flex: none;
-  width: clamp(200px, 21vw, 272px);
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--line-soft);
-  padding: 0 12px 14px;
-}
-
-.sidebar-drag {
-  height: 40px;
-  flex: none;
-  -webkit-app-region: drag;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 2px 8px 14px;
-}
+/* ---------- Shared chrome: logo, nav items, icon buttons ---------- */
 
 .logo {
   width: 30px;
@@ -109,22 +87,6 @@ svg {
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 8px rgba(46, 94, 78, 0.25);
-}
-
-.brand-name {
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.beta {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--gold);
-  background: var(--gold-muted);
-  border-radius: 999px;
-  padding: 2px 8px;
 }
 
 .nav-item {
@@ -158,28 +120,6 @@ svg {
   padding: 0 10px;
 }
 
-.recents {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  margin-top: 22px;
-}
-
-.recents-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-right: 4px;
-}
-
-.recents-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--gray-light);
-  margin: 0 0 6px;
-  padding: 0 10px;
-}
-
 .icon-btn.small {
   padding: 3px;
   margin-bottom: 6px;
@@ -188,148 +128,6 @@ svg {
 .icon-btn.small svg {
   width: 14px;
   height: 14px;
-}
-
-.agent-row {
-  font-weight: 600;
-}
-
-.recents-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.recent-item {
-  position: relative;
-}
-
-.recent {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 6px 26px 6px 10px;
-  border-radius: 8px;
-  font-size: 13.5px;
-  color: var(--charcoal);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: background 0.15s ease;
-}
-
-.recent:hover {
-  background: var(--emerald-tint);
-}
-
-.recent.active {
-  background: var(--emerald-tint);
-  font-weight: 600;
-  color: var(--emerald-dark);
-}
-
-/* Live session activity: gold pulse while running, colored dot when done. */
-.recent-status {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-
-.recent-status.running {
-  background: var(--gold);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-.recent-status.done {
-  background: var(--emerald);
-}
-
-.recent-status.error {
-  background: var(--red);
-}
-
-.recent-status.ask {
-  background: var(--gold);
-  box-shadow: 0 0 0 3px var(--gold-muted);
-}
-
-.recent-item:hover .recent-status {
-  opacity: 0;
-}
-
-/* Sub-agent chats sit indented under their parent session. */
-.recent-item.child::before {
-  content: '↳';
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--gray-light);
-  font-size: 11px;
-  pointer-events: none;
-}
-
-.recent-item.child .recent {
-  padding-left: 28px;
-  font-size: 13px;
-  color: var(--gray);
-}
-
-.recent-item.child .recent.active {
-  color: var(--emerald-dark);
-}
-
-.recent-item.child:hover .recent-status {
-  opacity: 1; /* children have no delete button to make room for */
-}
-
-.sidebar-footer {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 8px 0;
-  border-top: 1px solid var(--line-soft);
-}
-
-.avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--emerald-light), var(--emerald-dark));
-  color: var(--white);
-  font-size: 13px;
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.sidebar-footer .user {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  line-height: 1.3;
-}
-
-.user-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.user-org {
-  font-size: 12px;
-  color: var(--gray-light);
 }
 
 .icon-btn {
@@ -346,73 +144,6 @@ svg {
 .icon-btn.active {
   background: var(--emerald-tint);
   color: var(--emerald-dark);
-}
-
-/* ---------- Main column ---------- */
-
-.main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.main-drag {
-  flex: none;
-  height: 38px;
-  -webkit-app-region: drag;
-}
-
-.picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border-radius: 9px;
-  transition: background 0.15s ease;
-}
-
-.picker:hover {
-  background: var(--emerald-tint);
-}
-
-.model-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 20;
-  min-width: 220px;
-  display: flex;
-  flex-direction: column;
-  padding: 6px;
-  background: var(--white);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 14px 40px rgba(46, 94, 78, 0.14);
-  animation: fade-in 0.12s ease;
-}
-
-.model-item {
-  text-align: left;
-  padding: 8px 12px;
-  border-radius: 9px;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--charcoal);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: background 0.15s ease;
-}
-
-.model-item:hover {
-  background: var(--emerald-tint);
-}
-
-.model-item.active {
-  color: var(--emerald-dark);
-  font-weight: 650;
-  background: var(--emerald-tint);
 }
 
 .chevron {
@@ -477,14 +208,13 @@ svg {
   border-color: var(--red);
 }
 
+/* ---------- The window: top bar and three panes ---------- */
 
-/* ---------- Environment window (PUCK_UI=v2): top bar and three panes ---------- */
-
-body.v2 .hidden {
+body.puck .hidden {
   display: none !important;
 }
 
-.v2-app {
+.app-shell {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -922,7 +652,7 @@ body.v2 .hidden {
   border-top: 1px solid var(--line-soft);
 }
 
-.v2-back {
+.back-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -933,12 +663,12 @@ body.v2 .hidden {
   border-radius: 7px;
 }
 
-.v2-back svg {
+.back-btn svg {
   width: 15px;
   height: 15px;
 }
 
-.v2-back:hover {
+.back-btn:hover {
   background: var(--emerald-tint);
 }
 

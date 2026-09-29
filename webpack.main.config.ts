@@ -51,9 +51,7 @@ export const mainConfig: Configuration = {
   resolve: {
     extensions: ['.js', '.ts', '.jsx', '.tsx', '.css', '.json'],
     alias: {
-      // The container runner, imported as a raw string (asset/source rule).
-      'raw-runner': path.resolve(__dirname, 'src/main/runner/runner.js'),
-      // The environment daemon bundle, also a raw string, and its metadata.
+      // The environment daemon bundle, a raw string (asset/source rule), and its metadata.
       'raw-daemon': DAEMON_BUNDLE,
       'raw-daemon-meta': path.resolve(__dirname, '.webpack/daemon/puckd.meta.json'),
     },

@@ -31,7 +31,6 @@ export const codexProvider: HarnessProvider = {
   },
 
   credential: providerCredential(oauth.account, {
-    containerPath: '/root/.codex/auth.json',
     serialize: oauth.authJsonContent,
   }),
 };

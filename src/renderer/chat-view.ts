@@ -1,24 +1,60 @@
 /**
  * The chat rendering layer: Slack-style message rows, streaming assistant
  * turns (markdown committer, tool cards, sub-agent links, ask cards), Puck
- * notice rows (`W-n` opens the item), replay of persisted logs, and the
- * full-screen turn overlay.
+ * notice rows (`W-n` opens the item), and the full-screen turn overlay.
  *
  * Pure presentation over a Session's live thread node. Everything stateful
- * it needs from the app — persistence, roster refresh, answer delivery,
- * child-session creation — arrives through `ChatViewContext`; this module
- * never touches renderer globals, which is what makes it jsdom-testable.
+ * it needs from the app — answer delivery, child-session creation — arrives
+ * through `ChatViewContext`; the environment's daemon keeps the transcript.
+ * This module never touches renderer globals, which is what makes it
+ * jsdom-testable.
  */
 
-import type { ConversationEntry, ProviderCapabilities } from '../harness/bridge';
+import type { ProviderCapabilities } from '../harness/bridge';
 import type { Notice, NoticeKind } from '../harness/transcript';
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
 import { askCard, askReplayCard, setAskAnswered } from './ask-card';
 import { el } from './dom';
 import { dayLabel, fmtClock, fmtTime, fmtTokens } from './format';
 import { renderMd } from './markdown';
-import type { AgentThread, Session } from './session-store';
 import { button, errText } from './util';
+
+/** One chat on screen: a session's live thread node and its streaming state. */
+export interface Session {
+  id: number;
+  title: string;
+  thread: HTMLOListElement;
+  usage: number;
+  turns: number;
+  createdAt: number;
+  lastActiveAt: number;
+  running: boolean;
+  /** In-flight turn id, for routing interrupt / question answers. */
+  turnId: string | null;
+  /** Something happened while this session was in the background. */
+  unread: 'done' | 'error' | 'ask' | null;
+  /**
+   * Tool cards across ALL turns in this session, so a sub-agent resumed in a
+   * later turn (SendMessage) streams into its original card.
+   */
+  tools: Map<string, ToolCard>;
+  /** Set on sub-agent chats: the session this agent was spawned from. */
+  parentSessionId?: number;
+  /** Sub-agent chats spawned from this session, keyed by their Task toolId. */
+  agents: Map<string, AgentThread>;
+}
+
+export interface ToolCard {
+  card: HTMLElement;
+  startedAt: number;
+}
+
+export interface AgentThread {
+  child: Session;
+  childTurn: AssistantTurn;
+  /** True once the sub-agent's own text streamed in (avoids double reports). */
+  sawText: boolean;
+}
 
 /** The streaming controller one assistant turn exposes to the turn loop. */
 export interface AssistantTurn {
@@ -48,9 +84,6 @@ export interface ChatViewContext {
   /** Deliver (or dismiss, with null) a mid-turn answer to the agent. */
   answerAsk(turnId: string, askId: string, answers: Record<string, string> | null): Promise<void>;
   toast(message: string): void;
-  /** Persist a session after an in-place change (answered questions). Absent
-   *  when something else keeps the transcript (an environment's daemon). */
-  schedulePersist?(session: Session): void;
   /** Roster-visible state changed (running/unread/title/membership). */
   rosterChanged(): void;
   /** Is this session the one on screen? (unread markers skip the current). */
@@ -111,9 +144,6 @@ export function refRuns(text: string): { text: string; ref: boolean }[] {
   if (at < text.length) runs.push({ text: text.slice(at), ref: false });
   return runs;
 }
-
-/** Long histories replay only their tail; the rest loads on demand. */
-const REPLAY_WINDOW = 150;
 
 /**
  * Shown at the top of a sub-agent chat when the provider reports only the
@@ -445,13 +475,6 @@ export function initChatView(ctx: ChatViewContext) {
             }
             const idx = openAsks.indexOf(card);
             if (idx !== -1) openAsks.splice(idx, 1);
-            // Record the outcome so replayed history keeps the question + answer.
-            for (const entry of session.log) {
-              if (entry.kind !== 'turn') continue;
-              const ev = entry.events.find((e) => e.kind === 'ask' && e.askId === askId);
-              if (ev && ev.kind === 'ask') ev.answers = answers;
-            }
-            ctx.schedulePersist?.(session);
             if (answers) this.setThinking(true);
           },
         });
@@ -635,57 +658,10 @@ export function initChatView(ctx: ChatViewContext) {
     if (session.thread.isConnected) ctx.scrollChat();
   }
 
-  /** Render a stored history lazily: only when its conversation first opens. */
-  function hydrate(session: Session): void {
-    if (!session.pendingLog) return;
-    const log = session.pendingLog;
-    session.pendingLog = undefined;
-    replayLog(session, log);
-  }
-
-  /** Rebuild a conversation's UI (and its sub-agent chats) from stored entries. */
-  function replayLog(session: Session, log: ConversationEntry[], full = false): void {
-    session.log = log;
-    const entries = full || log.length <= REPLAY_WINDOW ? log : log.slice(-REPLAY_WINDOW);
-    if (entries.length < log.length) {
-      const item = el('li', 'load-earlier');
-      const btn = button('btn-ghost', `Show ${log.length - entries.length} earlier messages`);
-      btn.addEventListener('click', () => {
-        // Rebuild the whole thread from the full log through the same path,
-        // detached so the replay doesn't force a layout per message.
-        const host = session.thread.parentElement;
-        session.thread.remove();
-        session.thread.textContent = '';
-        delete session.thread.dataset.day;
-        session.tools.clear();
-        session.agents.clear();
-        ctx.pruneChildren(session);
-        replayLog(session, log, true);
-        host?.appendChild(session.thread);
-        ctx.rosterChanged();
-        ctx.scrollChat(true);
-      });
-      item.appendChild(btn);
-      session.thread.appendChild(item);
-    }
-    for (const entry of entries) {
-      if (entry.kind === 'user') {
-        // Persisted user entries are always the human (children never persist).
-        addUserMessage(session, entry.text, ctx.userName, entry.ts);
-        continue;
-      }
-      const turn = addAssistantTurn(session, 'replay', entry.ts);
-      for (const event of entry.events) applyEvent(turn, event, true);
-      turn.setThinking(false);
-    }
-  }
-
   return {
     addUserMessage,
     addNotice,
     addAssistantTurn,
-    hydrate,
-    replayLog,
     openFullTurn,
     closeFullTurn,
     detailFollow,

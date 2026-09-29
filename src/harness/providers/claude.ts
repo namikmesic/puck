@@ -201,8 +201,8 @@ export const claudeHarness: HarnessDescriptor = {
   },
   // Claude Code refuses --dangerously-skip-permissions as root unless it
   // can tell it's sandboxed; the container is exactly that sandbox. The
-  // container runner runs the CLI as root and needs this; the environment
-  // daemon runs it as an unprivileged user, where it is not needed.
+  // environment daemon runs the CLI as an unprivileged user, where it is
+  // not needed, and it stays harmless there.
   containerEnv: { IS_SANDBOX: '1' },
   credentialPath: '/puck/home/.claude/.credentials.json',
 };

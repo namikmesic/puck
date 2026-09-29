@@ -1,19 +1,14 @@
-import { createRequire } from 'node:module';
-import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { HarnessEvent } from '../../src/harness/types';
 import { runCodex, type CodexChildren, type CodexSdk } from '../../src/daemon/harness/codex';
 import type { AdapterRequest } from '../../src/daemon/harness/types';
 import collabTurn from '../fixtures/codex-collab-events.json';
+import recorded from '../fixtures/codex-events.expected.json';
 
 // The daemon's Codex adapter is a port of the container runner's runCodex.
 // These are the runner's collab sub-agent tests, run against the port, plus
-// a differential check: the same exec stream through runner.js must produce
-// the same HarnessEvents.
-const requireCjs = createRequire(path.join(process.cwd(), 'package.json'));
-const runner = requireCjs('./src/main/runner/runner.js') as {
-  runCodex(req: unknown, sdk: unknown, ctx: unknown): Promise<void>;
-};
+// a check against what the container runner emitted for the same exec
+// streams (recorded in codex-events.expected.json before it was removed).
 
 type Collab = {
   id: string;
@@ -112,39 +107,6 @@ async function drive(events: unknown[], children: CodexChildren = new Map(), ove
   return Object.assign(out, { sessions, ...s });
 }
 
-async function driveRunner(events: unknown[]): Promise<HarnessEvent[]> {
-  const out: HarnessEvent[] = [];
-  let thinking = false;
-  const ctx = {
-    emit: (event: HarnessEvent) => out.push(event),
-    thinkingOn: () => {
-      if (!thinking) {
-        thinking = true;
-        out.push({ kind: 'thinking', active: true });
-      }
-    },
-    thinkingOff: () => {
-      if (thinking) {
-        thinking = false;
-        out.push({ kind: 'thinking', active: false });
-      }
-    },
-    session: () => undefined,
-    setSession: () => undefined,
-    sessionId: () => null,
-    endTurn: (stats: unknown) => out.push({ kind: 'turn-end', stats } as HarnessEvent),
-    onInterrupt: () => undefined,
-    askUser: async () => null,
-    cancelAsks: () => undefined,
-  };
-  await runner.runCodex(
-    { id: 't1', provider: 'codex', model: 'auto', systemPrompt: '', thinking: 'auto', settings: '{}', advanced: '', resume: null, prompt: 'hi' },
-    scriptedSdk(events).sdk,
-    ctx,
-  );
-  return out;
-}
-
 const of = <K extends HarnessEvent['kind']>(events: HarnessEvent[], kind: K) =>
   events.filter((e): e is Extract<HarnessEvent, { kind: K }> => e.kind === kind);
 const noDuration = (events: HarnessEvent[]) =>
@@ -163,9 +125,8 @@ describe('daemon Codex adapter', () => {
       { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'done' } },
       { type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 5, output_tokens: 3, reasoning_output_tokens: 2 } },
     ];
-    for (const stream of [collabTurn as unknown[], tools]) {
-      expect(noDuration(await drive(stream))).toEqual(noDuration(await driveRunner(stream)));
-    }
+    expect(noDuration(await drive(collabTurn as unknown[]))).toEqual(recorded.collab);
+    expect(noDuration(await drive(tools))).toEqual(recorded.tools);
   });
 
   it('runs the CLI through the puck wrapper with the allowlisted env, the session cwd and resume id', async () => {

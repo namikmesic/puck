@@ -15,11 +15,11 @@ import { codexHarness } from './codex';
 
 /**
  * An npm package installed into containers at an exact version. Pins keep
- * the container runner and the environment daemon in lockstep with the
- * packages they were written against; provisioning verifies the installed
- * version after install and fails setup on drift. Bump a pin together with
- * the runner or daemon code that depends on that version. An SDK pin must
- * also match the devDependency the daemon's types are checked against.
+ * the environment daemon in lockstep with the packages it was written
+ * against; provisioning verifies the installed version after install and
+ * fails setup on drift. Bump a pin together with the daemon code that
+ * depends on that version. An SDK pin must also match the devDependency the
+ * daemon's types are checked against.
  */
 export interface PinnedPackage {
   name: string;
@@ -58,9 +58,8 @@ export interface HarnessDescriptor {
   /** Non-secret env baked into the container at creation (e.g. IS_SANDBOX=1). */
   readonly containerEnv: Readonly<Record<string, string>>;
   /**
-   * The CLI credential file inside an environment whose agents run as the
-   * unprivileged user with HOME=/puck/home. Today's root runner reads its
-   * copy from the host half's `containerPath` instead.
+   * The CLI credential file inside an environment, whose agents run as the
+   * unprivileged user with HOME=/puck/home.
    */
   readonly credentialPath: string;
 }

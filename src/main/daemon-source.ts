@@ -3,9 +3,7 @@
  * `raw-daemon` alias (webpack `asset/source`), plus the metadata
  * scripts/build-daemon.mjs wrote beside it: the app version and the
  * bundle's sha256, which a running daemon reports as its `build`.
- * Environments on runners get this bundle through the runner's cache
- * (`bundle.put`); the legacy environment start still deploys the container
- * runner.
+ * Environments get this bundle through their runner's cache (`bundle.put`).
  */
 
 import daemonSource from 'raw-daemon';

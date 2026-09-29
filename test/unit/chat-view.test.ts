@@ -1,35 +1,62 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationData, ProviderCapabilities } from '../../src/harness/bridge';
-import { initChatView, noticeTone, refRuns, type ChatView, type ChatViewContext } from '../../src/renderer/chat-view';
-import { createSessionStore, type Session, type SessionStore } from '../../src/renderer/session-store';
-import fixture from '../fixtures/convo-v1.json';
+import type { ProviderCapabilities } from '../../src/harness/bridge';
+import { initChatView, noticeTone, refRuns, type ChatView, type ChatViewContext, type Session } from '../../src/renderer/chat-view';
 
 const nextFrame = (): Promise<void> =>
   new Promise((resolve) => requestAnimationFrame(() => resolve()));
 
+/** Sub-agent chats the view spawned, the way the session view keeps them. */
+function childStore() {
+  let nextId = 1;
+  const sessions: Session[] = [];
+  const freshSession = (): Session => ({
+    id: nextId++,
+    title: 'Untitled session',
+    thread: document.createElement('ol'),
+    usage: 0,
+    turns: 0,
+    createdAt: Date.now(),
+    lastActiveAt: Date.now(),
+    running: false,
+    turnId: null,
+    unread: null,
+    tools: new Map(),
+    agents: new Map(),
+  });
+  return {
+    sessions,
+    freshSession,
+    spawnChild(parent: Session): Session {
+      const child = freshSession();
+      child.parentSessionId = parent.id;
+      child.turns = 1;
+      child.running = true;
+      child.tools = parent.tools;
+      sessions.push(child);
+      return child;
+    },
+    dropChildren(parent: Session): void {
+      for (let i = sessions.length - 1; i >= 0; i--) if (sessions[i].parentSessionId === parent.id) sessions.splice(i, 1);
+    },
+  };
+}
+
 interface Harness {
   view: ChatView;
-  store: SessionStore;
+  store: ReturnType<typeof childStore>;
   ctx: {
     rosterChanged: ReturnType<typeof vi.fn>;
     answerAsk: ReturnType<typeof vi.fn>;
-    schedulePersist: ReturnType<typeof vi.fn>;
     openSession: ReturnType<typeof vi.fn>;
   };
   session: Session;
 }
 
 function makeHarness(capabilities?: ProviderCapabilities): Harness {
-  const store = createSessionStore({
-    interrupt: () => undefined,
-    save: async () => undefined,
-    onSaveError: () => undefined,
-    currentDraft: () => '',
-  });
+  const store = childStore();
   const rosterChanged = vi.fn();
   const answerAsk = vi.fn(async () => undefined);
-  const schedulePersist = vi.fn();
   const openSession = vi.fn();
   const overlayStage = document.createElement('div');
   const ctx: ChatViewContext = {
@@ -37,7 +64,6 @@ function makeHarness(capabilities?: ProviderCapabilities): Harness {
     scrollChat: () => undefined,
     answerAsk,
     toast: () => undefined,
-    schedulePersist,
     rosterChanged,
     isCurrent: () => false,
     openSession,
@@ -54,9 +80,8 @@ function makeHarness(capabilities?: ProviderCapabilities): Harness {
   };
   const view: ChatView = initChatView(ctx);
   const session = store.freshSession();
-  session.agentId = 'agent-x'; // conversations keep their title
   session.title = 'Claude';
-  return { view, store, ctx: { rosterChanged, answerAsk, schedulePersist, openSession }, session };
+  return { view, store, ctx: { rosterChanged, answerAsk, openSession }, session };
 }
 
 const T0 = new Date('2026-08-18T10:00:00').getTime(); // local midday — no midnight edge
@@ -185,44 +210,6 @@ describe('sub-agent cards follow the provider capabilities', () => {
   });
 });
 
-describe('replay of persisted logs', () => {
-  it('rebuilds rows, tool cards, and answered asks from the v1 fixture', () => {
-    const { view, session } = makeHarness();
-    const data = fixture as unknown as ConversationData;
-    view.replayLog(session, data.log);
-
-    expect(session.thread.querySelector('.msg-row.user .prose')?.textContent).toContain(
-      'Run the tests please',
-    );
-    const tool = session.thread.querySelector('details.tool');
-    expect(tool?.querySelector('.tool-name')?.textContent).toBe('Bash');
-    expect(tool?.querySelector('.tool-output')?.textContent).toBe('10 passed');
-    const ask = session.thread.querySelector('.ask.answered');
-    expect(ask?.querySelector('.ask-question')?.textContent).toBe('Ship it?');
-    expect(ask?.querySelector('.ask-option.selected')?.textContent).toContain('Yes');
-    // The unknown "mystery-future-event" kind was skipped without throwing,
-    // and the turn settled with its stats line.
-    expect(session.thread.querySelector('.turn-stats')?.textContent).toContain('1.2k in');
-  });
-
-  it('windows long logs behind a "show earlier" affordance', () => {
-    const { view, session } = makeHarness();
-    const log = Array.from({ length: 160 }, (_, i) => ({
-      kind: 'user' as const,
-      text: `message ${i}`,
-      author: 'user',
-      ts: T0 + i * 600_000, // spaced out — no grouping
-    }));
-    view.replayLog(session, log);
-    const loader = session.thread.querySelector('.load-earlier button');
-    expect(loader?.textContent).toBe('Show 10 earlier messages');
-    expect(session.thread.textContent).not.toContain('message 0');
-    (loader as HTMLButtonElement).click();
-    expect(session.thread.textContent).toContain('message 0');
-    expect(session.thread.querySelector('.load-earlier')).toBeNull();
-  });
-});
-
 describe('environment additions', () => {
   it('renders notice rows authored by Puck, toned by kind, with W-n links', () => {
     const { view, session } = makeHarness();
@@ -271,7 +258,7 @@ describe('environment additions', () => {
     expect(openRef).toHaveBeenCalledWith('W-7');
   });
 
-  it('shows other authors as agent rows and works without a persist hook', () => {
+  it('shows other authors as agent rows', () => {
     const { view, session } = makeHarness();
     view.addUserMessage(session, 'Please also run lint', 'lead', T0, 'agent');
     const row = session.thread.querySelector('.msg-row') as HTMLElement;

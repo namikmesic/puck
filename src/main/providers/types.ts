@@ -4,9 +4,8 @@
  *
  *  - harness (Claude Code, Codex): the pure descriptor from
  *    src/harness/providers/ plus the host half - sign-in and the CLI
- *    credential file mirrored into containers. Execution lives
- *    container-side in runner/runner.js as the PROVIDERS table, the
- *    hand-synced mirror of the descriptors.
+ *    credential file kept in sync with environments. Execution lives in
+ *    the environment daemon's adapters (src/daemon/harness/).
  *  - environment (`runner`): the user's runners, listed by the Puck server,
  *    with This Mac among them. The app never runs docker for them; it
  *    opens channels to a runner, which runs Docker on its machine.
@@ -25,7 +24,7 @@ export type { HarnessDescriptor, PinnedPackage } from '../../harness/providers';
 
 export interface ProviderBase {
   readonly kind: ProviderKind;
-  /** Persisted (agent records, stores, runner dispatch) - NEVER change. */
+  /** Persisted (stores, definitions, daemon dispatch) - NEVER change. */
   readonly id: string;
   readonly label: string;
   /** Current state without I/O: sign-in state, or what is configured. */
@@ -45,25 +44,20 @@ export interface ProviderAuth {
   cancel(): void;
   /**
    * Sign out - a fence: abort a pending login, drop Puck's stored tokens so
-   * that an exchange or refresh still in flight is discarded and container
+   * that an exchange or refresh still in flight is discarded and environment
    * copies are never adopted back, then run the logout hook (the host removes
-   * the credentials it mirrored into containers). Rejects when the hook
-   * fails; the local sign-out has already held by then.
+   * the credential from environments). Rejects when the hook fails; the
+   * local sign-out has already held by then.
    */
   logout(): Promise<void>;
-  /** Invoked whenever a login lands (host pushes creds into running envs). */
+  /** Invoked whenever a login lands (the host pushes the credential to the attached environment). */
   setOnLogin(cb: () => void): void;
-  /** Invoked after the local fence on logout (host removes container mirrors). */
+  /** Invoked after the local fence on logout (the host removes environment copies). */
   setOnLogout(cb: () => Promise<void> | void): void;
 }
 
-/** A CLI credential file Puck mirrors between host and containers. */
+/** A CLI credential file Puck keeps in sync with environments (`credentials.*` daemon ops). */
 export interface ProviderCredential {
-  /**
-   * Full in-container path today's root runner reads (and Puck `cat`s on
-   * stop). The descriptor's `credentialPath` is the unprivileged-user layout.
-   */
-  containerPath: string;
   /** True while Puck holds tokens for this provider (no refresh, no network). */
   signedIn(): boolean;
   /**

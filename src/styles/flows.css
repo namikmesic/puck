@@ -1,7 +1,7 @@
 /* Flows of the environment window: the start flow, first run, and the
    update dialog. */
 
-.v2-overlay {
+.modal-overlay {
   position: fixed;
   inset: 0;
   z-index: 80;

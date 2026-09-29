@@ -2,8 +2,7 @@
  * Provider registry: every provider of every kind, in one list. Everything
  * outside this directory addresses providers through here - adding one
  * means adding its module and one entry below (a harness provider also
- * needs its runner-side PROVIDERS entry in runner/runner.js and an adapter
- * in src/daemon/harness). The checklist is in AGENTS.md.
+ * needs an adapter in src/daemon/harness). The checklist is in AGENTS.md.
  */
 
 import type { ProviderInfo } from '../../harness/bridge';
@@ -45,7 +44,7 @@ export function requireProvider(id: string): Provider {
   return provider;
 }
 
-/** A harness provider by id (agent records and turns only ever name harnesses). */
+/** A harness provider by id. */
 export function harnessById(id: string): HarnessProvider | undefined {
   const provider = providerById(id);
   return provider?.kind === 'harness' ? provider : undefined;

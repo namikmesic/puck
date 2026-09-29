@@ -1,12 +1,11 @@
 /**
  * Boot smoke test: launches the real app isolated (`npm run start:isolated`:
  * a throwaway data dir, the mock keychain, no focus steal) with a debug port,
- * attaches over CDP, and asserts the chat shell renders with a working
- * preload bridge and zero page errors. It never reads or writes the real user
- * data folder or keychain. Needs a desktop session (run locally: npm run test:e2e).
- *
- * A second boot with PUCK_UI=v2 checks the environment window: the first-run
- * screen shows, and Settings has exactly Providers, Runners and Support.
+ * attaches over CDP, and asserts the environment window renders with a
+ * working preload bridge and zero page errors: the first-run screen shows,
+ * Settings has exactly Providers, Runners and Support, and Esc closes it. It
+ * never reads or writes the real user data folder or keychain. Needs a
+ * desktop session (run locally: npm run test:e2e).
  */
 
 import { spawn, execSync } from 'node:child_process';
@@ -27,10 +26,7 @@ function freePort() {
   });
 }
 
-/**
- * Boots one window. `windowPath` is the dev URL segment (`/main_window/` or
- * `/main_window_v2/`); the slash keeps the v1 page from matching v2.
- */
+/** Boots the app and checks its window (`windowPath` is the dev URL segment). */
 async function boot(extraEnv, { windowPath, label }) {
   const PORT = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-smoke-'));
@@ -84,13 +80,11 @@ async function boot(extraEnv, { windowPath, label }) {
 
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    await sleep(2500); // boot + conversation hydration
+    await sleep(2500); // boot
 
-    if (label === 'v2') {
-      await page.waitForSelector('#fr:not(.hidden) .fr-step', { timeout: 10_000 }).catch(() => {
-        throw new Error('v2: the first-run screen did not show');
-      });
-    }
+    await page.waitForSelector('#fr:not(.hidden) .fr-step', { timeout: 10_000 }).catch(() => {
+      throw new Error(`${label}: the first-run screen did not show`);
+    });
     const state = await page.evaluate(async () => ({
       bridge: !!window.puck,
       firstRun: document.querySelectorAll('#fr:not(.hidden) .fr-step').length,
@@ -98,13 +92,13 @@ async function boot(extraEnv, { windowPath, label }) {
         .supportInfo()
         .then((s) => s.dataDir)
         .catch(() => null),
-      composer: !!document.getElementById('prompt'),
-      v2: !!document.getElementById('v2-app'),
-      roster: document.querySelectorAll('.recent.agent-row').length,
-      status: await window.puck
-        .status()
-        .then((s) => typeof s.connected === 'boolean')
-        .catch(() => false),
+      shell: !!document.getElementById('app-shell'),
+      // The per-agent chat's bridge is gone: turns run in environments.
+      legacy: ['status', 'agentList', 'envList', 'convoSave', 'startTurn'].filter((m) => m in window.puck),
+      providers: await window.puck
+        .providers()
+        .then((list) => list.length)
+        .catch(() => 0),
     }));
     await page.click('#open-settings');
     await page.waitForSelector('#settings-overlay:not(.hidden)', { timeout: 2000 }).catch(() => {
@@ -120,15 +114,12 @@ async function boot(extraEnv, { windowPath, label }) {
       runners: document.querySelectorAll('#pv-env-cards [data-provider="runner"]').length,
       sections: [...document.querySelectorAll('#settings-nav .nav-item')].map((n) => n.dataset.section),
     }));
-    if (label === 'v1' && (groups.harness !== 2 || groups.runners !== 1)) throw new Error(`v1: providers grouped wrong: ${JSON.stringify(groups)}`);
-    if (label === 'v2') {
-      if (groups.harness !== 2 || groups.runners !== 0) throw new Error(`v2: providers grouped wrong: ${JSON.stringify(groups)}`);
-      if (groups.sections.join(',') !== 'providers,runners,support') throw new Error(`v2: settings sections are ${groups.sections.join(', ')}`);
-      await page.click('.nav-item[data-section="runners"]');
-      await page.waitForSelector('#rn-cards [data-provider="runner"]', { timeout: 5000 }).catch(() => {
-        throw new Error('v2: the Runners section did not render');
-      });
-    }
+    if (groups.harness !== 2 || groups.runners !== 0) throw new Error(`${label}: providers grouped wrong: ${JSON.stringify(groups)}`);
+    if (groups.sections.join(',') !== 'providers,runners,support') throw new Error(`${label}: settings sections are ${groups.sections.join(', ')}`);
+    await page.click('.nav-item[data-section="runners"]');
+    await page.waitForSelector('#rn-cards [data-provider="runner"]', { timeout: 5000 }).catch(() => {
+      throw new Error(`${label}: the Runners section did not render`);
+    });
     await page.keyboard.press('Escape');
     const closed = await page
       .waitForSelector('#settings-overlay.hidden', { state: 'attached', timeout: 2000 })
@@ -138,19 +129,16 @@ async function boot(extraEnv, { windowPath, label }) {
     await browser.close();
 
     if (!state.bridge) throw new Error(`${label}: preload bridge missing`);
-    if (!state.status) throw new Error(`${label}: harness:status round-trip failed`);
+    if (state.providers !== 4) throw new Error(`${label}: provider:list round-trip returned ${state.providers} providers`);
+    if (state.legacy.length) throw new Error(`${label}: the bridge still has ${state.legacy.join(', ')}`);
     if (state.dataDir !== dataDir) {
       throw new Error(`${label}: app data is not isolated: ${state.dataDir} (expected ${dataDir})`);
     }
     if (!fs.existsSync(path.join(dataDir, 'logs', 'puck.log'))) throw new Error(`${label}: no diagnostic log in the isolated data dir`);
     if (errors.length) throw new Error(`${label}: page errors: ${errors.join(' | ')}`);
-    if (label === 'v1' && !state.composer) throw new Error('composer missing');
-    if (label === 'v2' && !state.v2) throw new Error('v2 window missing');
-    if (label === 'v2' && state.composer) throw new Error('v2 booted the legacy composer');
-    if (label === 'v2' && state.firstRun !== 6) throw new Error(`v2: first run shows ${state.firstRun} steps`);
-    console.log(
-      `smoke ${label} OK — bridge + status up, settings modal and its sections render${label === 'v1' ? `, ${state.roster} agents listed` : ', first run shows'}`,
-    );
+    if (!state.shell) throw new Error(`${label}: the environment window is missing`);
+    if (state.firstRun !== 6) throw new Error(`${label}: first run shows ${state.firstRun} steps`);
+    console.log(`smoke ${label} OK — bridge up, first run shows, settings modal and its sections render`);
   } finally {
     kill();
     for (let i = 0; i < 20 && running(); i++) await sleep(500);
@@ -158,5 +146,4 @@ async function boot(extraEnv, { windowPath, label }) {
   }
 }
 
-await boot({}, { windowPath: '/main_window/', label: 'v1' });
-await boot({ PUCK_UI: 'v2' }, { windowPath: '/main_window_v2/', label: 'v2' });
+await boot({}, { windowPath: '/main_window/', label: 'app' });
