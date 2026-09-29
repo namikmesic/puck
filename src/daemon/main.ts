@@ -1,7 +1,8 @@
 /**
  * puckd: the Puck environment daemon, bundled to one file and invoked as
- * `node puckd.js <command>`. Environment start does not launch it yet;
- * today's containers still run the container runner.
+ * `node puckd.js <command>`. Runner-hosted environments run `serve` as the
+ * container's main process; the legacy environment start still deploys the
+ * container runner (`src/main/daemon-source.ts`).
  *
  *   serve    (default) run the daemon: the container's main process, as root
  *   attach   pipe stdio to the running daemon's socket (the app's channel)

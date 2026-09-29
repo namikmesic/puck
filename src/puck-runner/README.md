@@ -16,7 +16,7 @@ Use a dedicated user for the runner where you can (`sudo ./svc.sh install puck-r
 
 ## Install
 
-In Puck, open Settings → Runners → Add runner, pick the platform, and copy the commands it shows.
+In Puck, open Settings → Providers → Runners → Add runner, pick the platform, and copy the commands it shows.
 They look like this:
 
 ```bash
@@ -51,7 +51,7 @@ Configure with `--disableupdate` to update by hand instead; a server that requir
 
 ## Remove
 
-In Puck, Settings → Runners → Remove shows the command:
+In Puck, Settings → Providers → Runners → Remove shows the command:
 
 ```bash
 ./config.sh remove --token PRR_…

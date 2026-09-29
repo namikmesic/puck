@@ -1,9 +1,8 @@
 /**
- * GitHub App user tokens through the OAuth device flow - the one GitHub
- * flow that needs only the client id, both to obtain and to refresh a
- * token (the web flow's code exchange requires the client secret, which a
- * desktop app cannot keep). Fetch only, so the app and the code running
- * inside environments share it.
+ * GitHub App user tokens: the shared token shape (`tokensFrom`), refresh,
+ * and the OAuth device flow (client id only). The Puck server exchanges
+ * the web-flow code and holds the client secret (`src/server/github.ts`).
+ * Fetch only, so callers share this module.
  *
  * Refresh rotates the pair: the old refresh token stops working the moment
  * a refresh succeeds, so callers must refresh single-flight and persist

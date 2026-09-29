@@ -27,8 +27,9 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The wire contract (opcodes and protocol revision) is declared twice: `WIRE` in `src/main/runner.ts` and `OP`/`RV` at the top of runner.js.
   The same test asserts they match.
   Bump the revision whenever the turn-request wire format grows.
-- **The environment daemon** (`puckd`, `src/daemon/main.ts`) is built beside the container runner and is not what environment start launches.
+- **The environment daemon** (`puckd`, `src/daemon/main.ts`) is built beside the container runner.
   `npm run build:daemon` writes `.webpack/daemon/puckd.js`.
+  Which start deploys it is `src/main/daemon-source.ts`: runner environments get that bundle; the legacy environment start still deploys the container runner.
   Its client protocol is `src/harness/daemon-protocol.ts`.
   It may import only `src/harness` and itself.
 - **IPC channels** live in one table: `src/harness/channels.ts` (`CHANNELS`).
@@ -76,7 +77,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The Settings copy in `index.html` states this behavior.
 - **Persisted stores** live in Electron `userData`.
   Migrate, don't break: new fields get `??` defaults at load, and legacy keys are dual-read, never rewritten in place.
-  Layout: `puck-agents.json`, `puck-environments.json`, `puck-providers.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
+  Layout: `puck-agents.json`, `puck-environments.json`, `puck-providers.json`, `puck-runners.json`, `puck-instances.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
   Resume ids are keyed `agentId@envId`, scoped to the environment because a rebuilt container loses its transcripts.
   A legacy single-blob `puck-convos.json` is still read.
   Conversation files carry a format version `v`.
@@ -144,7 +145,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
   `definitions/` holds agent and environment definitions: YAML parse, validation, resolution, JSON Schema, and update-class diff.
   `provisioning.ts` is the container package plan, `daemon-protocol.ts` the puckd protocol, and `transcript.ts` transcript format v2.
-- `src/daemon/` - puckd. Not launched by environment start. Entry `main.ts`.
+- `src/daemon/` - puckd. Entry `main.ts`. Which start launches it: `src/main/daemon-source.ts`.
 - `src/puck-runner/` - the host runner. Contract: `src/puck-runner/README.md`.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.

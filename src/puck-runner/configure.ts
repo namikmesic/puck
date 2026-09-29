@@ -130,7 +130,7 @@ export async function configure(opts: ConfigureOptions, deps: ConfigureDeps): Pr
     throw new ConfigureError('--url must be the Puck server URL, like https://puck.example.com');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new ConfigureError('--url must be an http(s) URL.');
-  if (!/^PRT_[A-Za-z0-9]{16,}$/.test(opts.token)) throw new ConfigureError('--token must be a registration token (PRT_…) from Settings → Runners → Add runner.');
+  if (!/^PRT_[A-Za-z0-9]{16,}$/.test(opts.token)) throw new ConfigureError('--token must be a registration token (PRT_…) from Settings → Providers → Runners → Add runner.');
   if (opts.localSocket !== undefined) {
     const problem = checkSocketPath(opts.localSocket);
     if (problem) throw new ConfigureError(problem);
@@ -222,7 +222,7 @@ export async function remove(opts: RemoveOptions, deps: RemoveDeps): Promise<voi
   if (!isConfigured(paths)) throw new ConfigureError('This runner is not configured; there is nothing to remove.');
   const config = readConfig(paths);
   if (opts.token !== undefined && !/^PRR_[A-Za-z0-9]{16,}$/.test(opts.token)) {
-    throw new ConfigureError('--token must be a removal token (PRR_…) from Settings → Runners → Remove.');
+    throw new ConfigureError('--token must be a removal token (PRR_…) from Settings → Providers → Runners → Remove.');
   }
   const ops = new DockerOps(deps.docker);
 
