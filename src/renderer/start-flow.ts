@@ -2,11 +2,13 @@
  * The start flow (a modal): start an environment from a definition in the
  * config repo on one of the user's runners.
  *
- * 1. Definition: a ref picker (tags newest first with the highest semver
- *    tag preselected, branches, or a pasted commit SHA) and the environment
- *    definitions at that ref, each with its description, agents and
- *    validation state. Invalid ones list their errors with file:line and
- *    "Open in GitHub", and cannot be picked.
+ * 1. Definition: the config repo version (tags newest first with the
+ *    highest semver tag preselected, branches, or a pasted commit SHA) and
+ *    the environment definitions at that version, each with its
+ *    description, agents and validation state. Invalid ones list their
+ *    errors with file:line and "Open in GitHub", and cannot be picked. A
+ *    version without definitions says where they must live and offers the
+ *    example config repo and the config repo setting.
  * 2. Where: the runners, This Mac first, with status, Docker version,
  *    capacity and labels; labels filter the list. Offline runners, full
  *    ones, and ones too small for the definition cannot be picked.
@@ -18,8 +20,8 @@
  *    the elapsed time. The window switches to the new environment at once;
  *    the dialog closes itself when it is ready.
  *
- * Each step opens once the one before it is complete. Context in,
- * controller out; no DOM lookups.
+ * Each step opens once the one before it is complete; a closed step says
+ * what it waits for. Context in, controller out; no DOM lookups.
  */
 
 import type {
@@ -36,6 +38,7 @@ import type {
 import type { EnvironmentSummary, ListedError } from '../harness/definitions/types';
 import { placement } from '../harness/placement';
 import { el } from './dom';
+import { EXAMPLE_CONFIG_URL } from './first-run';
 import type { InstanceStore } from './instance-store';
 import { progressLine, statusWord, toneOf } from './instance-progress';
 import { platformText, runnerMeta } from './settings/runners';
@@ -52,6 +55,8 @@ export interface StartFlowContext {
   close(): void;
   /** Settings → Runners (no runner to pick yet). */
   openRunners(): void;
+  /** Settings → Providers (choose a different config repo). */
+  openProviders(): void;
   /** Poll cadence while a harness sign-in is pending (tests shorten it). */
   pollMs?: number;
   now?(): number;
@@ -197,19 +202,53 @@ export function initStartFlow(ctx: StartFlowContext) {
     }, ctx.pollMs ?? 2000);
   }
 
-  function section(n: number, title: string, enabled: boolean): HTMLElement {
+  function section(n: number, title: string, enabled: boolean, waiting = ''): HTMLElement {
     const box = el('section', `sf-step${enabled ? '' : ' disabled'}`);
     box.dataset.step = String(n);
     box.appendChild(el('h3', 'sf-step-title', `${n}. ${title}`));
+    if (!enabled && waiting) box.appendChild(el('p', 'sf-note sf-step-why', waiting));
     return box;
+  }
+
+  /** The version the listing was read at, as the user picked it. */
+  function versionText(l: DefinitionListing): string {
+    return l.pin.kind === 'commit' ? l.pin.name.slice(0, 7) : l.pin.name;
+  }
+
+  /** No environment definitions at this version: where they go, and two ways on. */
+  function renderEmpty(box: HTMLElement, l: DefinitionListing): void {
+    const empty = el('div', 'sf-empty');
+    const head = el('p', 'sf-empty-head');
+    head.append('No environment definitions in ', el('code', '', l.repo), ' at ', el('code', '', versionText(l)), '.');
+    const where = el('p', 'sf-note');
+    where.append(
+      'An environment definition names the image, repositories and agents of an environment; an agent definition names a harness, model and instructions. Puck reads them from ',
+      el('code', '', 'environments/<name>.yaml'),
+      ' and ',
+      el('code', '', 'agents/<name>.yaml'),
+      ' at the root of the config repo.',
+    );
+    const actions = el('div', 'sf-empty-actions');
+    const example = button('btn-ghost sf-example', 'Open the example config repo');
+    example.addEventListener('click', () => void bridge.openExternal(EXAMPLE_CONFIG_URL));
+    const repo = button('btn-ghost sf-change-repo', 'Choose a different config repo');
+    repo.addEventListener('click', () => ctx.openProviders());
+    actions.append(example, repo);
+    empty.append(head, where, actions);
+    box.appendChild(empty);
   }
 
   function renderDefinition(host: HTMLElement): void {
     const box = section(1, 'Definition', true);
     if (refsError) box.appendChild(el('p', 'sf-error', refsError));
+    const field = el('div', 'sf-field');
+    const label = el('label', 'sf-label-text', 'Version');
+    label.htmlFor = 'sf-ref';
+    field.append(label, el('span', 'sf-hint', 'A branch, tag, or commit of the config repo.'));
+    box.appendChild(field);
     const row = el('div', 'sf-row');
     const select = el('select', 'sf-ref');
-    select.setAttribute('aria-label', 'Config ref');
+    select.id = 'sf-ref';
     const add = (value: string, label: string, group: HTMLElement): void => {
       const o = el('option', '', label);
       o.value = value;
@@ -252,8 +291,17 @@ export function initStartFlow(ctx: StartFlowContext) {
     if (loading) box.appendChild(el('p', 'sf-note', 'Reading definitions…'));
     if (listingError) box.appendChild(el('p', 'sf-error', listingError));
     if (listing) {
-      if (!listing.environments.length) box.appendChild(el('p', 'sf-note', `No environment definitions in ${listing.repo} at this ref.`));
+      if (!listing.environments.length) {
+        renderEmpty(box, listing);
+        host.appendChild(box);
+        return;
+      }
+      const defsLabel = el('div', 'sf-field sf-field-defs');
+      defsLabel.appendChild(el('span', 'sf-label-text', 'Environment definition'));
+      box.appendChild(defsLabel);
       const list = el('div', 'sf-defs');
+      list.setAttribute('role', 'radiogroup');
+      list.setAttribute('aria-label', 'Environment definition');
       for (const e of listing.environments) {
         const card = el('label', `sf-def${e.startable ? '' : ' invalid'}${e.name === definition ? ' selected' : ''}`);
         card.dataset.definition = e.name;
@@ -299,9 +347,19 @@ export function initStartFlow(ctx: StartFlowContext) {
     host.appendChild(box);
   }
 
+  /** Why the steps after Definition are still closed. */
+  function waitingForDefinition(): string {
+    if (refsError || listingError) return 'Opens once the config repo can be read.';
+    if (refs && !selectedPin()) return 'Opens once you pick a version.';
+    if (!listing) return 'Opens once the definitions are read.';
+    if (!listing.environments.length) return 'Opens once the config repo has an environment definition.';
+    if (!listing.environments.some((x) => x.startable)) return 'Opens once a definition is valid.';
+    return 'Opens once you pick an environment definition.';
+  }
+
   function renderWhere(host: HTMLElement): void {
     const e = env();
-    const box = section(2, 'Where', !!e);
+    const box = section(2, 'Where', !!e, waitingForDefinition());
     host.appendChild(box);
     if (!e) return;
     const rows = runnerRows();
@@ -362,7 +420,7 @@ export function initStartFlow(ctx: StartFlowContext) {
   function renderAccess(host: HTMLElement): void {
     const e = env();
     const ready = !!e && !!runnerId;
-    const box = section(3, 'Access', ready);
+    const box = section(3, 'Access', ready, e ? 'Opens once you pick a runner.' : waitingForDefinition());
     host.appendChild(box);
     if (!e || !ready) return;
     const list = el('div', 'sf-harnesses');

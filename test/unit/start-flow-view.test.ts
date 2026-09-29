@@ -9,6 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { DefinitionListing, HarnessProviderInfo, RunnersState } from '../../src/harness/bridge';
+import { EXAMPLE_CONFIG_URL } from '../../src/renderer/first-run';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { errorsFor, harnessesFor, initStartFlow, orderRunners } from '../../src/renderer/start-flow';
 import { LOCAL_ID, RID, runnerRow, runnersState } from './runners-fixtures';
@@ -69,11 +70,12 @@ function setup(runners: RunnersState = runnersState({ runners: [runnerRow(), run
   const opened = vi.fn();
   const close = vi.fn();
   const openRunners = vi.fn();
+  const openProviders = vi.fn();
   const body = document.getElementById('body') as HTMLElement;
-  const flow = initStartFlow({ body, bridge: fake.bridge, store, runners: () => runners, opened, close, openRunners, pollMs: 1, now: () => 30_000 });
+  const flow = initStartFlow({ body, bridge: fake.bridge, store, runners: () => runners, opened, close, openRunners, openProviders, pollMs: 1, now: () => 30_000 });
   const q = <T extends HTMLElement>(sel: string) => body.querySelector(sel) as T;
   const startBtn = () => q<HTMLButtonElement>('.sf-start');
-  return { ...fake, store, flow, opened, close, openRunners, body, q, startBtn };
+  return { ...fake, store, flow, opened, close, openRunners, openProviders, body, q, startBtn };
 }
 
 describe('start flow', () => {
@@ -93,6 +95,52 @@ describe('start flow', () => {
     expect(q('[data-definition="example"]').classList.contains('selected')).toBe(true);
     expect(body.querySelector('[data-step="2"]')?.classList.contains('disabled')).toBe(false);
     expect(body.querySelector('[data-step="3"]')?.classList.contains('disabled')).toBe(true);
+    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('Opens once you pick a runner.');
+  });
+
+  it('labels the ref control as the version, apart from the definition choice', async () => {
+    const { flow, q, body } = setup();
+    await flow.open();
+    await flush();
+    const labels = [...body.querySelectorAll('[data-step="1"] .sf-label-text')].map((l) => l.textContent);
+    expect(labels).toEqual(['Version', 'Environment definition']);
+    const version = q<HTMLLabelElement>('label.sf-label-text');
+    expect(version.control).toBe(q('.sf-ref'));
+    expect(q('[data-step="1"] .sf-hint').textContent).toBe('A branch, tag, or commit of the config repo.');
+    expect(q('.sf-defs').getAttribute('aria-label')).toBe('Environment definition');
+  });
+
+  it('turns a version without definitions into a way forward', async () => {
+    const { flow, q, body, bridge, openProviders, startBtn } = setup();
+    (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockResolvedValue({ ...listing(), repo: 'namikmesic/puck', pin: { kind: 'branch', name: 'main', sha: PIN.sha }, environments: [], agents: [], errors: [] });
+    await flow.open();
+    await flush();
+    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in namikmesic/puck at main.');
+    expect(q('.sf-empty').textContent).toContain('environments/<name>.yaml and agents/<name>.yaml at the root of the config repo');
+    expect(body.querySelector('.sf-defs')).toBeNull();
+    (q('.sf-example') as HTMLButtonElement).click();
+    expect(bridge.openExternal).toHaveBeenCalledWith(EXAMPLE_CONFIG_URL);
+    (q('.sf-change-repo') as HTMLButtonElement).click();
+    expect(openProviders).toHaveBeenCalled();
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the config repo has an environment definition.');
+    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('Opens once the config repo has an environment definition.');
+    expect(startBtn().disabled).toBe(true);
+  });
+
+  it('says why the later steps wait while no definition is picked', async () => {
+    const { flow, q, bridge } = setup();
+    const two = listing();
+    const [example] = two.environments;
+    if (example) two.environments = [example, { ...example, name: 'second', path: 'environments/second.yaml' }];
+    (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockResolvedValue(two);
+    await flow.open();
+    await flush();
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once you pick an environment definition.');
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once you pick a version.');
   });
 
   it('lists This Mac first, filters by label, and blocks runners that cannot take it', async () => {
@@ -148,6 +196,7 @@ describe('start flow', () => {
     await flow.open();
     await flush();
     expect(q('.sf-error').textContent).toBe('Choose a config repo in Settings → Providers → GitHub first.');
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the config repo can be read.');
     expect(startBtn().disabled).toBe(true);
   });
 
