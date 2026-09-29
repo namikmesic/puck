@@ -289,6 +289,7 @@ function boot(bridge: PuckBridge): void {
     },
     close: () => go({ view: 'close-modal' }),
     openRunners: () => go({ view: 'settings', section: 'runners' }),
+    openProviders: () => go({ view: 'settings', section: 'providers' }),
   });
   byId('sf-close').addEventListener('click', () => go({ view: 'close-modal' }));
 
@@ -435,7 +436,8 @@ function boot(bridge: PuckBridge): void {
     if (modal === 'start' && !startFlow.isOpen()) {
       sf.classList.remove('hidden');
       void startFlow.open();
-      byId('sf-title').focus();
+      // The dialog itself takes focus: it announces its title without a ring on it.
+      byId('sf-dialog').focus();
     } else if (modal !== 'start' && startFlow.isOpen()) {
       startFlow.close();
       sf.classList.add('hidden');

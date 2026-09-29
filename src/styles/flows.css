@@ -27,6 +27,11 @@
   overflow: hidden;
 }
 
+/* The dialog takes focus when it opens; its controls show their own rings. */
+.sf-modal:focus {
+  outline: none;
+}
+
 .sf-head {
   flex: none;
   display: flex;
@@ -51,7 +56,8 @@
   border-top: none;
 }
 
-.sf-step.disabled {
+/* A closed step dims its title; the line saying why stays readable. */
+.sf-step.disabled .sf-step-title {
   opacity: 0.5;
 }
 
@@ -59,6 +65,57 @@
   margin: 0 0 10px;
   font-size: 13px;
   font-weight: 700;
+}
+
+.sf-step-why {
+  margin: 0;
+}
+
+.sf-field {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+
+.sf-field-defs {
+  margin-top: 14px;
+}
+
+.sf-label-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--charcoal);
+}
+
+.sf-hint {
+  font-size: 12px;
+  color: var(--gray);
+}
+
+.sf-empty {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+}
+
+.sf-empty-head {
+  margin: 0;
+  font-size: 13px;
+  color: var(--charcoal);
+}
+
+.sf-empty code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.sf-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .sf-row {
