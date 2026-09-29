@@ -349,7 +349,8 @@ export function initStartFlow(ctx: StartFlowContext) {
 
   /** Why the steps after Definition are still closed. */
   function waitingForDefinition(): string {
-    if (refsError || listingError) return 'Opens once the config repo can be read.';
+    if (refsError) return 'Opens once the config repo can be read.';
+    if (listingError) return 'The chosen version could not be read.';
     if (refs && !selectedPin()) return 'Opens once you pick a version.';
     if (!listing) return 'Opens once the definitions are read.';
     if (!listing.environments.length) return 'Opens once the config repo has an environment definition.';

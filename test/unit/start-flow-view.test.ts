@@ -188,6 +188,26 @@ describe('start flow', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('says the chosen version could not be read when that version fails', async () => {
+    const { flow, q, bridge } = setup();
+    await flow.open();
+    await flush();
+    (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Error invoking remote method \'defs:at\': Error: No commit "deadbee" in octo/config.'),
+    );
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    const sha = q<HTMLInputElement>('.sf-sha');
+    sha.value = 'deadbee';
+    sha.dispatchEvent(new Event('change'));
+    await flush();
+    expect(q('[data-step="1"] .sf-error').textContent).toBe('No commit "deadbee" in octo/config.');
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('The chosen version could not be read.');
+    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('The chosen version could not be read.');
+  });
+
   it('shows only the config-repo sentence when opening with no repo, and Start stays disabled', async () => {
     const { flow, q, startBtn, bridge } = setup();
     (bridge.definitionRefs as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
