@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import type { ProviderCapabilities } from '../../src/harness/bridge';
-import { initChatView, noticeTone, refRuns, type ChatView, type ChatViewContext, type Session } from '../../src/renderer/chat-view';
+import { initChatView, noticeTone, refreshDayLabels, refRuns, type ChatView, type ChatViewContext, type Session } from '../../src/renderer/chat-view';
 
 const nextFrame = (): Promise<void> =>
   new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -118,6 +118,19 @@ describe('message grouping (Slack rules)', () => {
     view.addUserMessage(session, 'early', 'You', beforeMidnight + 120_000);
     expect(session.thread.querySelectorAll('.msg-row')).toHaveLength(2);
     expect(session.thread.querySelectorAll('.day-divider')).toHaveLength(2);
+  });
+
+  it('relabels day dividers when the day turns', () => {
+    const { view, session } = makeHarness();
+    const evening = new Date('2026-08-18T23:59:00').getTime();
+    view.addUserMessage(session, 'late', 'You', evening);
+    const chip = (): string | null | undefined => session.thread.querySelector('.day-chip')?.textContent;
+    refreshDayLabels(session.thread, evening);
+    expect(chip()).toBe('Today');
+    refreshDayLabels(session.thread, new Date('2026-08-19T00:00:30').getTime());
+    expect(chip()).toBe('Yesterday');
+    refreshDayLabels(session.thread, new Date('2026-08-20T09:00:00').getTime());
+    expect(chip()).not.toMatch(/Today|Yesterday/);
   });
 
   it('different authors never group', () => {

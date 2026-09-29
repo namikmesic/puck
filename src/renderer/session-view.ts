@@ -30,7 +30,7 @@ import type { DaemonEvent, OpResult, SessionSummary } from '../harness/daemon-pr
 import type { EntryAuthor, TranscriptEntry } from '../harness/transcript';
 import type { HarnessEvent } from '../harness/types';
 import { setAskAnswered } from './ask-card';
-import { applyEvent, initChatView, type AssistantTurn, type Session } from './chat-view';
+import { applyEvent, initChatView, refreshDayLabels, type AssistantTurn, type Session } from './chat-view';
 import { el } from './dom';
 import type { InstanceStore } from './instance-store';
 import { button, errText } from './util';
@@ -469,6 +469,11 @@ export function initSessionView(ctx: SessionViewContext) {
       return was;
     },
     closeFullTurn: (): void => chat.closeFullTurn(),
+    /** Relabel every thread's day dividers, mounted or not (the day turned, or the window came back). */
+    refreshDays(now = Date.now()): void {
+      for (const node of nodes.values()) refreshDayLabels(node.session.thread, now);
+      for (const { session } of children.values()) refreshDayLabels(session.thread, now);
+    },
     draft(sessionId: string): string {
       const key = draftKey(sessionId);
       if (!key) return '';

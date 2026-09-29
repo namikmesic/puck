@@ -1320,3 +1320,9 @@
 .wd-facts {
   margin-top: var(--space-5);
 }
+
+/* Item facts are prose (dates, reasons, errors): the UI font, not the
+   support section's monospace. */
+.wd-facts dd {
+  font-family: var(--font-ui);
+}

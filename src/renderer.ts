@@ -25,6 +25,7 @@ import { initBoard } from './renderer/board';
 import { liveWork } from './renderer/board-model';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
 import { initComposer } from './renderer/composer';
+import { watchDayRollover } from './renderer/day-clock';
 import { conceal, el, showToast } from './renderer/dom';
 import { initFirstRun } from './renderer/first-run';
 import { fmtTokens, fmtUsd } from './renderer/format';
@@ -145,6 +146,7 @@ function boot(bridge: PuckBridge): void {
   byId('turn-full-back').addEventListener('click', () => sessions.closeFullTurn());
   byId('oc-child-back').addEventListener('click', () => sessions.closeChild(ocChat));
   byId('wd-child-back').addEventListener('click', () => sessions.closeChild(wdThread));
+  watchDayRollover(window, () => sessions.refreshDays());
 
   const ocComposer = initComposer({
     els: { form: byId('oc-composer'), input: byId('oc-prompt'), send: byId('oc-send'), stop: byId('oc-stop'), hint: byId('oc-hint') },

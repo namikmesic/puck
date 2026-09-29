@@ -171,7 +171,7 @@
   text-transform: uppercase;
   color: var(--emerald);
   background: var(--emerald-tint);
-  border: 1px solid rgba(46, 94, 78, 0.18);
+  border: 1px solid var(--emerald-edge);
   border-radius: 999px;
   padding: 1px 7px;
 }
