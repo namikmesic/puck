@@ -16,7 +16,7 @@ Environments run in Docker on your runners: this Mac, or any machine you registe
 - **Backlog, workers, branches, pull requests.**
   Every work item runs in its own git worktree and `puck/W-<n>-…` branch inside the environment.
   Its result is commits, a diff stat, and a summary; publishing pushes the branch and opens or updates a draft pull request.
-  Issues carrying the environment's intake label become items, pull requests close their issues, and CI results and review feedback reach the orchestrator.
+  When an environment opts in, issues carrying its intake label become items; pull requests close their issues, and CI results and review feedback reach the orchestrator.
 - **Work continues with the app closed.**
   Inside each environment's container a daemon, `puckd`, owns everything: provisioning, sessions, the backlog, the scheduler, transcripts, and publishing.
   The app is a client that attaches to it and replays what it missed.
