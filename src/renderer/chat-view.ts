@@ -10,6 +10,7 @@
  */
 
 import type { ConversationEntry, ProviderCapabilities } from '../harness/bridge';
+import type { Notice, NoticeKind } from '../harness/transcript';
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
 import { askCard, askReplayCard, setAskAnswered } from './ask-card';
 import { el } from './dom';
@@ -46,7 +47,9 @@ export interface ChatViewContext {
   /** Deliver (or dismiss, with null) a mid-turn answer to the agent. */
   answerAsk(turnId: string, askId: string, answers: Record<string, string> | null): Promise<void>;
   toast(message: string): void;
-  schedulePersist(session: Session): void;
+  /** Persist a session after an in-place change (answered questions). Absent
+   *  when something else keeps the transcript (an environment's daemon). */
+  schedulePersist?(session: Session): void;
   /** Roster-visible state changed (running/unread/title/membership). */
   rosterChanged(): void;
   /** Is this session the one on screen? (unread markers skip the current). */
@@ -58,6 +61,8 @@ export interface ChatViewContext {
   capabilities(session: Session): ProviderCapabilities | undefined;
   /** Drop `session`'s child chats (full-log rebuild re-creates them). */
   pruneChildren(session: Session): void;
+  /** A `W-n` reference in a notice row was clicked. */
+  openRef?(ref: string): void;
   /** Full-screen turn overlay chrome. */
   overlay: {
     body: HTMLElement;
@@ -66,6 +71,44 @@ export interface ChatViewContext {
     stage: HTMLElement;
     backButton: HTMLElement;
   };
+}
+
+/** How a notice row's dot is toned, by what the notice reports. */
+export type NoticeTone = 'ok' | 'bad' | 'ask' | 'busy' | 'info';
+
+export function noticeTone(kind: NoticeKind): NoticeTone {
+  switch (kind) {
+    case 'item.review':
+    case 'pr.published':
+    case 'pr.merged':
+    case 'definition.applied':
+      return 'ok';
+    case 'item.failed':
+    case 'github.auth':
+      return 'bad';
+    case 'item.needs-input':
+    case 'pr.review':
+      return 'ask';
+    case 'item.requeued':
+    case 'environment.restarted':
+      return 'busy';
+    default:
+      return 'info';
+  }
+}
+
+/** Split text into plain runs and `W-n` references (the refs become links). */
+export function refRuns(text: string): { text: string; ref: boolean }[] {
+  const runs: { text: string; ref: boolean }[] = [];
+  const re = /\bW-\d{1,9}\b/g;
+  let at = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > at) runs.push({ text: text.slice(at, m.index), ref: false });
+    runs.push({ text: m[0], ref: true });
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) runs.push({ text: text.slice(at), ref: false });
+  return runs;
 }
 
 /** Long histories replay only their tail; the rest loads on demand. */
@@ -215,6 +258,7 @@ export function initChatView(ctx: ChatViewContext) {
     text: string,
     author = ctx.userName,
     ts = Date.now(),
+    kind: 'user' | 'agent' = author === ctx.userName ? 'user' : 'agent',
   ): void {
     // Slack-style grouping: rapid consecutive messages share one header —
     // capped at 15 minutes from the group's start (the sliding 5-minute
@@ -234,7 +278,7 @@ export function initChatView(ctx: ChatViewContext) {
       last.querySelector('.row-main')?.appendChild(grouped);
     } else {
       maybeDayDivider(session.thread, ts);
-      const { item, body } = messageRow(author === ctx.userName ? 'user' : 'agent', author, ts);
+      const { item, body } = messageRow(kind, author, ts);
       body.classList.add('prose');
       body.innerHTML = renderMd(text);
       session.thread.appendChild(item);
@@ -406,10 +450,11 @@ export function initChatView(ctx: ChatViewContext) {
               const ev = entry.events.find((e) => e.kind === 'ask' && e.askId === askId);
               if (ev && ev.kind === 'ask') ev.answers = answers;
             }
-            ctx.schedulePersist(session);
+            ctx.schedulePersist?.(session);
             if (answers) this.setThinking(true);
           },
         });
+        card.dataset.askId = askId;
         content.appendChild(card);
         openAsks.push(card);
         scrollToBottom();
@@ -554,6 +599,41 @@ export function initChatView(ctx: ChatViewContext) {
     };
   }
 
+  /**
+   * A system row authored "Puck" (no avatar): one line per notice, each with
+   * a dot toned by kind; `W-n` references open the item.
+   */
+  function addNotice(session: Session, notices: Pick<Notice, 'kind' | 'text'>[], ts = Date.now()): void {
+    maybeDayDivider(session.thread, ts);
+    const item = el('li', 'msg-row notice');
+    item.dataset.author = 'Puck';
+    item.dataset.ts = String(ts);
+    const main = el('div', 'row-main');
+    const head = el('div', 'row-head');
+    head.append(el('span', 'row-author', 'Puck'), el('span', 'row-time', fmtTime(ts)));
+    main.appendChild(head);
+    for (const notice of notices) {
+      const line = el('div', 'notice-line');
+      line.dataset.kind = notice.kind;
+      line.appendChild(el('span', `notice-dot ${noticeTone(notice.kind)}`));
+      const text = el('span', 'notice-text');
+      for (const run of refRuns(notice.text)) {
+        if (!run.ref || !ctx.openRef) {
+          text.appendChild(document.createTextNode(run.text));
+          continue;
+        }
+        const link = button('notice-ref', run.text);
+        link.addEventListener('click', () => ctx.openRef?.(run.text));
+        text.appendChild(link);
+      }
+      line.appendChild(text);
+      main.appendChild(line);
+    }
+    item.appendChild(main);
+    session.thread.appendChild(item);
+    if (session.thread.isConnected) ctx.scrollChat();
+  }
+
   /** Render a stored history lazily: only when its conversation first opens. */
   function hydrate(session: Session): void {
     if (!session.pendingLog) return;
@@ -601,6 +681,7 @@ export function initChatView(ctx: ChatViewContext) {
 
   return {
     addUserMessage,
+    addNotice,
     addAssistantTurn,
     hydrate,
     replayLog,

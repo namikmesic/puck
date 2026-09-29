@@ -603,7 +603,9 @@ export class Daemon {
     'snapshot.get': () => this.snapshot(),
     'session.history': ({ sessionId, before, limit }) => {
       if (!this.turns?.get(sessionId)) throw new OpError('not-found', `No session ${sessionId}.`);
-      return this.transcripts.page(sessionId, before, limit ?? COMMAND_LIMITS.historyDefault);
+      // Held text-deltas get their seq first, so the page holds exactly the events up to head.
+      this.events.flush();
+      return { ...this.transcripts.page(sessionId, before, limit ?? COMMAND_LIMITS.historyDefault), head: this.events.head() };
     },
     'chat.send': ({ sessionId, text }) => {
       const target = sessionId ?? this.turns.orchestrator()?.id;

@@ -198,6 +198,8 @@ describe('puckd server (in process)', () => {
     const sessionId = (turnStart.ev as { sessionId: string }).sessionId;
     const history = await b.cmd('session.history', { sessionId });
     expect(history).toMatchObject({ ok: true, result: { total: 2, hasMore: false } });
+    // The page reports the last seq it reflects: the turn's end is in it.
+    expect((history as { result: { head: number } }).result.head).toBe(seqs[seqs.length - 1]);
     const entries = (history as { result: { entries: Array<{ kind: string }> } }).result.entries;
     expect(entries.map((e) => e.kind)).toEqual(['user', 'turn']);
     const file = JSON.parse(fs.readFileSync(path.join(root.paths.transcripts, `${sessionId}.json`), 'utf8'));

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import type { ConversationData, ProviderCapabilities } from '../../src/harness/bridge';
-import { initChatView, type ChatView, type ChatViewContext } from '../../src/renderer/chat-view';
+import { initChatView, noticeTone, refRuns, type ChatView, type ChatViewContext } from '../../src/renderer/chat-view';
 import { createSessionStore, type Session, type SessionStore } from '../../src/renderer/session-store';
 import fixture from '../fixtures/convo-v1.json';
 
@@ -220,5 +220,74 @@ describe('replay of persisted logs', () => {
     (loader as HTMLButtonElement).click();
     expect(session.thread.textContent).toContain('message 0');
     expect(session.thread.querySelector('.load-earlier')).toBeNull();
+  });
+});
+
+describe('environment additions', () => {
+  it('renders notice rows authored by Puck, toned by kind, with W-n links', () => {
+    const { view, session } = makeHarness();
+    view.addNotice(session, [
+      { kind: 'item.review', text: 'W-12 is ready for review · +120 −30' },
+      { kind: 'item.failed', text: 'W-3 failed: tests' },
+    ], T0);
+    const row = session.thread.querySelector('.msg-row.notice') as HTMLElement;
+    expect(row.querySelector('.row-author')?.textContent).toBe('Puck');
+    expect(row.querySelector('.row-avatar')).toBeNull();
+    const lines = [...row.querySelectorAll('.notice-line')];
+    expect(lines.map((l) => l.querySelector('.notice-dot')?.className)).toEqual(['notice-dot ok', 'notice-dot bad']);
+    // Without an openRef hook the references stay text.
+    expect(row.querySelector('.notice-ref')).toBeNull();
+    expect(lines[0]?.textContent).toBe('W-12 is ready for review · +120 −30');
+  });
+
+  it('turns W-n references into links when the host opens items', () => {
+    const openRef = vi.fn();
+    const base = makeHarness();
+    const ctx: ChatViewContext = {
+      userName: 'You',
+      scrollChat: () => undefined,
+      answerAsk: async () => undefined,
+      toast: () => undefined,
+      rosterChanged: () => undefined,
+      isCurrent: () => false,
+      openSession: () => undefined,
+      spawnChild: base.store.spawnChild,
+      capabilities: () => undefined,
+      pruneChildren: base.store.dropChildren,
+      openRef,
+      overlay: {
+        body: document.createElement('div'),
+        crumb: document.createElement('span'),
+        title: document.createElement('span'),
+        stage: document.createElement('div'),
+        backButton: document.createElement('button'),
+      },
+    };
+    const view = initChatView(ctx);
+    view.addNotice(base.session, [{ kind: 'pr.merged', text: 'W-7 PR #45 merged; W-7 is done' }], T0);
+    const links = [...base.session.thread.querySelectorAll<HTMLButtonElement>('.notice-ref')];
+    expect(links.map((l) => l.textContent)).toEqual(['W-7', 'W-7']);
+    links[0]?.click();
+    expect(openRef).toHaveBeenCalledWith('W-7');
+  });
+
+  it('shows other authors as agent rows and works without a persist hook', () => {
+    const { view, session } = makeHarness();
+    view.addUserMessage(session, 'Please also run lint', 'lead', T0, 'agent');
+    const row = session.thread.querySelector('.msg-row') as HTMLElement;
+    expect(row.classList.contains('agent')).toBe(true);
+    expect(row.querySelector('.row-author')?.textContent).toBe('lead');
+  });
+
+  it('splits text into W-n runs', () => {
+    expect(refRuns('see W-1 and W-22.')).toEqual([
+      { text: 'see ', ref: false },
+      { text: 'W-1', ref: true },
+      { text: ' and ', ref: false },
+      { text: 'W-22', ref: true },
+      { text: '.', ref: false },
+    ]);
+    expect(noticeTone('item.needs-input')).toBe('ask');
+    expect(noticeTone('issue.commented')).toBe('info');
   });
 });

@@ -273,7 +273,12 @@ export interface OpMap {
   'snapshot.get': { args: Record<string, never>; result: Snapshot };
   'session.history': {
     args: { sessionId: string; before?: number; limit?: number };
-    result: { entries: TranscriptEntry[]; total: number; hasMore: boolean };
+    /**
+     * `before` is an entry index (a page ends there). `head` is the last event
+     * seq the page reflects: later events for the session are not in it.
+     * Daemons before it was added leave it out.
+     */
+    result: { entries: TranscriptEntry[]; total: number; hasMore: boolean; head?: number };
   };
   'chat.send': { args: { sessionId?: string; text: string }; result: { queued: boolean; turnId?: string } };
   'session.interrupt': { args: { sessionId: string }; result: Record<string, never> };
