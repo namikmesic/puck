@@ -94,7 +94,7 @@ async function boot(extraEnv, { windowPath, label }) {
         .catch(() => null),
       shell: !!document.getElementById('app-shell'),
       // The per-agent chat's bridge is gone: turns run in environments.
-      legacy: ['status', 'agentList', 'envList', 'convoSave', 'startTurn'].filter((m) => m in window.puck),
+      legacy: ['status', 'envList', 'startTurn', 'answerAsk'].filter((m) => m in window.puck),
       providers: await window.puck
         .providers()
         .then((list) => list.length)
