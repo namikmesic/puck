@@ -87,7 +87,7 @@ const createWindow = (): void => {
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
-    // Three panes need the room.
+    // The board's five columns and the Closed rail need the room.
     minHeight: 600,
     minWidth: 960,
     backgroundColor: '#FFFDF7',
@@ -119,7 +119,10 @@ const createWindow = (): void => {
   });
 
   if (isolated) mainWindow.once('ready-to-show', () => mainWindow.showInactive());
-  mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
+  // PUCK_FIXTURE=<scenario> (isolated dev launches only) renders the window
+  // from seeded data instead (src/renderer/fixture), for screenshots.
+  const fixture = isolated && !app.isPackaged ? process.env.PUCK_FIXTURE?.trim() : '';
+  mainWindow.loadURL(fixture ? `${MAIN_WINDOW_WEBPACK_ENTRY}#fixture=${encodeURIComponent(fixture)}` : MAIN_WINDOW_WEBPACK_ENTRY);
   log.info('window.created');
 };
 

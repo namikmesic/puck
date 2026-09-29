@@ -32,7 +32,7 @@ export type AttachPhase =
 
 export interface AttachView {
   phase: AttachPhase;
-  /** One sentence for the banner above the chat; empty while ready. */
+  /** One sentence for the banner over the content; empty while ready. */
   text: string;
   /** Show a Reconnect action. */
   retry: boolean;

@@ -11,7 +11,7 @@ import type { InstanceInfo, InstanceUpdate } from '../../src/harness/bridge';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { attachViewOf, type AttachView } from '../../src/renderer/instance-sync';
 import { instanceOps } from '../../src/renderer/instance-menu';
-import { initTopbar } from '../../src/renderer/topbar';
+import { initTopbar, pinLabel } from '../../src/renderer/topbar';
 import { ENV, ENV2, fakeBridge, instance, snap } from './v2-fixtures';
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -56,21 +56,34 @@ function setup(list: InstanceInfo[] = [instance()], attach?: () => AttachView) {
 }
 
 describe('top bar', () => {
-  it('shows the environment, its runner, status and pin', () => {
+  it('shows the environment, its runner, status and tag, with the details in a popover', () => {
     const { store, tb, byId } = setup();
     store.applySnapshot(snap(), ENV);
     tb.render();
     expect(byId('name').textContent).toBe('example');
     expect(byId('status').querySelector('.tb-where')?.textContent).toBe('build-box');
     expect(byId('status').querySelector('.tb-dot')?.className).toBe('tb-dot tone-on');
-    expect(byId('status').querySelector('.tb-pin')?.textContent).toBe('v1.0.0 (a1b2c3d)');
-    expect(byId('status').title).toContain('Daemon 0.0.1 (test)');
+    expect(byId('status').querySelector('.tb-word')?.textContent).toBe('Ready');
+    // The pill names the tag; the commit stays in the details.
+    expect(byId('status').querySelector('.tb-pin')?.textContent).toBe('v1.0.0');
+    byId('status').click();
+    const details = document.querySelector('.popover') as HTMLElement;
+    expect(details.textContent).toContain('v1.0.0 (a1b2c3d)');
+    expect(details.textContent).toContain('0.0.1 (test)');
+    byId('status').click();
+    expect(document.querySelector('.popover')).toBeNull();
+  });
+
+  it('keeps a commit pin out of the pill', () => {
+    expect(pinLabel({ kind: 'commit', name: 'a1b2c3d4e5f6', sha: 'a1b2c3d4e5f6' })).toBe('');
+    expect(pinLabel({ kind: 'branch', name: 'main', sha: 'a1b2c3d4e5f6' })).toBe('main');
+    expect(pinLabel(null)).toBe('');
   });
 
   it('shows the stage and elapsed time while working', () => {
     const { store, tb, byId } = setup([instance({ op: { kind: 'starting', stage: 'pulling-image', detail: '', startedAt: 8_000, error: null } })]);
     tb.render();
-    expect(byId('status').querySelector('.tb-word')?.textContent).toBe('pulling the image · 12s');
+    expect(byId('status').querySelector('.tb-word')?.textContent).toBe('Pulling the image · 12s');
     expect(byId('status').querySelector('.tb-pin')).toBeNull();
     void store;
   });

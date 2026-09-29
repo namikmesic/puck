@@ -193,6 +193,27 @@ describe('session view', () => {
     expect(host.querySelector('.load-earlier')).toBeNull();
   });
 
+  it('shows the orchestrator and a worker in two hosts at once, each live', async () => {
+    const history = vi.fn(async (id: string) => page([user(id === ORCH ? 'to the orchestrator' : 'to the worker', 1)], 10));
+    const { view, host, live } = setup(history);
+    const sheet = document.createElement('div');
+    document.body.appendChild(sheet);
+    view.mount(ORCH, host);
+    view.mount(WORKER, sheet);
+    await flush();
+    expect(view.mountedSession(host)).toBe(ORCH);
+    expect(view.mountedSession(sheet)).toBe(WORKER);
+    live(11, { kind: 'turn.user', sessionId: ORCH, entry: { kind: 'user', text: 'orchestrator again', author: 'user', ts: 2 } });
+    live(12, { kind: 'turn.user', sessionId: WORKER, entry: { kind: 'user', text: 'worker again', author: 'user', ts: 2 } });
+    expect(texts(host)).toEqual(['to the orchestrator', 'orchestrator again']);
+    expect(texts(sheet)).toEqual(['to the worker', 'worker again']);
+    // Mounting the same session elsewhere moves it; the host it left forgets it.
+    view.mount(WORKER, host);
+    expect(view.mountedSession(host)).toBe(WORKER);
+    expect(view.mountedSession(sheet)).toBeNull();
+    expect(texts(host)).toEqual(['to the worker', 'worker again']);
+  });
+
   it('ignores events for threads never shown, and reloads after a reset', async () => {
     const history = vi.fn(async () => page([user('hello', 1)], 10));
     const { view, host, live } = setup(history);
@@ -204,6 +225,28 @@ describe('session view', () => {
     view.mount(ORCH, host);
     await flush();
     expect(history).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not follow the bottom after a zero-height scroll while the reader is above it', async () => {
+    const { view, host, live } = setup(async () => page([user('hello', 1)], 10));
+    view.mount(ORCH, host);
+    await flush();
+    const box = { scrollHeight: 1000, clientHeight: 400 };
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, get: () => box.scrollHeight });
+    Object.defineProperty(host, 'clientHeight', { configurable: true, get: () => box.clientHeight });
+    host.scrollTop = 120;
+    host.dispatchEvent(new Event('scroll'));
+    box.scrollHeight = 0;
+    box.clientHeight = 0;
+    host.scrollTop = 0;
+    host.dispatchEvent(new Event('scroll'));
+    box.scrollHeight = 1200;
+    box.clientHeight = 400;
+    host.scrollTop = 0;
+    live(11, { kind: 'turn.start', sessionId: ORCH, turnId: 't9' });
+    live(12, { kind: 'turn.event', sessionId: ORCH, turnId: 't9', event: { kind: 'text-delta', text: 'Still reading' } });
+    await nextFrame();
+    expect(host.scrollTop).toBe(0);
   });
 
   it('keeps drafts per environment and session, and survives broken storage', () => {

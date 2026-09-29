@@ -45,6 +45,10 @@ const config: ForgeConfig = {
     new AutoUnpackNativesPlugin({}),
     new WebpackPlugin({
       mainConfig,
+      // `npm start` defaults to ports 3000 and 9000; a second dev instance
+      // (another checkout, the fixture screenshots) picks free ones here.
+      port: Number(process.env.PUCK_DEV_PORT) || undefined,
+      loggerPort: Number(process.env.PUCK_DEV_LOGGER_PORT) || undefined,
       // Dev-server CSP: webpack needs eval sourcemaps + ws; packaged builds
       // get the strict policy from src/index.ts instead.
       devContentSecurityPolicy:

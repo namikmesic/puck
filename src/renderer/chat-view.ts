@@ -1,7 +1,10 @@
 /**
  * The chat rendering layer: Slack-style message rows, streaming assistant
  * turns (markdown committer, tool cards, sub-agent links, ask cards), Puck
- * notice rows (`W-n` opens the item), and the full-screen turn overlay.
+ * notice rows, and the full-screen turn overlay. `W-n` references in
+ * messages and notices render as chips that open the item. A turn that
+ * used tools shows one quiet step card above its reply ("4 steps · 38s");
+ * the card opens the steps full screen.
  *
  * Pure presentation over a Session's live thread node. Everything stateful
  * it needs from the app — answer delivery, child-session creation — arrives
@@ -14,8 +17,8 @@ import type { ProviderCapabilities } from '../harness/bridge';
 import type { Notice, NoticeKind } from '../harness/transcript';
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
 import { askCard, askReplayCard, setAskAnswered } from './ask-card';
-import { el } from './dom';
-import { dayLabel, fmtClock, fmtTime, fmtTokens } from './format';
+import { el, syncKeepScroll } from './dom';
+import { dayKey, dayLabel, fmtClock, fmtDuration, fmtTime, fmtTokens, fmtUsd } from './format';
 import { renderMd } from './markdown';
 import { button, errText } from './util';
 
@@ -79,8 +82,8 @@ export interface AssistantTurn {
 export interface ChatViewContext {
   /** Display label for the human author (persisted entries store 'user'). */
   userName: string;
-  /** Scroll the live chat scroller (no-op when the session is off-screen). */
-  scrollChat(force?: boolean): void;
+  /** Scroll the scroller showing `session` (no-op when it is off-screen). */
+  scrollChat(force?: boolean, session?: Session): void;
   /** Deliver (or dismiss, with null) a mid-turn answer to the agent. */
   answerAsk(turnId: string, askId: string, answers: Record<string, string> | null): Promise<void>;
   toast(message: string): void;
@@ -88,15 +91,18 @@ export interface ChatViewContext {
   rosterChanged(): void;
   /** Is this session the one on screen? (unread markers skip the current). */
   isCurrent(session: Session): boolean;
-  openSession(id: number): void;
+  /** Open a sub-agent chat where `from` (its parent) is showing. */
+  openSession(id: number, from?: Session): void;
   /** Create a sub-agent chat session rooted under `parent` (session-domain). */
   spawnChild(parent: Session): Session;
   /** Capabilities of the provider behind `session` (undefined = unknown). */
   capabilities(session: Session): ProviderCapabilities | undefined;
   /** Drop `session`'s child chats (full-log rebuild re-creates them). */
   pruneChildren(session: Session): void;
-  /** A `W-n` reference in a notice row was clicked. */
+  /** A `W-n` reference chip was clicked. */
   openRef?(ref: string): void;
+  /** The chip's tooltip for a reference ("W-12 · Fix login redirect · running"), or null when unknown. */
+  describeRef?(ref: string): string | null;
   /** Full-screen turn overlay chrome. */
   overlay: {
     body: HTMLElement;
@@ -143,6 +149,37 @@ export function refRuns(text: string): { text: string; ref: boolean }[] {
   }
   if (at < text.length) runs.push({ text: text.slice(at), ref: false });
   return runs;
+}
+
+/**
+ * Turn `W-n` references in rendered text into chips that open the item.
+ * Code, links and buttons keep their text as it is.
+ */
+export function linkRefs(root: HTMLElement, open: ((ref: string) => void) | undefined, describe?: (ref: string) => string | null): void {
+  if (!open) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const hits: Text[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node as Text;
+    if (!/\bW-\d/.test(text.data)) continue;
+    if (text.parentElement?.closest('code, pre, a, button, .ref-chip')) continue;
+    hits.push(text);
+  }
+  for (const text of hits) {
+    const frag = document.createDocumentFragment();
+    for (const run of refRuns(text.data)) {
+      if (!run.ref) {
+        frag.appendChild(document.createTextNode(run.text));
+        continue;
+      }
+      const chip = button('ref-chip', run.text);
+      const title = describe?.(run.text);
+      if (title) chip.title = title;
+      chip.addEventListener('click', () => open(run.text));
+      frag.appendChild(chip);
+    }
+    text.replaceWith(frag);
+  }
 }
 
 /**
@@ -226,6 +263,7 @@ export function initChatView(ctx: ChatViewContext) {
     ctx.overlay.crumb.textContent = session.title;
     ctx.overlay.title.textContent = title;
     ctx.overlay.stage.classList.add('turn-full-open');
+    syncKeepScroll(ctx.overlay.stage);
     ctx.overlay.backButton.focus();
   }
 
@@ -234,6 +272,7 @@ export function initChatView(ctx: ChatViewContext) {
     fullTurn.home.appendChild(fullTurn.detail);
     fullTurn = null;
     ctx.overlay.stage.classList.remove('turn-full-open');
+    syncKeepScroll(ctx.overlay.stage);
     lastFullTrigger?.focus();
     lastFullTrigger = null;
   }
@@ -246,14 +285,19 @@ export function initChatView(ctx: ChatViewContext) {
   }
 
   /** Slack-style day separator, inserted when the calendar day changes. The
-   *  last label lives in a dataset attribute — no DOM scan per message. */
+   *  last day lives in a dataset attribute — no DOM scan per message. */
   function maybeDayDivider(container: HTMLElement, ts = Date.now()): void {
-    const label = dayLabel(ts);
-    if (container.dataset.day === label) return;
-    container.dataset.day = label;
+    const day = dayKey(ts);
+    if (container.dataset.day === day) return;
+    container.dataset.day = day;
     const divider = el('li', 'day-divider');
-    divider.appendChild(el('span', 'day-chip', label));
+    divider.setAttribute('role', 'separator');
+    divider.appendChild(el('span', 'day-chip', dayLabel(ts)));
     container.appendChild(divider);
+  }
+
+  function refs(root: HTMLElement): void {
+    linkRefs(root, ctx.openRef, ctx.describeRef);
   }
 
   /** One Slack-style message row: avatar gutter, author + time, content below. */
@@ -268,10 +312,15 @@ export function initChatView(ctx: ChatViewContext) {
     item.dataset.groupStart = String(ts); // the header's time never slides
     const main = el('div', 'row-main');
     const head = el('div', 'row-head');
-    head.append(el('span', 'row-author', author), el('span', 'row-time', fmtTime(ts)));
+    const time = el('time', 'row-time', fmtTime(ts));
+    time.dateTime = new Date(ts).toISOString();
+    time.title = new Date(ts).toLocaleString();
+    head.append(el('span', 'row-author', author), time);
     const body = el('div', 'row-body');
     main.append(head, body);
-    item.append(el('span', `row-avatar ${kind}`, (author[0] ?? '?').toUpperCase()), main);
+    const avatar = el('span', `row-avatar ${kind}`, (author[0] ?? '?').toUpperCase());
+    avatar.setAttribute('aria-hidden', 'true');
+    item.append(avatar, main);
     return { item, body };
   }
 
@@ -306,46 +355,49 @@ export function initChatView(ctx: ChatViewContext) {
       last.dataset.ts = String(ts);
       const grouped = el('div', 'row-body prose');
       grouped.innerHTML = renderMd(text);
+      refs(grouped);
       last.querySelector('.row-main')?.appendChild(grouped);
     } else {
       maybeDayDivider(session.thread, ts);
       const { item, body } = messageRow(kind, author, ts);
       body.classList.add('prose');
       body.innerHTML = renderMd(text);
+      refs(body);
       session.thread.appendChild(item);
     }
-    if (session.thread.isConnected) ctx.scrollChat(true);
+    if (session.thread.isConnected) ctx.scrollChat(true, session);
   }
 
   /** Builds one assistant turn inside a session's thread (which may be off-screen). */
   function addAssistantTurn(session: Session, turnId: string, ts = Date.now()): AssistantTurn {
     // Only move the visible scroller when this session is the one on screen.
     const scrollToBottom = (force = false): void => {
-      if (session.thread.isConnected) ctx.scrollChat(force);
+      if (session.thread.isConnected) ctx.scrollChat(force, session);
     };
     maybeDayDivider(session.thread, ts);
     const { item, body: content } = messageRow('agent', session.title, ts);
     session.thread.appendChild(item);
 
-    // Text-only turns are just messages. The first tool call reveals ONE dynamic
-    // card; clicking it opens the turn's full detail with breadcrumbs back.
+    // Text-only turns are just messages. The first tool call reveals ONE quiet
+    // step card above the reply; clicking it opens the turn's steps full screen.
     const turnWork = el('div', 'turn-detail');
-    const detailTitle = `Turn · ${fmtTime(ts)}`;
+    const detailTitle = `Steps · ${fmtTime(ts)}`;
     let steps = 0;
     const turnCard = button('turn-card running hidden');
-    turnCard.title = 'Open turn detail';
+    turnCard.title = 'Show the steps';
     const cardDot = el('span', 'turn-card-dot');
     const cardLabel = el('span', 'turn-card-label', 'Working…');
     const cardLatest = el('span', 'turn-card-latest', '');
     const cardExpand = el('span', 'turn-card-expand');
-    cardExpand.innerHTML =
-      '<svg viewBox="0 0 24 24"><path d="M15 3h6v6" /><path d="M9 21H3v-6" /><path d="m21 3-7 7" /><path d="m3 21 7-7" /></svg>';
+    cardExpand.innerHTML = '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>';
     turnCard.append(cardDot, cardLabel, cardLatest, cardExpand);
     turnCard.addEventListener('click', () => {
       lastFullTrigger = turnCard;
       openFullTurn(session, turnWork, detailTitle);
     });
-    item.querySelector('.row-main')?.append(turnCard, turnWork);
+    // Between the author line and the reply, outside the body (whose text is the message).
+    item.querySelector('.row-main')?.insertBefore(turnCard, content);
+    item.querySelector('.row-main')?.append(turnWork);
 
     const workAppend = (node: HTMLElement, stepLabel?: string): void => {
       turnWork.appendChild(node);
@@ -380,8 +432,10 @@ export function initChatView(ctx: ChatViewContext) {
       if (brk >= 0 && brk + 2 > commitAt && fenceClosed(proseRaw.slice(0, brk))) {
         commitAt = brk + 2;
         proseCommitted.innerHTML = renderMd(proseRaw.slice(0, commitAt));
+        refs(proseCommitted);
       }
       proseTail.innerHTML = renderMd(proseRaw.slice(commitAt));
+      refs(proseTail);
       scrollToBottom();
     };
 
@@ -539,7 +593,7 @@ export function initChatView(ctx: ChatViewContext) {
             el('span', 'tool-stamp', fmtClock(at)),
             el('span', 'agent-link-open', lifecycleOnly ? 'Open status →' : 'Open chat →'),
           );
-          link.addEventListener('click', () => ctx.openSession(child.id));
+          link.addEventListener('click', () => ctx.openSession(child.id, session));
           workAppend(link, `Sub-agent · ${summary}`);
           tools.set(toolId, { card: link, startedAt: at });
           ctx.rosterChanged();
@@ -585,9 +639,9 @@ export function initChatView(ctx: ChatViewContext) {
         }
         // Claude delivers tool_use + result almost together, so sub-0.1s
         // receipt gaps are noise — show duration only when it means something.
-        const secs = Math.max(0, at - startedAt) / 1000;
+        const ms = Math.max(0, at - startedAt);
         const parts: string[] = [];
-        if (secs >= 0.1) parts.push(`${secs.toFixed(1)}s`);
+        if (ms >= 100) parts.push(fmtDuration(ms));
         if (!ok) parts.push('failed');
         (card.querySelector('.tool-time') as HTMLElement).textContent = parts.join(' · ');
         card.appendChild(el('pre', 'tool-output', output));
@@ -603,20 +657,19 @@ export function initChatView(ctx: ChatViewContext) {
         for (const toolId of turnToolIds) tools.delete(toolId);
         // Text-only turns stay plain; tool turns settle their dynamic card.
         if (steps > 0) {
-          const seconds = (stats.durationMs / 1000).toFixed(1);
-          const cost = stats.costUsd !== undefined ? ` · $${stats.costUsd.toFixed(4)}` : '';
+          const took = fmtDuration(stats.durationMs);
+          const cost = stats.costUsd !== undefined ? ` · ${fmtUsd(stats.costUsd)}` : '';
           workAppend(
             el(
               'div',
               'turn-stats',
-              `${fmtTokens(stats.inputTokens)} in · ` +
-                `${fmtTokens(stats.outputTokens)} out · ${seconds}s${cost}`,
+              `${fmtTokens(stats.inputTokens)} tokens in · ${fmtTokens(stats.outputTokens)} out · ${took}${cost}`,
             ),
           );
           turnCard.classList.remove('running');
           turnCard.classList.add('done');
-          cardLabel.textContent = `${steps} step${steps === 1 ? '' : 's'} · ${seconds}s${cost}`;
-          cardLatest.textContent = '';
+          cardLabel.textContent = `${steps} step${steps === 1 ? '' : 's'}`;
+          cardLatest.textContent = took;
         }
         scrollToBottom();
       },
@@ -624,8 +677,9 @@ export function initChatView(ctx: ChatViewContext) {
   }
 
   /**
-   * A system row authored "Puck" (no avatar): one line per notice, each with
-   * a dot toned by kind; `W-n` references open the item.
+   * A system row authored "Puck" (a small Puck mark in the avatar gutter):
+   * one line per notice, each with a dot toned by kind; `W-n` references
+   * are chips that open the item.
    */
   function addNotice(session: Session, notices: Pick<Notice, 'kind' | 'text'>[], ts = Date.now()): void {
     maybeDayDivider(session.thread, ts);
@@ -634,28 +688,25 @@ export function initChatView(ctx: ChatViewContext) {
     item.dataset.ts = String(ts);
     const main = el('div', 'row-main');
     const head = el('div', 'row-head');
-    head.append(el('span', 'row-author', 'Puck'), el('span', 'row-time', fmtTime(ts)));
+    const time = el('time', 'row-time', fmtTime(ts));
+    time.dateTime = new Date(ts).toISOString();
+    time.title = new Date(ts).toLocaleString();
+    head.append(el('span', 'row-author', 'Puck'), time);
     main.appendChild(head);
     for (const notice of notices) {
       const line = el('div', 'notice-line');
       line.dataset.kind = notice.kind;
       line.appendChild(el('span', `notice-dot tone-${noticeTone(notice.kind)}`));
-      const text = el('span', 'notice-text');
-      for (const run of refRuns(notice.text)) {
-        if (!run.ref || !ctx.openRef) {
-          text.appendChild(document.createTextNode(run.text));
-          continue;
-        }
-        const link = button('notice-ref', run.text);
-        link.addEventListener('click', () => ctx.openRef?.(run.text));
-        text.appendChild(link);
-      }
+      const text = el('span', 'notice-text', notice.text);
+      refs(text);
       line.appendChild(text);
       main.appendChild(line);
     }
-    item.appendChild(main);
+    const avatar = el('span', 'row-avatar puck', 'P');
+    avatar.setAttribute('aria-hidden', 'true');
+    item.append(avatar, main);
     session.thread.appendChild(item);
-    if (session.thread.isConnected) ctx.scrollChat();
+    if (session.thread.isConnected) ctx.scrollChat(false, session);
   }
 
   return {

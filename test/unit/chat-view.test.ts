@@ -211,7 +211,7 @@ describe('sub-agent cards follow the provider capabilities', () => {
 });
 
 describe('environment additions', () => {
-  it('renders notice rows authored by Puck, toned by kind, with W-n links', () => {
+  it('renders notice rows authored by Puck, with the Puck mark, toned by kind', () => {
     const { view, session } = makeHarness();
     view.addNotice(session, [
       { kind: 'item.review', text: 'W-12 is ready for review · +120 −30' },
@@ -219,15 +219,15 @@ describe('environment additions', () => {
     ], T0);
     const row = session.thread.querySelector('.msg-row.notice') as HTMLElement;
     expect(row.querySelector('.row-author')?.textContent).toBe('Puck');
-    expect(row.querySelector('.row-avatar')).toBeNull();
+    expect(row.querySelector('.row-avatar.puck')?.textContent).toBe('P');
     const lines = [...row.querySelectorAll('.notice-line')];
     expect(lines.map((l) => l.querySelector('.notice-dot')?.className)).toEqual(['notice-dot tone-ok', 'notice-dot tone-bad']);
     // Without an openRef hook the references stay text.
-    expect(row.querySelector('.notice-ref')).toBeNull();
+    expect(row.querySelector('.ref-chip')).toBeNull();
     expect(lines[0]?.textContent).toBe('W-12 is ready for review · +120 −30');
   });
 
-  it('turns W-n references into links when the host opens items', () => {
+  it('turns W-n references in notices and messages into chips, leaving code alone', () => {
     const openRef = vi.fn();
     const base = makeHarness();
     const ctx: ChatViewContext = {
@@ -242,6 +242,7 @@ describe('environment additions', () => {
       capabilities: () => undefined,
       pruneChildren: base.store.dropChildren,
       openRef,
+      describeRef: (ref) => (ref === 'W-7' ? 'W-7 · Paginate the audit log · done' : null),
       overlay: {
         body: document.createElement('div'),
         crumb: document.createElement('span'),
@@ -252,10 +253,15 @@ describe('environment additions', () => {
     };
     const view = initChatView(ctx);
     view.addNotice(base.session, [{ kind: 'pr.merged', text: 'W-7 PR #45 merged; W-7 is done' }], T0);
-    const links = [...base.session.thread.querySelectorAll<HTMLButtonElement>('.notice-ref')];
+    const links = [...base.session.thread.querySelectorAll<HTMLButtonElement>('.ref-chip')];
     expect(links.map((l) => l.textContent)).toEqual(['W-7', 'W-7']);
+    expect(links[0]?.title).toBe('W-7 · Paginate the audit log · done');
     links[0]?.click();
     expect(openRef).toHaveBeenCalledWith('W-7');
+    view.addUserMessage(base.session, 'Retry W-3, and compare `W-4` with [W-5](https://example.com)', 'You', T0 + 60_000);
+    const row = base.session.thread.lastElementChild as HTMLElement;
+    expect([...row.querySelectorAll('.ref-chip')].map((c) => c.textContent)).toEqual(['W-3']);
+    expect(row.querySelector('code')?.textContent).toBe('W-4');
   });
 
   it('shows other authors as agent rows', () => {

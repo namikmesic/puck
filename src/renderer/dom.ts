@@ -1,5 +1,23 @@
 /** Small DOM builders and interaction primitives used across the renderer. */
 
+/**
+ * Hide a view. `.keep-scroll` stays laid out (shell.css) so its scroll
+ * offset survives; `inert` takes it out of focus. A full-screen turn
+ * covers every such view, hidden or not.
+ */
+export function conceal(el: HTMLElement, hide: boolean): void {
+  el.classList.toggle('hidden', hide);
+  el.toggleAttribute('inert', hide || !!el.closest('.turn-full-open'));
+}
+
+/** Recompute `inert` after the full-screen turn opens or closes. */
+export function syncKeepScroll(stage: HTMLElement): void {
+  const covered = stage.classList.contains('turn-full-open');
+  for (const el of stage.querySelectorAll<HTMLElement>('.keep-scroll')) {
+    el.toggleAttribute('inert', covered || el.classList.contains('hidden'));
+  }
+}
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className: string,

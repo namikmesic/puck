@@ -1,6 +1,8 @@
-/* Chat surface: stage, turn detail, message rows, asks, tools, composer. */
+/* The Chat view and every thread: the header, the reading column, message
+   rows, step cards, questions, tool calls, and the composer. Threads also
+   render inside the item sheet (a worker's conversation). */
 
-/* ---------- Chat stage ---------- */
+/* ---------- Stage and the Chat view ---------- */
 
 .stage {
   flex: 1;
@@ -8,7 +10,268 @@
   display: flex;
 }
 
-/* ---------- Turn detail: inline expansion + full-screen view ---------- */
+.oc {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header, thread and composer share one centered column. */
+.oc-head,
+.oc-earlier-bar,
+.thread,
+.composer-zone,
+.turn-full {
+  width: 100%;
+  max-width: calc(var(--chat-col) + 2 * var(--content-pad));
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--content-pad);
+  padding-right: var(--content-pad);
+}
+
+.oc-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 52px;
+}
+
+.oc.no-env .oc-head {
+  visibility: hidden;
+}
+
+.oc-who {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.oc-title {
+  font-size: var(--text-md);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.oc-role {
+  font-size: var(--text-xs);
+  color: var(--gray-light);
+  white-space: nowrap;
+}
+
+.oc-role:empty {
+  display: none;
+}
+
+.oc-info {
+  padding: 5px;
+  color: var(--gray-light);
+}
+
+.oc-info svg {
+  width: 16px;
+  height: 16px;
+}
+
+.oc-info[aria-expanded='true'] {
+  background: var(--emerald-tint);
+  color: var(--charcoal);
+}
+
+.oc-paused {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The quiet live-work line; a click switches to the Board. A question for the user leads, in gold ink. */
+.oc-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 var(--space-3) 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  font-size: var(--text-xs);
+  font-weight: 550;
+  color: var(--gray);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  transition: border-color var(--fast) ease, background var(--fast) ease, color var(--fast) ease;
+}
+
+.oc-live:hover {
+  color: var(--charcoal);
+  border-color: var(--emerald-hover);
+  background: var(--emerald-tint);
+}
+
+.oc-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
+  animation: lifecycle-pulse 1.2s ease-in-out infinite;
+}
+
+.oc-live-needs {
+  font-weight: 650;
+  color: var(--gold-ink);
+}
+
+.oc-live.needs .oc-live-dot {
+  animation: none;
+  box-shadow: 0 0 0 3px var(--gold-muted);
+}
+
+.oc-details-pop {
+  width: 300px;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.oc-details-label {
+  margin: var(--space-4) 0 var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--gray-light);
+}
+
+.oc-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 calc(-1 * var(--space-2));
+}
+
+.oc-session {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.oc-session:hover {
+  background: var(--emerald-tint);
+}
+
+.oc-session[aria-pressed='true'] {
+  font-weight: 600;
+  background: var(--emerald-tint);
+}
+
+.oc-session-sub {
+  font-size: var(--text-xs);
+  color: var(--gray-light);
+  font-weight: 400;
+}
+
+.oc-earlier-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--gray);
+}
+
+.oc-earlier-bar > span {
+  flex: 1;
+  padding: 6px 0;
+}
+
+/* No environment: the start prompt. */
+.oc-empty,
+.oc-intro {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  text-align: center;
+}
+
+.oc-empty-title,
+.oc-intro-title {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.oc-empty-sub,
+.oc-intro-sub {
+  margin: 0 0 var(--space-2);
+  max-width: 440px;
+  color: var(--gray);
+}
+
+/* A new orchestrator with nothing said yet: the intro and suggestions in place of the thread. */
+.oc-intro {
+  display: none;
+}
+
+.oc:not(.no-env):has(.chat > .thread[data-state='loaded']:empty) .oc-intro {
+  display: flex;
+}
+
+.oc:not(.no-env):has(.chat > .thread[data-state='loaded']:empty) .chat {
+  display: none;
+}
+
+.oc-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(100%, 420px);
+  margin-top: var(--space-2);
+}
+
+.oc-suggestion {
+  padding: 10px var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  font-size: var(--text-sm);
+  text-align: left;
+  color: var(--charcoal);
+  transition: border-color var(--fast) ease, background var(--fast) ease;
+}
+
+.oc-suggestion:hover {
+  border-color: var(--emerald-hover);
+  background: var(--emerald-tint);
+}
+
+.hero-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: var(--emerald);
+  color: var(--white);
+  font-family: var(--font-display);
+  font-size: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ---------- Full-screen steps of one turn ---------- */
 
 .turn-detail {
   display: none;
@@ -19,37 +282,30 @@
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  width: 100%;
-  max-width: var(--content-col);
-  margin: 0 auto;
-  padding: 6px var(--content-pad) 18px;
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-4);
 }
 
 .stage.turn-full-open .turn-full {
   display: flex;
 }
 
-.stage.turn-full-open .chat,
-.stage.turn-full-open .composer-zone {
-  display: none;
-}
-
 .turn-full-head {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-bottom: 12px;
+  gap: var(--space-2);
+  height: 44px;
 }
 
 .crumb-sep {
   color: var(--gray-light);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
 }
 
 .turn-full-title {
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: var(--text-sm);
+  font-weight: 600;
   color: var(--gray);
 }
 
@@ -63,53 +319,389 @@
 .turn-full-body .turn-detail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2);
 }
 
-/* One dynamic card per tool-using turn — click to expand its detail. */
+/* ---------- Threads ---------- */
 
-.turn-card {
+.chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable both-edges;
+  /* Text fades under the header instead of being cut. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+}
+
+.thread {
+  list-style: none;
+  margin-top: 0;
+  margin-bottom: 0;
+  /* Clear of the top fade when scrolled to the start. */
+  padding-top: var(--space-4);
+  padding-bottom: var(--space-6);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Slack-shaped rows: a 28px avatar gutter, the author line centered on it, content below. */
+.msg-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  column-gap: var(--space-3);
+  padding: 6px var(--space-2);
+  margin: 0 calc(-1 * var(--space-2));
+  border-radius: var(--radius-lg);
+  animation: fade-in 0.15s ease;
+}
+
+.msg-row + .msg-row {
+  margin-top: var(--space-2);
+}
+
+.row-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  color: var(--white);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row-avatar.agent {
+  background: var(--emerald);
+}
+
+.row-avatar.user {
+  background: linear-gradient(135deg, #dcb844, #b8952a);
+  color: var(--charcoal);
+}
+
+.row-avatar.puck {
+  background: var(--emerald-tint);
+  color: var(--emerald);
+  box-shadow: inset 0 0 0 1px var(--emerald-edge);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 400;
+}
+
+.row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+}
+
+.row-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  height: 20px;
+  line-height: 20px;
+}
+
+.row-author {
+  font-size: var(--text-md);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.row-time {
+  font-size: var(--text-xs);
+  color: var(--gray-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.row-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.row-body + .row-body {
+  margin-top: var(--space-1);
+}
+
+.load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-2) 0 var(--space-4);
+}
+
+.day-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.day-divider:first-child {
+  margin-top: var(--space-2);
+}
+
+.day-divider::before,
+.day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.day-chip {
+  flex: none;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--gray);
+}
+
+.thread-status {
   display: flex;
   align-items: center;
   gap: 10px;
-  max-width: 100%;
-  margin-top: 8px;
-  cursor: pointer;
-  user-select: none;
-  border: 1px solid var(--line);
+  padding: var(--space-4) 0;
+  font-size: var(--text-sm);
+  color: var(--gray-light);
+}
+
+.thread-status.failed {
+  color: var(--red);
+}
+
+/* ---------- Prose ---------- */
+
+.prose {
+  font-size: 15px;
+  line-height: 24px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Streaming splits prose into committed + tail wrappers; display:contents
+   keeps the markdown children flowing as if they were direct .prose kids. */
+.prose-part {
+  display: contents;
+}
+
+.prose > :first-child,
+.prose-part:first-child > :first-child {
+  margin-top: 0;
+}
+
+.prose > :last-child,
+.prose-part > :last-child {
+  margin-bottom: 0;
+}
+
+/* The streaming tail continues the committed text: space it like the next block. */
+.prose-part + .prose-part > :first-child:not(h1, h2, h3, h4, h5, h6) {
+  margin-top: var(--space-3);
+}
+
+.prose p {
+  margin: 0 0 var(--space-3);
+}
+
+.prose ul,
+.prose ol {
+  margin: 0 0 var(--space-3);
+  padding-left: 22px;
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose ol {
+  list-style: decimal;
+}
+
+.prose li {
+  margin: 4px 0;
+}
+
+.prose li::marker {
+  color: var(--gray-light);
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+.prose h1,
+.prose h2 {
+  font-size: var(--text-lg);
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--emerald-tint);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+}
+
+.prose pre {
   background: var(--white);
-  border-radius: 12px;
-  padding: 7px 9px 7px 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+  margin: 0 0 var(--space-3);
+  overflow-x: auto;
 }
 
-.turn-card.hidden {
-  display: none;
+.prose pre code {
+  background: none;
+  padding: 0;
+  font-size: var(--text-xs);
+  line-height: 20px;
 }
 
-/* Elbow connector: from under the avatar, curving into the card. */
-.turn-card::before {
-  content: '';
-  position: absolute;
-  left: 27px; /* avatar center: 10px row padding + 34px avatar / 2 */
-  top: 42px; /* just below the 34px avatar */
-  bottom: 23px; /* roughly the card's vertical center */
-  width: 24px;
-  border-left: 2px solid var(--line);
-  border-bottom: 2px solid var(--line);
-  border-bottom-left-radius: 12px;
-  pointer-events: none;
+.prose blockquote {
+  margin: 0 0 var(--space-3);
+  padding: 0 var(--space-4);
+  border-left: 3px solid var(--gold);
+  color: var(--gray);
+}
+
+.prose a {
+  color: var(--emerald);
+  text-underline-offset: 2px;
+}
+
+.prose table {
+  border-collapse: collapse;
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--line);
+  padding: 6px var(--space-3);
+  text-align: left;
+}
+
+.prose th {
+  background: var(--well);
+  font-weight: 600;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: var(--space-4) 0;
+}
+
+/* `W-12` references: chips that open the item. */
+.ref-chip {
+  display: inline;
+  padding: 1px 4px;
+  margin: 0 -1px;
+  border-radius: var(--radius-xs);
+  background: var(--emerald-tint);
+  color: var(--emerald-dark);
+  font: inherit;
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  box-decoration-break: clone;
+  transition: background var(--fast) ease;
+}
+
+.ref-chip:hover {
+  background: rgba(46, 94, 78, 0.16);
+  text-decoration: underline;
+  text-decoration-color: var(--emerald-hover);
+  text-underline-offset: 2px;
+}
+
+/* ---------- Notices ---------- */
+
+.msg-row.notice .row-author {
+  color: var(--gray);
+}
+
+.notice-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  line-height: 22px;
+}
+
+.notice-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  transform: translateY(-1px);
+  background: var(--gray-light);
+}
+
+.notice-dot.tone-ok {
+  background: var(--emerald);
+}
+
+.notice-dot.tone-bad {
+  background: var(--red);
+}
+
+.notice-dot.tone-ask {
+  background: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-muted);
+}
+
+.notice-dot.tone-busy {
+  background: var(--gold);
+}
+
+/* ---------- Step cards: one quiet line per tool-using turn ---------- */
+
+.turn-card {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  margin: 4px 0 6px;
+  gap: var(--space-2);
+  max-width: 100%;
+  height: 28px;
+  padding: 0 var(--space-2) 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-size: var(--text-xs);
+  color: var(--gray);
+  user-select: none;
+  transition: background var(--fast) ease, border-color var(--fast) ease;
 }
 
 .turn-card:hover {
-  border-color: rgba(46, 94, 78, 0.35);
-  box-shadow: 0 5px 16px rgba(46, 94, 78, 0.07);
+  border-color: var(--emerald-hover);
+  background: var(--emerald-tint);
 }
 
 .turn-card-dot {
   flex: none;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--gray-light);
 }
@@ -125,309 +717,51 @@
 
 .turn-card-label {
   flex: none;
-  font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .turn-card-latest {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--gray);
+  min-width: 0;
+  color: var(--gray-light);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .turn-card-latest:empty {
   display: none;
 }
 
-/* Corner icon: the card opens this turn full-screen. */
 .turn-card-expand {
   flex: none;
-  margin-left: auto;
   display: inline-flex;
-  align-items: center;
   color: var(--gray-light);
-  padding: 4px;
-}
-
-.turn-card:hover .turn-card-expand {
-  color: var(--emerald-dark);
 }
 
 .turn-card-expand svg {
-  width: 13px;
-  height: 13px;
-}
-
-.stage.empty .chat {
-  display: none;
-}
-
-/* Conversation intro — the Slack "beginning of your conversation" block. */
-
-.hero-avatar {
-  width: 54px;
-  height: 54px;
-  border-radius: 14px;
-  background: var(--emerald);
-  color: var(--white);
-  font-family: var(--font-display);
-  font-size: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 10px rgba(46, 94, 78, 0.22);
-}
-
-.chat {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.thread {
-  list-style: none;
-  width: 100%;
-  max-width: var(--content-col);
-  margin: 0 auto;
-  padding: 10px var(--content-pad) 12px;
-  display: flex;
-  flex-direction: column;
-}
-
-/* Slack-style message rows: avatar gutter, author + time, content below. */
-
-.msg-row {
-  position: relative; /* anchors the turn-card's avatar connector */
-  display: flex;
-  gap: 12px;
-  padding: 5px 10px;
-  margin: 0 -10px;
-  border-radius: 10px;
-  animation: fade-in 0.15s ease;
-  transition: background 0.1s ease;
-}
-
-.msg-row + .msg-row {
-  margin-top: 8px;
-}
-
-.msg-row:hover {
-  background: rgba(46, 94, 78, 0.035);
-}
-
-.row-avatar {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  color: var(--white);
-  font-size: 14px;
-  font-weight: 650;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 1px;
-}
-
-.row-avatar.agent {
-  background: var(--emerald);
-}
-
-.row-avatar.user {
-  background: linear-gradient(135deg, #dcb844, #b8952a);
-}
-
-.row-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.row-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.row-author {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.row-time {
-  font-size: 11.5px;
-  color: var(--gray-light);
-}
-
-.row-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
-
-.load-earlier {
-  display: flex;
-  justify-content: center;
-  padding: 6px 0 14px;
-}
-
-.day-divider {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 16px 0 10px;
-}
-
-.day-divider::before,
-.day-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--line-soft);
-}
-
-.day-chip {
-  flex: none;
-  font-size: 11.5px;
-  font-weight: 650;
-  color: var(--gray);
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  padding: 3px 12px;
-  background: var(--white);
-}
-
-.prose {
-  font-size: 14.5px;
-  line-height: 1.7;
-  min-width: 0;
-}
-
-/* Streaming splits prose into committed + tail wrappers; display:contents
-   keeps the markdown children flowing as if they were direct .prose kids. */
-.prose-part {
-  display: contents;
-}
-
-.prose > :first-child,
-.prose-part:first-child > :first-child {
-  margin-top: 0;
-}
-
-.prose > :last-child,
-.prose-part:last-child > :last-child {
-  margin-bottom: 0;
-}
-
-.prose p {
-  margin: 0 0 10px;
-}
-
-.prose ul,
-.prose ol {
-  margin: 0 0 10px;
-  padding-left: 22px;
-}
-
-.prose li {
-  margin: 2px 0;
-}
-
-.prose h1,
-.prose h2,
-.prose h3,
-.prose h4,
-.prose h5,
-.prose h6 {
-  font-size: 14.5px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  margin: 16px 0 8px;
-}
-
-.prose h1,
-.prose h2 {
-  font-size: 16px;
-}
-
-.prose code {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  background: var(--emerald-tint);
-  border-radius: 5px;
-  padding: 1px 5px;
-}
-
-.prose pre {
-  background: var(--white);
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  padding: 12px 14px;
-  margin: 0 0 10px;
-  overflow-x: auto;
-}
-
-.prose pre code {
-  background: none;
-  padding: 0;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.prose blockquote {
-  margin: 0 0 10px;
-  padding: 2px 14px;
-  border-left: 3px solid var(--gold);
-  color: var(--gray);
-}
-
-.prose a {
-  color: var(--emerald);
-}
-
-.prose table {
-  border-collapse: collapse;
-  margin: 0 0 10px;
-  font-size: 13px;
-}
-
-.prose th,
-.prose td {
-  border: 1px solid var(--line);
-  padding: 5px 10px;
-  text-align: left;
-}
-
-.prose hr {
-  border: none;
-  border-top: 1px solid var(--line-soft);
-  margin: 14px 0;
+  width: 14px;
+  height: 14px;
 }
 
 .turn-stats {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--gray-light);
-  margin-top: 10px;
+  margin-top: var(--space-2);
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .thinking {
   display: flex;
   align-items: center;
   gap: 5px;
+  height: 24px;
 }
 
 .thinking-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--gold);
   animation: pulse 1.2s ease-in-out infinite;
@@ -442,69 +776,70 @@
 }
 
 .thinking-label {
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--gray);
-  margin-left: 5px;
+  margin-left: 4px;
 }
 
-/* Error block */
+/* ---------- Errors ---------- */
 
 .error-block {
-  border: 1px solid rgba(160, 60, 50, 0.25);
-  background: rgba(160, 60, 50, 0.06);
+  border: 1px solid var(--red-edge);
+  background: var(--red-tint);
   color: var(--red);
-  border-radius: 12px;
-  padding: 10px 14px;
-  font-size: 13px;
-  font-family: var(--font-mono);
+  border-radius: var(--radius-lg);
+  padding: 10px var(--space-4);
+  font-size: var(--text-sm);
   white-space: pre-wrap;
 }
 
-/* Mid-turn question cards (agent is waiting on the user) */
+/* ---------- Questions (an agent is waiting on an answer) ---------- */
 
 .ask {
-  border: 1px solid rgba(212, 175, 55, 0.5);
+  border: 1px solid var(--gold-edge);
   background: var(--white);
-  border-radius: 13px;
-  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  box-shadow: 0 6px 20px rgba(212, 175, 55, 0.08);
+  gap: var(--space-4);
+  box-shadow: 0 0 0 3px var(--gold-muted);
 }
 
 .ask.answered {
-  opacity: 0.6;
+  opacity: 0.65;
   box-shadow: none;
+  border-color: var(--line);
 }
 
 .ask-q {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .ask-head {
   display: flex;
   align-items: baseline;
-  gap: 9px;
+  gap: var(--space-2);
 }
 
 .ask-chip {
   flex: none;
-  font-size: 9.5px;
+  font-size: var(--text-2xs);
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--gold);
+  color: var(--gold-ink);
   background: var(--gold-muted);
-  border-radius: 999px;
-  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
 }
 
 .ask-question {
-  font-size: 14px;
+  font-size: var(--text-md);
   font-weight: 650;
+  line-height: 22px;
 }
 
 .ask-options {
@@ -519,13 +854,13 @@
   gap: 1px;
   text-align: left;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 12px;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--fast) ease, background var(--fast) ease;
 }
 
 .ask-option:hover:not(:disabled) {
-  border-color: rgba(46, 94, 78, 0.35);
+  border-color: var(--emerald-hover);
   background: var(--emerald-tint);
 }
 
@@ -535,66 +870,60 @@
   box-shadow: inset 0 0 0 1px var(--emerald);
 }
 
-.ask-option:disabled {
-  cursor: default;
-}
-
 .ask-option-label {
-  font-size: 13.5px;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .ask-option-desc {
-  font-size: 12.5px;
+  font-size: var(--text-xs);
   color: var(--gray);
 }
 
 .ask-other {
   font-family: var(--font-ui);
-  font-size: 13px;
+  font-size: var(--text-sm);
   color: var(--charcoal);
   background: var(--white);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 7px 12px;
+  border-radius: var(--radius-md);
+  padding: 7px var(--space-3);
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--fast) ease;
 }
 
 .ask-other:focus {
-  border-color: rgba(46, 94, 78, 0.4);
+  border-color: var(--emerald-hover);
+  box-shadow: 0 0 0 3px var(--emerald-tint);
 }
 
 .ask-foot {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+}
+
+.ask-foot .btn-primary {
+  height: 32px;
+  padding: 0 var(--space-4);
 }
 
 /* Replayed answers: free-text answer chip + dismissed note. */
 .ask-free {
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .ask-dismissed {
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   color: var(--gray);
   font-style: italic;
 }
 
-/* Keyboard operability: focused cards and options must be visible. */
-.turn-card:focus-visible,
-.ask-option:focus-visible,
-.agent-link:focus-visible {
-  outline: 2px solid var(--emerald);
-  outline-offset: 2px;
-}
-
-/* Tool call cards */
+/* ---------- Tool calls (inside the full-screen steps) ---------- */
 
 .tool {
-  border: 1px solid var(--line-soft);
-  border-radius: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
   background: var(--white);
   overflow: hidden;
 }
@@ -603,7 +932,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 14px;
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   list-style: none;
 }
@@ -614,8 +943,8 @@
 
 .tool-status {
   flex: none;
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -642,38 +971,34 @@
 }
 
 .tool-status.err {
-  background: rgba(160, 60, 50, 0.12);
+  background: var(--red-tint);
   color: var(--red);
 }
 
 .tool-name {
-  font-size: 12.5px;
-  font-weight: 650;
+  flex: none;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
+/* The command or path the tool ran on: code context. */
 .tool-summary {
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--gray);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tool-stamp {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--gray-light);
-}
-
+.tool-stamp,
 .tool-time {
   flex: none;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--gray-light);
+  font-variant-numeric: tabular-nums;
 }
 
 .tool-time:empty {
@@ -683,11 +1008,11 @@
 .tool-input,
 .tool-output {
   margin: 0;
-  padding: 11px 14px;
+  padding: 10px var(--space-3);
   border-top: 1px solid var(--line-soft);
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: var(--text-xs);
+  line-height: 20px;
   overflow-x: auto;
 }
 
@@ -703,7 +1028,6 @@
 }
 
 /* A system note inside a thread (e.g. lifecycle-only sub-agent chats). */
-
 .thread-note {
   display: flex;
   flex-wrap: wrap;
@@ -711,34 +1035,33 @@
   gap: 4px 10px;
   margin: 6px 0 10px;
   padding: 10px 14px;
-  border: 1px dashed rgba(46, 94, 78, 0.28);
-  border-radius: 13px;
-  font-size: 12.5px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-sm);
   line-height: 1.45;
   color: var(--gray);
 }
 
 .thread-note-title {
   flex: none;
-  font-size: 9.5px;
+  font-size: var(--text-2xs);
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--emerald);
 }
 
 /* Sub-agent link cards: the agent's work lives in its own linked chat. */
-
 .agent-chip {
   flex: none;
-  font-size: 9.5px;
+  font-size: var(--text-2xs);
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--emerald);
   background: var(--emerald-tint);
-  border-radius: 999px;
-  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
 }
 
 .agent-link {
@@ -747,22 +1070,22 @@
   gap: 10px;
   width: 100%;
   text-align: left;
-  border: 1px solid rgba(46, 94, 78, 0.22);
+  border: 1px solid var(--emerald-edge);
   background: var(--white);
-  border-radius: 13px;
-  padding: 10px 14px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  border-radius: var(--radius-lg);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--fast) ease, box-shadow var(--fast) ease;
 }
 
 .agent-link:hover {
-  border-color: rgba(46, 94, 78, 0.4);
-  box-shadow: 0 6px 20px rgba(46, 94, 78, 0.07);
+  border-color: var(--emerald-hover);
+  box-shadow: var(--shadow-sm);
 }
 
 .agent-link-title {
   flex: 1;
   min-width: 0;
-  font-size: 13.5px;
+  font-size: var(--text-sm);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -771,7 +1094,7 @@
 
 .agent-link-open {
   flex: none;
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--emerald);
 }
@@ -780,25 +1103,23 @@
 
 .composer-zone {
   flex: none;
-  width: 100%;
-  max-width: var(--content-col);
-  margin: 0 auto;
-  padding: 10px var(--content-pad) 18px;
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-4);
 }
 
 .composer {
   position: relative;
   background: var(--white);
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  padding: 14px 14px 10px 18px;
-  box-shadow: 0 10px 36px rgba(46, 94, 78, 0.06);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xl);
+  padding: var(--space-3) var(--space-2) var(--space-2) var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--fast) ease, box-shadow var(--fast) ease;
 }
 
 .composer:focus-within {
-  border-color: rgba(46, 94, 78, 0.32);
-  box-shadow: 0 10px 36px rgba(46, 94, 78, 0.1);
+  border-color: var(--emerald-hover);
+  box-shadow: var(--shadow-sm), 0 0 0 3px var(--emerald-tint);
 }
 
 .composer textarea {
@@ -810,41 +1131,47 @@
   background: transparent;
   font-family: var(--font-ui);
   font-size: 15px;
-  line-height: 1.55;
+  line-height: 24px;
   color: var(--charcoal);
-  padding: 0 0 10px;
-  max-height: 160px;
+  padding: 0 var(--space-2) var(--space-1) 0;
+  max-height: 168px;
 }
 
 .composer textarea::placeholder {
   color: var(--gray-light);
 }
 
-.composer textarea:disabled {
-  cursor: default;
-}
-
 .composer-tools {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
-.spacer {
-  flex: 1;
+.composer-hint {
+  margin: 0 0 6px var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--gold-ink);
+}
+
+.composer-msg {
+  font-size: var(--text-xs);
+  color: var(--red);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .send {
-  width: 34px;
-  height: 34px;
-  margin-left: 8px;
+  width: 32px;
+  height: 32px;
+  margin-left: var(--space-1);
   border-radius: 50%;
   background: var(--emerald);
   color: var(--white);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: background var(--fast) ease, opacity var(--fast) ease;
 }
 
 .send svg {
@@ -858,16 +1185,27 @@
 }
 
 .send:disabled {
-  opacity: 0.4;
-  cursor: default;
+  opacity: 0.35;
 }
 
+/* Stop: the same round control as Send, in the quiet outline of a secondary action. */
 .send.stop {
-  background: var(--red);
+  background: var(--white);
+  color: var(--emerald-dark);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.send.stop svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  stroke: none;
 }
 
 .send.stop:hover {
-  background: #b5493e;
+  background: var(--red-tint);
+  color: var(--red);
+  box-shadow: inset 0 0 0 1px var(--red-edge);
 }
 
 .send.stopping {

@@ -68,7 +68,7 @@ export function renderInstanceMenu(host: HTMLElement, ctx: InstanceMenuContext):
     row.append(
       el('span', `tb-dot tone-${toneOf(info)}`),
       el('span', 'tb-menu-name', info.name || info.id),
-      el('span', 'tb-menu-where', `${info.runnerName} · ${statusWord(info)}`),
+      el('span', 'tb-menu-where', `${info.runnerName} · ${statusWord(info).replace(/^./, (c) => c.toUpperCase())}`),
     );
     row.addEventListener('click', () => {
       ctx.close();
