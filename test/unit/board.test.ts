@@ -480,6 +480,20 @@ describe('board', () => {
     expect(daemon).toHaveBeenCalledWith('scheduler.resume', {});
   });
 
+  it('keeps a scrolled Backlog in place when New item opens', () => {
+    const items = Array.from({ length: 8 }, (_, i) => item({ number: i + 1 }));
+    const { board, col } = setup(items);
+    const list = col('backlog').querySelector('.bd-list') as HTMLElement;
+    // jsdom does not implement Element.scrollTo; the browser method is what jumps the column.
+    list.scrollTo = ((options?: ScrollToOptions) => {
+      list.scrollTop = options?.top ?? 0;
+    }) as typeof list.scrollTo;
+    list.scrollTop = 108;
+    board.create();
+    expect(document.querySelector('.bd-new-input')).not.toBeNull();
+    expect(list.scrollTop).toBe(108);
+  });
+
   it('keeps Done to the latest twenty until Show all', () => {
     const done = Array.from({ length: 23 }, (_, i) => item({ number: i + 1, status: 'done', updatedAt: i }));
     const { ids, col } = setup(done);

@@ -825,7 +825,6 @@ export function initBoard(ctx: BoardContext) {
     });
     creating = input;
     slot.appendChild(box);
-    cols.get('backlog')?.list.scrollTo?.({ top: 0 });
     input.focus();
   }
 
