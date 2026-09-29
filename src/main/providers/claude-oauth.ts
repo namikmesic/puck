@@ -15,8 +15,8 @@ import { LoginCancelledError, startLoopback, type LoopbackListener } from './loo
 import { createOAuthAccount, pkce, randomState, type LogoutFence } from './oauth';
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'; // Claude Code's public OAuth client
-const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
-const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
+const AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize';
+const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CALLBACK_PATH = '/callback';
 const SCOPE = 'org:create_api_key user:profile user:inference';
 
