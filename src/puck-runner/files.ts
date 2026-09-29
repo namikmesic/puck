@@ -3,7 +3,7 @@
  *
  *   config.sh  run.sh  svc.sh  VERSION        the scripts and the release version
  *   bin/node  bin/puck-runner.cjs            the bundled Node runtime and the runner
- *   .runner         { runnerId, name, serverUrl, labels, maxEnvironments, disableUpdate, owner, localSocket, serviceLabel }   0644
+ *   .runner         { runnerId, name, serverUrl, labels, maxEnvironments, disableUpdate, owner, localSocket, serviceLabel, appBundleId }   0644
  *   .credentials    { runnerId, keyFile, keyFingerprint }                                        0600
  *   .runner_key     the runner's Ed25519 private key, PKCS#8 PEM                                0600
  *   .service        the installed service unit, when svc.sh installed one                      0644
@@ -60,6 +60,9 @@ export function runnerRoot(env: NodeJS.ProcessEnv = process.env): string {
   return path.resolve(path.dirname(bundle), '..');
 }
 
+/** A macOS bundle identifier, like com.example.app. */
+export const BUNDLE_ID_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+
 export interface RunnerConfig {
   runnerId: string;
   name: string;
@@ -73,6 +76,8 @@ export interface RunnerConfig {
   localSocket: string | null;
   /** LaunchAgent label for this install, when it must not follow the runner name. */
   serviceLabel: string | null;
+  /** The app the LaunchAgent belongs to (AssociatedBundleIdentifiers), or null. */
+  appBundleId: string | null;
 }
 
 export interface RunnerCredentials {
@@ -126,6 +131,7 @@ export function readConfig(paths: RunnerPaths): RunnerConfig {
     owner: typeof c.owner === 'string' ? c.owner : null,
     localSocket: typeof c.localSocket === 'string' && c.localSocket ? c.localSocket : null,
     serviceLabel: typeof c.serviceLabel === 'string' && c.serviceLabel ? c.serviceLabel : null,
+    appBundleId: typeof c.appBundleId === 'string' && BUNDLE_ID_RE.test(c.appBundleId) ? c.appBundleId : null,
   };
 }
 

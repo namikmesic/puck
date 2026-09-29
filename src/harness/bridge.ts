@@ -105,8 +105,10 @@ export interface RunnerRow {
 
 /** The This Mac runner: installed by the app as a LaunchAgent, reached over a local socket. */
 export interface LocalRunnerState {
-  /** False on machines the runner does not ship for (it needs macOS on Apple silicon). */
+  /** False where the one-click runner cannot be set up: machines it does not ship for, or an isolated launch. */
   supported: boolean;
+  /** Why it cannot, in words; null when supported. */
+  unsupported: string | null;
   installed: boolean;
   runnerId: string | null;
   /** An install or uninstall in progress. */

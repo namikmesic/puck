@@ -9,7 +9,13 @@
  * macOS (launchd, as the user, no sudo: `./svc.sh install`): a LaunchAgent
  * at ~/Library/LaunchAgents/com.puck.runner.<name>.plist, kept alive while
  * it exits unsuccessfully. launchd has no "do not restart on this code",
- * so run.sh turns exit 78 into a clean exit under launchd.
+ * so run.sh turns exit 78 into a clean exit under launchd. Its program is
+ * the `puck-runner` launcher install writes next to run.sh, because macOS
+ * names the background item after the executable; the plist names the
+ * app's bundle id in AssociatedBundleIdentifiers when the runner was
+ * configured with one (This Mac). `start` bootstraps the agent and then
+ * kickstarts it: launchd may hold a freshly loaded RunAtLoad job back
+ * ("pended nondemand spawn"), so loading alone does not start the runner.
  *
  * The installed unit is recorded in `.service`, so `start`, `stop`,
  * `status`, `uninstall` and `config.sh remove` find it. Nothing else on the
@@ -32,6 +38,8 @@ export interface ServiceRecord {
   name: string;
   file: string;
   user?: string;
+  /** The launcher install wrote (launchd); absent in records from older runners. */
+  launcher?: string;
 }
 
 export interface ServiceDeps {
@@ -93,7 +101,24 @@ export function systemdUnit(opts: { name: string; root: string; user: string }):
   ].join('\n');
 }
 
-export function launchdPlist(opts: { label: string; root: string }): string {
+/** The LaunchAgent's program. macOS shows its file name as the background item's name. */
+export const LAUNCHER = 'puck-runner';
+
+export function launcherScript(): string {
+  return [
+    '#!/bin/sh',
+    '# The LaunchAgent\'s program: macOS names the background item after this file.',
+    '# Written by ./svc.sh install and removed by ./svc.sh uninstall; it runs ./run.sh.',
+    'DIR=$(cd "$(dirname "$0")" && pwd)',
+    'exec "$DIR/run.sh" "$@"',
+    '',
+  ].join('\n');
+}
+
+export function launchdPlist(opts: { label: string; root: string; appBundleId?: string | null }): string {
+  const associated = opts.appBundleId
+    ? ['  <key>AssociatedBundleIdentifiers</key>', '  <array>', `    <string>${xml(opts.appBundleId)}</string>`, '  </array>']
+    : [];
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -103,8 +128,9 @@ export function launchdPlist(opts: { label: string; root: string }): string {
     `  <string>${xml(opts.label)}</string>`,
     '  <key>ProgramArguments</key>',
     '  <array>',
-    `    <string>${xml(path.join(opts.root, 'run.sh'))}</string>`,
+    `    <string>${xml(path.join(opts.root, LAUNCHER))}</string>`,
     '  </array>',
+    ...associated,
     '  <key>WorkingDirectory</key>',
     `  <string>${xml(opts.root)}</string>`,
     '  <key>EnvironmentVariables</key>',
@@ -130,6 +156,8 @@ export function launchdPlist(opts: { label: string; root: string }): string {
     '',
   ].join('\n');
 }
+
+const why = (r: { stdout: string; stderr: string; code: number | null }): string => (r.stderr || r.stdout).trim().slice(-400) || `exit ${r.code}`;
 
 export function readServiceRecord(paths: RunnerPaths): ServiceRecord | null {
   try {
@@ -158,8 +186,25 @@ export class Service {
 
   private async must(file: string, args: string[], what: string): Promise<string> {
     const r = await this.deps.exec(file, args, { timeoutMs: 60_000 });
-    if (r.code !== 0) throw new ServiceError(`${what} failed: ${(r.stderr || r.stdout).trim().slice(-400)}`);
+    if (r.code !== 0) throw new ServiceError(`${what} failed: ${why(r)}`);
     return r.stdout;
+  }
+
+  /** Loads the LaunchAgent (an already loaded one is fine) and starts it. */
+  private async startLaunchd(r: ServiceRecord): Promise<void> {
+    const target = `${this.domain}/${r.name}`;
+    const boot = await this.deps.exec('launchctl', ['bootstrap', this.domain, r.file], { timeoutMs: 60_000 });
+    if (boot.code !== 0) {
+      const loaded = await this.deps.exec('launchctl', ['print', target], { timeoutMs: 60_000 });
+      if (loaded.code !== 0) throw new ServiceError(`launchctl bootstrap failed: ${why(boot)}`);
+    }
+    const kick = await this.deps.exec('launchctl', ['kickstart', target], { timeoutMs: 60_000 });
+    if (kick.code !== 0) {
+      throw new ServiceError(
+        `launchd did not start ${r.name} (launchctl kickstart: ${why(kick)}). ` +
+          `Check that its background item is allowed in System Settings → General → Login Items & Extensions, and see ${path.join(this.deps.paths.root, '_diag', 'service.log')}.`,
+      );
+    }
   }
 
   private record(): ServiceRecord {
@@ -195,9 +240,11 @@ export class Service {
     } else {
       const label = launchdLabel(this.deps.config.name, this.deps.config.serviceLabel);
       const file = path.join(this.deps.homedir, 'Library', 'LaunchAgents', `${label}.plist`);
+      const launcher = path.join(this.deps.paths.root, LAUNCHER);
       fs.mkdirSync(path.join(this.deps.paths.root, '_diag'), { recursive: true, mode: 0o700 });
-      writeFileAtomic(file, launchdPlist({ label, root: this.deps.paths.root }), 0o644);
-      record = { kind: 'launchd', name: label, file };
+      writeFileAtomic(launcher, launcherScript(), 0o755);
+      writeFileAtomic(file, launchdPlist({ label, root: this.deps.paths.root, appBundleId: this.deps.config.appBundleId }), 0o644);
+      record = { kind: 'launchd', name: label, file, launcher };
     }
     writeFileAtomic(this.deps.paths.service, JSON.stringify(record, null, 2) + '\n', 0o644);
     this.deps.print(`Installed ${record.name}. Start it with ${this.kind === 'systemd' ? 'sudo ' : ''}./svc.sh start`);
@@ -207,7 +254,7 @@ export class Service {
     const r = this.record();
     this.requireRoot('start');
     if (r.kind === 'systemd') await this.must('systemctl', ['start', r.name], `systemctl start ${r.name}`);
-    else await this.must('launchctl', ['bootstrap', this.domain, r.file], 'launchctl bootstrap');
+    else await this.startLaunchd(r);
     this.deps.print(`Started ${r.name}.`);
   }
 
@@ -244,6 +291,7 @@ export class Service {
     } else {
       await this.deps.exec('launchctl', ['bootout', `${this.domain}/${r.name}`]);
       fs.rmSync(r.file, { force: true });
+      if (r.launcher) fs.rmSync(r.launcher, { force: true });
     }
     fs.rmSync(this.deps.paths.service, { force: true });
     this.deps.print(`Uninstalled ${r.name}. Environments keep running.`);

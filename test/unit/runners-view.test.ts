@@ -219,7 +219,7 @@ describe('Add runner', () => {
   });
 
   it('This Mac installs the runner in one click', async () => {
-    const installed = runnersState({ local: { supported: true, installed: true, runnerId: LOCAL_ID, busy: null, detail: '', error: null } });
+    const installed = runnersState({ local: { supported: true, unsupported: null, installed: true, runnerId: LOCAL_ID, busy: null, detail: '', error: null } });
     const { card, bridge } = mount(runnersState(), { runnerInstallLocal: vi.fn(async () => installed) });
     btn(card, 'Add runner').click();
     await settle();
@@ -237,7 +237,7 @@ describe('Add runner', () => {
     btn(card, 'Set up This Mac').click();
     await settle();
     expect(say).toHaveBeenCalledWith('Docker is not running');
-    view.update(runnersState({ local: { supported: true, installed: false, runnerId: null, busy: 'installing', detail: 'Downloading runner 0.1.0…', error: null } }));
+    view.update(runnersState({ local: { supported: true, unsupported: null, installed: false, runnerId: null, busy: 'installing', detail: 'Downloading runner 0.1.0…', error: null } }));
     expect(card.textContent).toContain('This Mac: Downloading runner 0.1.0…');
     expect(btn(card, 'Setting up This Mac…').disabled).toBe(true);
   });
