@@ -304,6 +304,8 @@ export interface Snapshot {
   capacity: Capacity;
   inflight: InflightTurn[];
   asks: OpenAsk[];
+  /** The definition's repositories (`owner/name` and their directory); absent from older daemons. */
+  repos?: { github: string; dir: string }[];
 }
 
 /* ---------- Commands ---------- */

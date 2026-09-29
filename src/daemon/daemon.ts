@@ -718,6 +718,7 @@ export class Daemon {
       capacity: capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false),
       inflight: this.turns ? this.turns.inflight() : [],
       asks: this.turns ? this.turns.openAsks() : [],
+      repos: this.definition ? this.definition.repos.map((r) => ({ github: r.github, dir: r.dir })) : [],
     };
   }
 

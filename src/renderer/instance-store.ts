@@ -52,6 +52,8 @@ export interface EnvDaemonState {
   capacity: Capacity;
   /** Set by `daemon.upgrading` until the next snapshot. */
   upgrading: 'drain' | 'now' | null;
+  /** The definition's repositories, as of the snapshot. */
+  repos: { github: string; dir: string }[];
 }
 
 export interface InstanceStoreOptions {
@@ -271,6 +273,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         orchestratorSessionId: snapshot.orchestratorSessionId,
         capacity: snapshot.capacity ?? EMPTY_CAPACITY,
         upgrading: null,
+        repos: snapshot.repos ?? [],
       };
       for (const item of snapshot.items) items.set(item.id, item);
       order = snapshot.order.slice();
