@@ -25,7 +25,7 @@
 
 import { app } from 'electron';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -138,6 +138,56 @@ export function localName(hostname: string): string {
   return host ? `This Mac (${host})` : 'This Mac';
 }
 
+const MACHINE_TAG_RE = /^[0-9a-f]{4}$/;
+
+function machineTag(): string {
+  const file = path.join(d().dataDir(), 'this-mac.id');
+  let cur = '';
+  try {
+    cur = fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    cur = '';
+  }
+  if (MACHINE_TAG_RE.test(cur)) return cur;
+  const tag = randomBytes(2).toString('hex');
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${tag}\n`, { mode: 0o600 });
+  return tag;
+}
+
+function suffixedLocalName(base: string, tag: string): string {
+  if (base.startsWith('This Mac (') && base.endsWith(')')) return `${base.slice(0, -1)} ${tag})`;
+  return `This Mac (${tag})`;
+}
+
+function registrationTarget(existing: ServerRunner[], recordedId: string | null, hostname: string): { name: string; replace: boolean } {
+  const own = recordedId ? existing.find((r) => r.id === recordedId) : undefined;
+  if (own) return { name: own.name, replace: true };
+  const base = localName(hostname);
+  if (existing.some((r) => r.name === base)) return { name: suffixedLocalName(base, machineTag()), replace: false };
+  return { name: base, replace: false };
+}
+
+function serviceAlreadyUp(message: string): boolean {
+  return /already (bootstrapped|loaded|running)/i.test(message) || /Bootstrap failed: (5|17|37)\b/.test(message);
+}
+
+async function startRecorded(dir: string, socket: string): Promise<void> {
+  try {
+    await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('No service is installed')) {
+      await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+      await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+    } else if (!serviceAlreadyUp(message)) {
+      throw err;
+    }
+  }
+  progress('Waiting for the runner…');
+  await d().waitForSocket(socket, 60_000);
+}
+
 export function paths(dataDir = d().dataDir()): { dir: string; socket: string } {
   const dir = path.join(dataDir, 'runner');
   return { dir, socket: path.join(dir, 'local.sock') };
@@ -195,8 +245,8 @@ async function exclusive<T>(kind: 'installing' | 'uninstalling', fn: () => Promi
 
 /**
  * Installs, registers and starts the This Mac runner. `existing` is the
- * user's current runner list (a stale This Mac registration of the same
- * name is replaced).
+ * user's current runner list. Re-registration replaces only a runner id
+ * this Mac recorded; another runner's name is left alone.
  */
 export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
   return exclusive('installing', async () => {
@@ -208,10 +258,11 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     const already = readRunnerId(dir);
     if (already) {
       // A registration from an earlier install that the record lost: keep it, make sure it runs.
+      progress('Starting the runner…');
+      await startRecorded(dir, socket);
       const record = { runnerId: already, dir, socket };
       setLocalRunner(record);
-      progress('Starting the runner…');
-      await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000).catch(() => undefined);
+      log.info('this-mac.installed', { runnerId: already });
       return record;
     }
 
@@ -220,6 +271,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     const asset = releases.assets.find((a) => a.os === 'macos' && a.arch === 'arm64' && a.version === releases.latest);
     if (!asset) throw new Error('The Puck server publishes no runner for macOS on Apple silicon yet.');
 
+    const recordedId = localRunner()?.runnerId ?? null;
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     setLocalRunner({ runnerId: null, dir, socket });
@@ -238,21 +290,21 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       const reg = await api.registrationToken();
       tokenId = reg.id;
       fs.writeFileSync(tokenFile, reg.token, { mode: 0o600 });
-      const name = localName(d().hostname());
-      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', name, '--labels', 'local', '--local-socket', socket];
-      if (existing.some((r) => r.name === name)) args.push('--replace');
+      const target = registrationTarget(existing, recordedId, d().hostname());
+      const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket];
+      if (target.replace) args.push('--replace');
       await runner(dir, args, 'Registering the runner');
       fs.rmSync(tokenFile, { force: true });
       const runnerId = readRunnerId(dir);
       if (!runnerId) throw new Error('The runner did not record its registration.');
       const record = { runnerId, dir, socket };
-      setLocalRunner(record);
 
       progress('Starting the LaunchAgent…');
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
       await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
       progress('Waiting for the runner…');
       await d().waitForSocket(socket, 60_000);
+      setLocalRunner(record);
       log.info('this-mac.installed', { runnerId });
       return record;
     } catch (err) {

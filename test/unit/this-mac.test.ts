@@ -29,7 +29,8 @@ interface Call {
   args: string[];
 }
 
-function fakeExec(calls: Call[], opts: { failConfig?: string } = {}): thisMac.Exec {
+function fakeExec(calls: Call[], opts: { failConfig?: string; svc?: (sub: string, nth: number) => { code: number; stderr: string } | null } = {}): thisMac.Exec {
+  const svcCount = new Map<string, number>();
   return async (file, args) => {
     calls.push({ file, args });
     const dir = path.join(data, 'runner');
@@ -38,6 +39,13 @@ function fakeExec(calls: Call[], opts: { failConfig?: string } = {}): thisMac.Ex
       return { code: 0, stdout: '', stderr: '' };
     }
     const [, command, ...rest] = args;
+    if (command === 'svc' && opts.svc) {
+      const sub = rest[0] ?? '';
+      const n = (svcCount.get(sub) ?? 0) + 1;
+      svcCount.set(sub, n);
+      const failed = opts.svc(sub, n);
+      if (failed) return { code: failed.code, stdout: '', stderr: failed.stderr };
+    }
     if (command === 'config' && rest[0] !== 'remove') {
       if (opts.failConfig) return { code: 1, stdout: '', stderr: opts.failConfig };
       const tokenFile = rest[rest.indexOf('--token-file') + 1];
@@ -47,6 +55,14 @@ function fakeExec(calls: Call[], opts: { failConfig?: string } = {}): thisMac.Ex
     }
     return { code: 0, stdout: '', stderr: '' };
   };
+}
+
+function deps(exec: thisMac.Exec, hostname: string, waitForSocket: () => Promise<void> = async () => undefined): void {
+  thisMac.useThisMacDeps({ exec, platform: 'darwin', arch: 'arm64', hostname: () => hostname, dataDir: () => data, waitForSocket });
+}
+
+function configName(args: string[]): string {
+  return args[args.indexOf('--name') + 1];
 }
 
 async function signIn(): Promise<void> {
@@ -110,11 +126,143 @@ describe('This Mac runner', () => {
     expect(thisMac.localState()).toMatchObject({ installed: true, runnerId: RUNNER_ID, busy: null, error: null });
   });
 
-  it('replaces a stale registration of the same name', async () => {
+  it('registers a second Mac with the same hostname under a stable suffixed name', async () => {
     const calls: Call[] = [];
-    thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
-    await thisMac.install([{ name: 'This Mac (mbp)' } as never]);
+    deps(fakeExec(calls), 'MacBook-Pro.local');
+    const other = { id: 'rnr_01J8Z3X0000000000000000099', name: 'This Mac (MacBook-Pro)' };
+    await thisMac.install([other as never]);
+    const name = configName(calls[1].args);
+    expect(calls[1].args).not.toContain('--replace');
+    expect(name).toMatch(/^This Mac \(MacBook-Pro [0-9a-f]{4}\)$/);
+    expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,63}$/);
+
+    fs.rmSync(path.join(data, 'runner', '.runner'));
+    setLocalRunner(null);
+    calls.length = 0;
+    await thisMac.install([other as never]);
+    expect(configName(calls[1].args)).toBe(name);
+    expect(calls[1].args).not.toContain('--replace');
+  });
+
+  it('re-registers only the runner id this Mac recorded', async () => {
+    const calls: Call[] = [];
+    const own = 'rnr_01J8Z3X0000000000000000002';
+    const dir = path.join(data, 'runner');
+    setLocalRunner({ runnerId: own, dir, socket: path.join(dir, 'local.sock') });
+    deps(fakeExec(calls), 'mbp.local');
+    await thisMac.install([
+      { id: 'rnr_01J8Z3X0000000000000000099', name: 'This Mac (mbp)' } as never,
+      { id: own, name: 'Office Mac' } as never,
+    ]);
     expect(calls[1].args).toContain('--replace');
+    expect(configName(calls[1].args)).toBe('Office Mac');
+  });
+
+  it('does not replace another Mac when the recorded id is not that runner', async () => {
+    const calls: Call[] = [];
+    const dir = path.join(data, 'runner');
+    setLocalRunner({ runnerId: 'rnr_01J8Z3X0000000000000000008', dir, socket: path.join(dir, 'local.sock') });
+    deps(fakeExec(calls), 'mbp');
+    await thisMac.install([{ id: 'rnr_01J8Z3X0000000000000000099', name: 'This Mac (mbp)' } as never]);
+    expect(calls[1].args).not.toContain('--replace');
+    expect(configName(calls[1].args)).toMatch(/^This Mac \(mbp [0-9a-f]{4}\)$/);
+  });
+
+  it('installs the LaunchAgent when a recorded runner has no service, then waits for the socket', async () => {
+    const dir = path.join(data, 'runner');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub, n) => (sub === 'start' && n === 1 ? { code: 1, stderr: 'No service is installed. Install it first: ./svc.sh install' } : null),
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    const record = await thisMac.install([]);
+    expect(record.runnerId).toBe(RUNNER_ID);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+    expect(calls.map((c) => c.args.slice(1))).toEqual([
+      ['svc', 'start'],
+      ['svc', 'install'],
+      ['svc', 'start'],
+    ]);
+    expect(waited).toBe(1);
+    expect(thisMac.localState()).toMatchObject({ installed: true, error: null });
+  });
+
+  it('treats an already-running LaunchAgent as up', async () => {
+    const dir = path.join(data, 'runner');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub) => (sub === 'start' ? { code: 1, stderr: 'launchctl bootstrap failed: Bootstrap failed: 5: Input/output error' } : null),
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
+    expect(calls.map((c) => c.args.slice(1))).toEqual([['svc', 'start']]);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('surfaces a LaunchAgent start failure and does not mark This Mac installed', async () => {
+    const dir = path.join(data, 'runner');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub, n) => {
+          if (sub === 'start' && n === 1) return { code: 1, stderr: 'No service is installed. Install it first: ./svc.sh install' };
+          if (sub === 'start') return { code: 1, stderr: 'launchctl bootstrap failed: Bootstrap failed: 1: Operation not permitted' };
+          return null;
+        },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await expect(thisMac.install([])).rejects.toThrow(/Operation not permitted/);
+    expect(calls.map((c) => c.args.slice(1))).toEqual([
+      ['svc', 'start'],
+      ['svc', 'install'],
+      ['svc', 'start'],
+    ]);
+    expect(waited).toBe(0);
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+    expect(thisMac.localState().installed).toBe(false);
+  });
+
+  it('does not mark This Mac installed when the new LaunchAgent fails to start', async () => {
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub) => (sub === 'start' ? { code: 1, stderr: 'launchctl bootstrap failed: Bootstrap failed: 1: Operation not permitted' } : null),
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await expect(thisMac.install([])).rejects.toThrow(/Operation not permitted/);
+    expect(waited).toBe(0);
+    expect(fs.existsSync(path.join(data, 'runner', '.runner'))).toBe(true);
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+    expect(thisMac.localState().installed).toBe(false);
   });
 
   it('refuses a download that does not match its sha256 and leaves nothing behind', async () => {
