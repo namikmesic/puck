@@ -89,9 +89,11 @@ async function waitFor(ok: () => boolean): Promise<void> {
   if (!ok()) throw new Error('timed out');
 }
 
-function mount(over: { instances?: InstanceInfo[]; history?: string } = {}) {
+function mount(over: { instances?: InstanceInfo[]; history?: string; failSnapshots?: number } = {}) {
   const ui = els();
   const daemonCalls: { op: string; args: unknown }[] = [];
+  let failedSnapshots = 0;
+  const attachedIds = new Set((over.instances ?? []).filter((info) => info.attach === 'attached').map((info) => info.id));
   let onInstance: (e: { kind: 'upsert'; instance: InstanceInfo } | { kind: 'removed'; envId: string }) => void = () => undefined;
   let onDaemon: (e: DaemonEventPayload) => void = () => undefined;
   let onRunner: (e: never) => void = () => undefined;
@@ -139,9 +141,14 @@ function mount(over: { instances?: InstanceInfo[]; history?: string } = {}) {
         },
       ],
     })),
-    daemon: vi.fn(async (_envId: string, op: string, args: unknown) => {
+    daemon: vi.fn(async (envId: string, op: string, args: unknown) => {
       daemonCalls.push({ op, args });
-      if (op === 'snapshot.get') return snap();
+      if (op === 'snapshot.get') {
+        if (!attachedIds.has(envId)) throw new Error('The environment is not attached yet.');
+        failedSnapshots += 1;
+        if (over.failSnapshots && failedSnapshots <= over.failSnapshots) throw new Error('snapshot failed');
+        return snap();
+      }
       if (op === 'session.history') {
         return {
           entries: over.history ? [{ kind: 'user', text: over.history, author: 'user', ts: 1 }] : [],
@@ -162,7 +169,24 @@ function mount(over: { instances?: InstanceInfo[]; history?: string } = {}) {
     },
   } as unknown as PuckBridge;
   const shell = initV2Shell({ bridge, els: ui });
-  return { ui, bridge, shell, daemonCalls, emitInstance: (e: Parameters<typeof onInstance>[0]) => onInstance(e), emitDaemon: (e: DaemonEventPayload) => onDaemon(e) };
+  return {
+    ui,
+    bridge,
+    shell,
+    daemonCalls,
+    emitInstance: (e: Parameters<typeof onInstance>[0]) => {
+      if (e.kind === 'upsert' && e.instance.attach === 'attached') attachedIds.add(e.instance.id);
+      else if (e.kind === 'upsert') attachedIds.delete(e.instance.id);
+      else attachedIds.delete(e.envId);
+      onInstance(e);
+    },
+    emitDaemon: (e: DaemonEventPayload) => onDaemon(e),
+  };
+}
+
+async function attachCurrent(env: { bridge: PuckBridge; emitInstance: (e: { kind: 'upsert'; instance: InstanceInfo }) => void }): Promise<void> {
+  await waitFor(() => (env.bridge.instanceOpen as ReturnType<typeof vi.fn>).mock.calls.length >= 1);
+  env.emitInstance({ kind: 'upsert', instance: instance({ current: true, attach: 'attached' }) });
 }
 
 describe('v2 shell', () => {
@@ -207,7 +231,9 @@ describe('v2 shell', () => {
   });
 
   it('applies daemon events in seq order and replaces the chat on a snapshot', async () => {
-    const { ui, emitDaemon, daemonCalls } = mount({ instances: [instance({ current: true })], history: 'remember me' });
+    const env = mount({ instances: [instance({ current: true, attach: 'connecting' })], history: 'remember me' });
+    const { ui, emitDaemon, daemonCalls } = env;
+    await attachCurrent(env);
     await waitFor(() => ui.chat.textContent?.includes('remember me') === true);
     emitDaemon({
       envId: ENV,
@@ -243,7 +269,9 @@ describe('v2 shell', () => {
   });
 
   it('sends the orchestrator message through the daemon', async () => {
-    const { ui, daemonCalls } = mount({ instances: [instance({ current: true })], history: 'hello' });
+    const env = mount({ instances: [instance({ current: true, attach: 'connecting' })], history: 'hello' });
+    const { ui, daemonCalls } = env;
+    await attachCurrent(env);
     await waitFor(() => ui.chat.textContent?.includes('hello') === true);
     ui.prompt.value = 'ship it';
     ui.composer.requestSubmit();
@@ -253,9 +281,46 @@ describe('v2 shell', () => {
   });
 
   it('reopens on the current environment and renders its transcript', async () => {
-    const { ui, bridge } = mount({ instances: [instance({ current: true })], history: 'still here' });
+    const env = mount({ instances: [instance({ current: true, attach: 'connecting' })], history: 'still here' });
+    const { ui, bridge } = env;
+    await attachCurrent(env);
     await waitFor(() => ui.chat.textContent?.includes('still here') === true);
     expect(bridge.instanceOpen).toHaveBeenCalledWith(ENV);
     expect(ui.list.querySelector('.v2-env.selected')?.getAttribute('data-env')).toBe(ENV);
+  });
+
+  it('buffers daemon events until attach, then snapshots and drains them', async () => {
+    const env = mount({ instances: [instance({ current: true, attach: 'connecting' })], history: 'remember me' });
+    await waitFor(() => (env.bridge.instanceOpen as ReturnType<typeof vi.fn>).mock.calls.length === 1);
+    expect(env.daemonCalls.filter((call) => call.op === 'snapshot.get')).toHaveLength(0);
+    env.emitDaemon({
+      envId: ENV,
+      seq: 1,
+      at: 1,
+      ev: { kind: 'turn.user', sessionId: 'ses_orch', entry: { kind: 'user', text: 'early', author: 'user', ts: 1 } },
+    });
+    expect(env.ui.chat.textContent).not.toContain('early');
+    expect(env.ui.chat.textContent).not.toContain('remember me');
+    env.emitInstance({ kind: 'upsert', instance: instance({ current: true, attach: 'attached' }) });
+    await waitFor(() => env.ui.chat.textContent?.includes('remember me') === true && env.ui.chat.textContent?.includes('early') === true);
+  });
+
+  it('shows a snapshot failure and retries on the next attach', async () => {
+    const env = mount({ instances: [instance({ current: true, attach: 'connecting' })], history: 'remember me', failSnapshots: 1 });
+    await waitFor(() => (env.bridge.instanceOpen as ReturnType<typeof vi.fn>).mock.calls.length === 1);
+    env.emitInstance({ kind: 'upsert', instance: instance({ current: true, attach: 'attached' }) });
+    await waitFor(() => env.ui.error.textContent === 'snapshot failed');
+    expect(env.ui.chat.textContent).not.toContain('remember me');
+    env.emitInstance({ kind: 'upsert', instance: instance({ current: true, attach: 'reconnecting' }) });
+    env.emitInstance({ kind: 'upsert', instance: instance({ current: true, attach: 'attached' }) });
+    await waitFor(() => env.ui.chat.textContent?.includes('remember me') === true);
+  });
+
+  it('shows an open failure for the environment that was clicked', async () => {
+    const { ui, bridge } = mount();
+    await waitFor(() => ui.list.querySelector('button') !== null);
+    (bridge.instanceOpen as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('relay down'));
+    (ui.list.querySelector('button') as HTMLButtonElement).click();
+    await waitFor(() => ui.error.textContent === 'relay down');
   });
 });

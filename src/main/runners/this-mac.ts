@@ -34,8 +34,8 @@ import type { ServerRunner } from '../../harness/server-api';
 import { log } from '../log';
 import * as api from '../server/api';
 import { serverDeps } from '../server/http';
-import { current } from '../server/session';
-import { localRunner, setLocalRunner, type LocalRunnerRecord } from './store';
+import { current, onSessionChange } from '../server/session';
+import { forgetLocalRunner, localRunner, setLocalRunner, type LocalRunnerRecord } from './store';
 
 /** Unix socket paths are limited to 104 bytes on macOS. */
 const MAX_SOCKET_PATH_BYTES = 103;
@@ -139,6 +139,12 @@ export function serviceLabelFor(accountId: string): string {
   return `com.puck.runner.${accountKey(accountId)}`;
 }
 
+/** Advances on every Puck sign-in and sign-out. */
+let sessionGeneration = 0;
+onSessionChange(() => {
+  sessionGeneration += 1;
+});
+
 function accountId(): string {
   const id = current()?.user.id;
   if (!id) throw new Error('Sign in to Puck first (Settings → Providers → GitHub).');
@@ -189,18 +195,21 @@ function serviceAlreadyUp(message: string): boolean {
   return /already (bootstrapped|loaded|running)/i.test(message) || /Bootstrap failed: (5|17|37)\b/.test(message);
 }
 
-async function startRecorded(dir: string, socket: string): Promise<void> {
+async function startRecorded(dir: string, socket: string, gate: () => void): Promise<void> {
   try {
     await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
   } catch (err) {
+    gate();
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes('No service is installed')) {
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+      gate();
       await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
     } else if (!serviceAlreadyUp(message)) {
       throw err;
     }
   }
+  gate();
   progress('Waiting for the runner…');
   await d().waitForSocket(socket, 60_000);
 }
@@ -270,15 +279,22 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
   return exclusive('installing', async () => {
     if (!supported()) throw new Error('The This Mac runner needs macOS on Apple silicon. Add this Mac as a runner by hand instead.');
     const id = accountId();
+    const generation = sessionGeneration;
+    const switched = (): boolean => sessionGeneration !== generation || current()?.user.id !== id;
+    const gate = (): void => {
+      if (switched()) throw new Error('The Puck session changed; try again.');
+    };
     const { dir, socket } = pathsFor(d().dataDir(), id);
     if (Buffer.byteLength(socket, 'utf8') > MAX_SOCKET_PATH_BYTES) {
       throw new Error(`Puck's data folder path is too long for the runner's local socket (${socket}).`);
     }
+    const recordedId = localRunner()?.runnerId ?? null;
     const already = readRunnerId(dir);
     if (already) {
       // A registration from an earlier install that the record lost: keep it, make sure it runs.
       progress('Starting the runner…');
-      await startRecorded(dir, socket);
+      await startRecorded(dir, socket, gate);
+      gate();
       const record = { runnerId: already, dir, socket, accountId: id };
       setLocalRunner(record);
       log.info('this-mac.installed', { runnerId: already });
@@ -287,10 +303,10 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
 
     progress('Finding the runner release…');
     const releases = await api.releases();
+    gate();
     const asset = releases.assets.find((a) => a.os === 'macos' && a.arch === 'arm64' && a.version === releases.latest);
     if (!asset) throw new Error('The Puck server publishes no runner for macOS on Apple silicon yet.');
 
-    const recordedId = localRunner()?.runnerId ?? null;
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     setLocalRunner({ runnerId: null, dir, socket, accountId: id });
@@ -300,19 +316,23 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     try {
       progress(`Downloading runner ${asset.version}…`);
       await download(asset.url, asset.sha256, tarball);
+      gate();
       progress('Unpacking…');
       const untar = await d().exec('/usr/bin/tar', ['-xzf', tarball, '-C', dir], { timeoutMs: 120_000 });
+      gate();
       if (untar.code !== 0) throw new Error(`Unpacking the runner failed: ${untar.stderr.trim().slice(-300)}`);
       fs.rmSync(tarball, { force: true });
 
       progress('Registering with the Puck server…');
       const reg = await api.registrationToken();
       tokenId = reg.id;
+      gate();
       fs.writeFileSync(tokenFile, reg.token, { mode: 0o600 });
       const target = registrationTarget(existing, recordedId, d().hostname());
       const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket, '--service-label', serviceLabelFor(id)];
       if (target.replace) args.push('--replace');
       await runner(dir, args, 'Registering the runner');
+      gate();
       fs.rmSync(tokenFile, { force: true });
       const runnerId = readRunnerId(dir);
       if (!runnerId) throw new Error('The runner did not record its registration.');
@@ -320,9 +340,12 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
 
       progress('Starting the LaunchAgent…');
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+      gate();
       await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+      gate();
       progress('Waiting for the runner…');
       await d().waitForSocket(socket, 60_000);
+      gate();
       setLocalRunner(record);
       log.info('this-mac.installed', { runnerId });
       return record;
@@ -330,9 +353,9 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       fs.rmSync(tokenFile, { force: true });
       fs.rmSync(tarball, { force: true });
       if (!readRunnerId(dir)) {
-        // Nothing registered: leave no half-installed runner behind.
-        fs.rmSync(dir, { recursive: true, force: true });
-        setLocalRunner(null);
+        // Nothing registered: leave no half-installed runner behind for this account.
+        if (!switched()) fs.rmSync(dir, { recursive: true, force: true });
+        forgetLocalRunner(id);
       }
       throw err;
     } finally {
@@ -353,7 +376,8 @@ export function uninstall(): Promise<void> {
       await runner(record.dir, ['svc', 'uninstall'], 'Removing the LaunchAgent', 60_000).catch(() => undefined);
     }
     fs.rmSync(record.dir, { recursive: true, force: true });
-    setLocalRunner(null);
+    if (record.accountId) forgetLocalRunner(record.accountId);
+    else setLocalRunner(null);
     log.info('this-mac.uninstalled', { runnerId: record.runnerId });
   });
 }

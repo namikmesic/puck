@@ -44,7 +44,11 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
   let cursor: number | null = null;
   let viewGen = 0;
   let resyncing = false;
+  let resyncGen = 0;
   let resyncAt: number | null = null;
+  let snapshotFlight: Promise<void> | null = null;
+  let snapshotTicket: object | null = null;
+  const attachWaiters: { envId: string; gen: number; resolve: () => void }[] = [];
   const buffered = new Map<number, DaemonEvent>();
 
   function say(text: string): void {
@@ -124,17 +128,72 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
     drain();
   }
 
+  function dropWaiters(): void {
+    const pending = attachWaiters.splice(0);
+    for (const waiter of pending) waiter.resolve();
+  }
+
+  function releaseAttached(envId: string): void {
+    for (let i = attachWaiters.length - 1; i >= 0; i--) {
+      const waiter = attachWaiters[i];
+      if (waiter && waiter.envId === envId && waiter.gen === viewGen) {
+        attachWaiters.splice(i, 1);
+        waiter.resolve();
+      }
+    }
+  }
+
+  function whenAttached(envId: string, gen: number): Promise<void> {
+    if (gen !== viewGen || openId !== envId) return Promise.resolve();
+    if (instances.get(envId)?.attach === 'attached') return Promise.resolve();
+    return new Promise((resolve) => {
+      attachWaiters.push({ envId, gen, resolve });
+    });
+  }
+
+  function requestSnapshot(envId: string): Promise<void> {
+    if (openId !== envId || cursor !== null) return Promise.resolve();
+    if (snapshotFlight) return snapshotFlight;
+    const gen = viewGen;
+    const ticket = {};
+    const flight = (async () => {
+      try {
+        await whenAttached(envId, gen);
+        if (gen !== viewGen || openId !== envId || cursor !== null) return;
+        if (instances.get(envId)?.attach !== 'attached') return;
+        const snapshot = await bridge.daemon(envId, 'snapshot.get', {});
+        if (gen !== viewGen || openId !== envId) return;
+        say('');
+        await showSnapshot(envId, snapshot);
+      } finally {
+        if (snapshotTicket === ticket) {
+          snapshotFlight = null;
+          snapshotTicket = null;
+        }
+      }
+    })();
+    snapshotFlight = flight;
+    snapshotTicket = ticket;
+    return flight;
+  }
+
   async function resync(envId: string): Promise<void> {
     if (resyncing || envId !== openId) return;
     resyncing = true;
     resyncAt = cursor;
+    const gen = viewGen;
+    const mine = ++resyncGen;
     try {
+      await whenAttached(envId, gen);
+      if (gen !== viewGen || envId !== openId) return;
+      if (instances.get(envId)?.attach !== 'attached') return;
       const snapshot = await bridge.daemon(envId, 'snapshot.get', {});
-      if (envId === openId) await showSnapshot(envId, snapshot);
+      if (gen !== viewGen || envId !== openId) return;
+      await showSnapshot(envId, snapshot);
     } catch (err) {
-      say(errText(err));
+      if (gen === viewGen && envId === openId) say(errText(err));
     } finally {
-      resyncing = false;
+      if (mine === resyncGen) resyncing = false;
     }
   }
 
@@ -160,7 +219,12 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
       btn.type = 'button';
       btn.dataset.env = info.id;
       btn.textContent = `${info.name} · ${info.runnerName} · ${info.op?.stage ?? info.status}`;
-      btn.addEventListener('click', () => void open(info.id));
+      btn.addEventListener('click', () => {
+        const id = info.id;
+        void open(id).catch((err) => {
+          if (openId === id) say(errText(err));
+        });
+      });
       els.list.appendChild(btn);
     }
   }
@@ -269,17 +333,21 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
     cursor = null;
     orchestratorId = null;
     resyncAt = null;
+    resyncing = false;
+    resyncGen++;
     buffered.clear();
     viewGen++;
+    dropWaiters();
+    snapshotFlight = null;
+    snapshotTicket = null;
+    const gen = viewGen;
     els.chat.textContent = '';
     renderList();
     const known = instances.get(envId);
     if (known) showProgress(known);
     await bridge.instanceOpen(envId);
-    if (openId !== envId) return;
-    const snapshot = await bridge.daemon(envId, 'snapshot.get', {});
-    if (openId !== envId) return;
-    await showSnapshot(envId, snapshot);
+    if (gen !== viewGen || openId !== envId) return;
+    await requestSnapshot(envId);
   }
 
   function secretValues(): Record<string, string> {
@@ -358,9 +426,19 @@ export function initV2Shell(ctx: { bridge: PuckBridge; els: V2Elements }): V2She
   }
 
   bridge.onInstanceEvent((event) => {
-    if (event.kind === 'removed') instances.delete(event.envId);
-    else upsert(event.instance);
-    if (event.kind === 'removed') renderList();
+    if (event.kind === 'removed') {
+      instances.delete(event.envId);
+      renderList();
+      return;
+    }
+    upsert(event.instance);
+    if (event.instance.attach !== 'attached') return;
+    releaseAttached(event.instance.id);
+    if (event.instance.id === openId && cursor === null) {
+      void requestSnapshot(event.instance.id).catch((err) => {
+        if (openId === event.instance.id) say(errText(err));
+      });
+    }
   });
   bridge.onDaemonEvent(onDaemon);
   bridge.onRunnerEvent((event) => {

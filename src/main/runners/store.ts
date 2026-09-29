@@ -96,6 +96,15 @@ export function forgetKey(runnerId: string): void {
   store.persist();
 }
 
+/** Drops one account's This Mac record. Every other account's record stays. */
+export function forgetLocalRunner(accountId: string): void {
+  if (!accountId) return;
+  const state = store.read();
+  if (!state.accounts[accountId]) return;
+  delete state.accounts[accountId];
+  store.persist();
+}
+
 /** The This Mac install for the signed-in account, or null when signed out or unset. */
 export function localRunner(): LocalRunnerRecord | null {
   const id = current()?.user.id;

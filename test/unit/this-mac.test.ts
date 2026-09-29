@@ -30,9 +30,13 @@ interface Call {
   args: string[];
 }
 
-function fakeExec(calls: Call[], opts: { failConfig?: string; svc?: (sub: string, nth: number) => { code: number; stderr: string } | null } = {}): thisMac.Exec {
+function fakeExec(
+  calls: Call[],
+  opts: { failConfig?: string; pauseTar?: () => Promise<void>; svc?: (sub: string, nth: number) => { code: number; stderr: string } | null } = {},
+): thisMac.Exec {
   const svcCount = new Map<string, number>();
   return async (file, args) => {
+    if (file === '/usr/bin/tar' && opts.pauseTar) await opts.pauseTar();
     calls.push({ file, args });
     const socketAt = args.indexOf('--local-socket');
     const dir = file === '/usr/bin/tar' ? args[args.indexOf('-C') + 1] : socketAt === -1 ? '' : path.dirname(args[socketAt + 1]);
@@ -335,6 +339,49 @@ describe('This Mac runner', () => {
     expect(Buffer.byteLength(b.socket)).toBeLessThanOrEqual(103);
     expect(a.dir).not.toBe(b.dir);
     expect(thisMac.serviceLabelFor(`usr_${'A'.repeat(26)}`)).not.toBe(thisMac.serviceLabelFor(`usr_${'B'.repeat(26)}`));
+  });
+
+  it('aborts install when the session changes and leaves the new account record', async () => {
+    const calls: Call[] = [];
+    let release = (): void => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let paused = false;
+    deps(
+      fakeExec(calls, {
+        pauseTar: async () => {
+          paused = true;
+          await hold;
+        },
+      }),
+      'mbp.local',
+    );
+    const aId = current()?.user.id ?? '';
+    const installing = thisMac.install([]);
+    try {
+      for (let i = 0; i < 400 && !paused; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(paused).toBe(true);
+      await account.logout();
+      await signIn('bee');
+      const beeId = current()?.user.id ?? '';
+      expect(beeId).not.toBe(aId);
+      setLocalRunner({ runnerId: 'rnr_bee', dir: path.join(data, 'bee'), socket: path.join(data, 'bee', 'sock'), accountId: beeId });
+      release();
+      await expect(installing).rejects.toThrow(/session changed/);
+      expect(calls.some((c) => c.args.includes('config') || c.args.includes('svc'))).toBe(false);
+      expect(localRunner()).toMatchObject({ runnerId: 'rnr_bee', accountId: beeId });
+      expect(fs.existsSync(thisMac.pathsFor(data, aId).dir)).toBe(true);
+      expect(fs.existsSync(path.join(thisMac.pathsFor(data, aId).dir, '.runner'))).toBe(false);
+      setLocalRunner(null);
+    } finally {
+      release();
+      await installing.catch(() => undefined);
+    }
+    await account.logout();
+    await signIn('octo');
+    expect(current()?.user.id).toBe(aId);
+    expect(localRunner()).toBeNull();
   });
 
   it('lets a second account install beside the first and leaves the first runner in place', async () => {
