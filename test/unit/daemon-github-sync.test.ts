@@ -1687,6 +1687,12 @@ describe('ci_rerun', () => {
     fake.gh.checkRuns.set(SHA, [check(60, 'test', 'failure'), check(61, 'lint', 'success'), check(62, 'deploy', 'skipped')]);
   }
 
+  /** `deploy` was skipped by `if:`, so the re-run does not start it again. */
+  function ifSkippedDeploy(): void {
+    fake.gh.jobs.set(50, [job(60, 'test', 'failure'), job(61, 'lint', 'success'), job(63, 'deploy', 'skipped')]);
+    fake.gh.checkRuns.set(SHA, [check(60, 'test', 'failure'), check(61, 'lint', 'success'), check(63, 'deploy', 'skipped')]);
+  }
+
   /** One queued job of the re-run finishes; the others stay as they are. */
   function completeQueued(runId: number, name: string, conclusion: string): void {
     const run = findRun(runId);
@@ -1783,24 +1789,48 @@ describe('ci_rerun', () => {
       conclusion: 'success',
       state: 'success',
       notice: 'W-1 PR #7: all 3 checks passed.',
-      jobs: ['test', 'deploy'],
+      jobs: ['test'],
       setup: () => {
         skippedDeploy();
         fake.gh.jobsStale.add(50);
       },
-      beforePending: () => completeQueued(50, 'test', 'success'),
+      beforePending: () => undefined,
     },
     {
       name: 'passes after a skipped dependent when the jobs re-read fails',
       conclusion: 'success',
       state: 'success',
       notice: 'W-1 PR #7: all 3 checks passed.',
-      jobs: ['test', 'deploy'],
+      jobs: ['test'],
       setup: () => {
         skippedDeploy();
         fake.gh.jobsDownAfterRerun.add(50);
       },
-      beforePending: () => completeQueued(50, 'test', 'success'),
+      beforePending: () => undefined,
+    },
+    {
+      name: 'passes when deploy was skipped by if and the jobs re-read is stale',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test'],
+      setup: () => {
+        ifSkippedDeploy();
+        fake.gh.jobsStale.add(50);
+      },
+      beforePending: () => undefined,
+    },
+    {
+      name: 'passes when deploy was skipped by if and the jobs re-read fails',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test'],
+      setup: () => {
+        ifSkippedDeploy();
+        fake.gh.jobsDownAfterRerun.add(50);
+      },
+      beforePending: () => undefined,
     },
   ])('reports the re-run result when it $name, never the result it replaced', async (c) => {
     const item = await reported(c.setup);
@@ -1911,6 +1941,59 @@ describe('ci_rerun', () => {
     if (c.started) finishRerun(50, 'failure');
     await pollAll();
     expect(texts()).toHaveLength(2);
+    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+  });
+
+  it.each([
+    {
+      name: 'while a later run\'s jobs are read',
+      method: 'GET',
+      at: /\/actions\/runs\/51\/jobs$/,
+      during: () => undefined,
+    },
+    {
+      name: 'when a later run\'s jobs read fails',
+      method: 'GET',
+      at: /\/actions\/runs\/51\/jobs$/,
+      during: () => fake.gh.jobsDown.add(51),
+    },
+    {
+      name: 'when a later run\'s re-run request fails',
+      method: 'POST',
+      at: /\/actions\/runs\/51\/rerun-failed-jobs$/,
+      during: () => fake.gh.rerunDown.add(51),
+    },
+  ])('a new push $name reports the re-run already started as untracked', async (c) => {
+    const item = await reported(() => {
+      fake.gh.runs.set(SHA, [...(fake.gh.runs.get(SHA) ?? []), { id: 51, name: 'E2E', status: 'completed', conclusion: 'failure', head_sha: SHA }]);
+      fake.gh.jobs.set(51, [job(80, 'e2e', 'failure')]);
+      fake.gh.checkRuns.set(SHA, [...(fake.gh.checkRuns.get(SHA) ?? []), check(80, 'e2e', 'failure')]);
+    });
+    const gate = hold(c.method, c.at);
+    const pending = sync.ciRerun(current(item)).then(
+      (value) => ({ value, error: null as Error | null }),
+      (error: Error) => ({ value: null, error }),
+    );
+    await gate.at;
+    c.during();
+    (fake.gh.pulls.get(7) as { head: { sha: string } }).head.sha = SHA2;
+    fake.gh.checkRuns.set(SHA2, [check(90, 'test', 'success'), check(91, 'lint', 'success')]);
+    await pollAll();
+    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+    gate.release();
+    const outcome = await pending;
+
+    expect(outcome.error).toBeNull();
+    expect(fake.gh.reruns).toEqual([50]);
+    expect(outcome.value).toMatchObject({ rerun: [{ run: 'CI', jobs: ['test'] }], note: expect.stringMatching(/not tracked/) });
+    const read = sync.ciRead(current(item));
+    expect(read).toMatchObject({ sha: SHA2, state: 'success' });
+    expect(read).not.toHaveProperty('rerun');
+    expect(texts().at(-1)).toBe('W-1 PR #7: all 2 checks passed.');
+
+    finishRerun(50, 'failure');
+    await pollAll();
+    expect(texts().filter((t) => t.includes('all 2 checks passed.'))).toHaveLength(1);
     expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
   });
 

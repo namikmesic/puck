@@ -354,10 +354,9 @@ function failedJobsReplaced(failed: readonly GhJob[], after: readonly GhJob[]): 
 }
 
 function jobsRecorded(failed: readonly GhJob[], before: readonly GhJob[], after: readonly GhJob[] | null): GhJob[] {
+  if (after === null || !failedJobsReplaced(failed, after)) return [...failed];
   const seen = new Set(failed.map((j) => j.id));
-  const extra =
-    after !== null && failedJobsReplaced(failed, after) ? replacedJobs(before, after) : before.filter((job) => job.conclusion === 'skipped');
-  return [...failed, ...extra.filter((job) => !seen.has(job.id))];
+  return [...failed, ...replacedJobs(before, after).filter((job) => !seen.has(job.id))];
 }
 
 function ciSnapshot(state: 'pending' | 'failure' | 'success', failing: { name: string }[]): string {
@@ -1342,6 +1341,7 @@ export class GithubSync {
         if (moved()) throw new WorkError('invalid-state', `${itemLabel(item)}'s pull request moved to a new head; nothing was re-run.`);
         throw new WorkError('invalid-state', `Nothing was re-run: ${skipped.map((k) => `${k.run}: ${k.reason}`).join('; ')}.`);
       }
+      if (moved()) untracked = true;
       return {
         item: itemLabel(item),
         pr: pr.url,
