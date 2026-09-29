@@ -27,7 +27,7 @@ function github(connected: boolean, configRepo: string | null = null): Integrati
   };
 }
 
-function harness(id: string, connected: boolean): HarnessProviderInfo {
+function harness(id: string, connected: boolean, pending = false): HarnessProviderInfo {
   return {
     kind: 'harness',
     id,
@@ -38,7 +38,7 @@ function harness(id: string, connected: boolean): HarnessProviderInfo {
     configOptions: [],
     capabilities: { supportsAsk: true, subAgents: true, subAgentTranscript: true, streamsTokens: true, reportsCost: true },
     status: { state: 'disconnected', detail: '' },
-    auth: { connected, detail: '', pending: false },
+    auth: { connected, detail: '', pending },
   };
 }
 
@@ -124,6 +124,23 @@ describe('first run', () => {
     expect(fr.ready()).toBe(true);
     (open().querySelector('.btn-primary') as HTMLButtonElement).click();
     expect(startFlow).toHaveBeenCalled();
+  });
+
+  it('gives both harness rows one shape, with Codex marked optional and states in the button cell', async () => {
+    const state = { providers: [github(true, 'octo/config'), harness('claude-code', false), harness('codex', false)] as ProviderInfo[], installs: 1 };
+    const { fr, open } = setup(state);
+    await fr.show();
+    const row = (id: string) => open().querySelector(`.fr-harnesses [data-harness="${id}"]`) as HTMLElement;
+    expect(row('claude-code').querySelector('button')?.className).toBe('btn-primary');
+    expect(row('codex').querySelector('button')?.className).toBe('btn-primary');
+    expect(row('claude-code').querySelector('.fr-harness-tag')?.textContent).toBe('Required');
+    expect(row('codex').querySelector('.fr-harness-tag')?.textContent).toBe('Optional');
+    state.providers = [github(true, 'octo/config'), harness('claude-code', false, true), harness('codex', true)];
+    await fr.refresh();
+    expect(row('claude-code').querySelector('button')).toBeNull();
+    expect(row('claude-code').querySelector('.fr-harness-state.busy')?.textContent).toBe('Waiting for the browser…');
+    expect(row('codex').querySelector('.fr-harness-state.on')?.textContent).toBe('Connected');
+    fr.hide();
   });
 
   it('knows which steps are done', () => {

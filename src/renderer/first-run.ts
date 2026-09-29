@@ -210,22 +210,29 @@ export function initFirstRun(ctx: FirstRunContext) {
         break;
       }
       case 'claude': {
-        const claude = facts.claude;
         note('The orchestrator runs on Claude Code. Codex is optional, for workers.');
-        for (const h of [claude, facts.codex]) {
+        // One grid for both rows: same button, and the connected or waiting
+        // state takes the button's cell. Optional is a label, not a lesser button.
+        const grid = el('div', 'fr-harnesses');
+        for (const h of [facts.claude, facts.codex]) {
           if (!h) continue;
           const row = el('div', 'fr-harness');
           row.dataset.harness = h.id;
-          row.appendChild(el('span', 'fr-harness-name', h.label));
-          if (h.auth.connected) row.appendChild(el('span', 'fr-harness-state', 'connected'));
-          else if (h.auth.pending) row.appendChild(el('span', 'fr-harness-state', 'waiting for the browser…'));
-          else {
-            const go = button(h.id === 'claude-code' ? 'btn-primary' : 'btn-ghost', `Connect ${h.label}`);
+          const name = el('span', 'fr-harness-name', h.label);
+          name.appendChild(el('span', 'fr-harness-tag', h.id === 'claude-code' ? 'Required' : 'Optional'));
+          row.appendChild(name);
+          if (h.auth.connected || h.auth.pending) {
+            const state = el('span', `fr-harness-state ${h.auth.connected ? 'on' : 'busy'}`);
+            state.append(el('span', 'dot'), h.auth.connected ? 'Connected' : 'Waiting for the browser…');
+            row.appendChild(state);
+          } else {
+            const go = button('btn-primary', `Connect ${h.label}`);
             go.addEventListener('click', () => void signIn(h.id));
             row.appendChild(go);
           }
-          box.appendChild(row);
+          grid.appendChild(row);
         }
+        box.appendChild(grid);
         break;
       }
       case 'runner': {
