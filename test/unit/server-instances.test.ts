@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe('permissionsFor', () => {
-  const base = { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read', statuses: 'read', actions: 'write' };
+  const base = { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read', statuses: 'read', actions: 'read' };
   it.each([
     [{}, { ...base, issues: 'write' }],
     [{ statusComment: false }, { ...base, issues: 'read' }],
@@ -58,7 +58,7 @@ describe('POST /v1/instances', () => {
       runnerId: r.runnerId,
       definition: 'web',
       status: 'active',
-      permissions: expect.objectContaining({ actions: 'write' }),
+      permissions: expect.objectContaining({ actions: 'read' }),
       repos: [
         { owner: 'acme', name: 'api', revoked: false },
         { owner: 'namik', name: 'web', revoked: false },

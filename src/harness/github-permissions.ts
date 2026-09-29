@@ -4,8 +4,8 @@
  * Always contents and pull requests (write) and metadata (read). Issues
  * write while intake or the status comment is on, and read otherwise
  * (issues can always be imported by hand). Checks and commit statuses
- * (read) to watch CI. Actions write, because the orchestrator may re-run
- * failed jobs under either CI policy. Workflows (write) only when the
+ * (read) to watch CI. Actions (read) while CI is watched, because failed-job
+ * logs need it; never actions write. Workflows (write) only when the
  * definition allows workflow edits. Without workflows, GitHub refuses any
  * push that changes `.github/workflows/`, so a prompt-injected agent cannot
  * add a workflow that runs with the repository's secrets.
@@ -38,7 +38,7 @@ export function permissionsFor(p: GitHubTokenPolicies): Record<string, TokenPerm
     issues: p.intake === 'label' || p.statusComment ? 'write' : 'read',
     checks: 'read',
     statuses: 'read',
-    actions: 'write',
+    actions: 'read',
   };
   if (p.allowWorkflowEdits) perms.workflows = 'write';
   return perms;

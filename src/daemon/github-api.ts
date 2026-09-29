@@ -105,8 +105,6 @@ export interface GhRun {
   status: string;
   conclusion: string | null;
   head_sha: string;
-  run_attempt?: number | null;
-  run_started_at?: string | null;
 }
 
 export interface GhJob {
@@ -378,10 +376,6 @@ export class GitHubApi {
   /** A job's plain-text log (GitHub answers with a short-lived redirect to it). */
   jobLog(repo: string, jobId: number): Promise<string> {
     return this.get<string>(repo, `${repoPath(repo)}/actions/jobs/${jobId}/logs`, { text: true });
-  }
-
-  rerunFailedJobs(repo: string, runId: number): Promise<unknown> {
-    return this.post(repo, `${repoPath(repo)}/actions/runs/${runId}/rerun-failed-jobs`, {});
   }
 
   async defaultBranch(repo: string): Promise<string> {

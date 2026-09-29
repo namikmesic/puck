@@ -40,12 +40,8 @@ export interface CiWatch {
   failing: PullChecks['failing'];
   /** Redacted log tails of failed jobs. */
   logs: { name: string; text: string }[];
-  /** Failed workflow runs, for ci_rerun. */
-  failedRuns: number[];
   /** The sha whose success or failure was reported. Neutral is not reported, so a later check still is. */
   notified: string | null;
-  /** Workflow runs ci_rerun re-requested, with the attempt seen before the request. Empty when none is outstanding. */
-  rerunRuns: { id: number; attempt: number }[];
 }
 
 export interface ItemSync {
@@ -89,19 +85,6 @@ export function emptySync(): ItemSync {
 
 const nums = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number') : []);
 
-function parseRerunRuns(v: unknown): { id: number; attempt: number }[] {
-  if (!Array.isArray(v)) return [];
-  const runs: { id: number; attempt: number }[] = [];
-  for (const row of v) {
-    if (!row || typeof row !== 'object') continue;
-    const id = (row as { id?: unknown }).id;
-    const attempt = (row as { attempt?: unknown }).attempt;
-    if (typeof id !== 'number' || typeof attempt !== 'number') continue;
-    runs.push({ id, attempt });
-  }
-  return runs;
-}
-
 function normalizeCi(raw: CiWatch): CiWatch {
   return {
     sha: raw.sha,
@@ -109,9 +92,7 @@ function normalizeCi(raw: CiWatch): CiWatch {
     since: raw.since,
     failing: raw.failing ?? [],
     logs: raw.logs ?? [],
-    failedRuns: nums(raw.failedRuns),
     notified: raw.notified ?? null,
-    rerunRuns: parseRerunRuns(raw.rerunRuns),
   };
 }
 
