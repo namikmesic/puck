@@ -626,5 +626,11 @@ function boot(bridge: PuckBridge): void {
   applyNav();
 }
 
-const bridge = window.puck;
-if (bridge) boot(bridge);
+// Dev only: `#fixture=<scenario>` boots on the seeded fixture bridge
+// (src/renderer/fixture). Production builds drop this branch and its import.
+if (process.env.NODE_ENV !== 'production' && location.hash.startsWith('#fixture')) {
+  void import('./renderer/fixture').then(({ fixtureBridge, fixtureScenario }) => boot(fixtureBridge(fixtureScenario(location.hash))));
+} else {
+  const bridge = window.puck;
+  if (bridge) boot(bridge);
+}
