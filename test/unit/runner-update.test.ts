@@ -41,7 +41,7 @@ async function setup(files: Record<string, Buffer>) {
     fs.mkdirSync(path.join(downloads, version), { recursive: true });
     fs.writeFileSync(path.join(downloads, version, name), body);
   }
-  h = await startServer({ PUCK_RUNNER_DOWNLOADS: downloads });
+  h = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: downloads });
   // Asset URLs name the server's public URL; route them to the test server.
   const fetchImpl = ((url: string | URL, init?: RequestInit) => fetch(String(url).replace('http://puck.test', h.base), init)) as typeof fetch;
   const paths = runnerPaths(path.join(dir, 'runner'));

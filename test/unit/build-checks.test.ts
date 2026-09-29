@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { findAppArtifacts, findMakeArtifacts, nodeMajorMismatch } from '../../scripts/build-checks.mjs';
 import { MIN_MACOS, RELEASE_TARGET } from '../../scripts/release.mjs';
 
@@ -115,17 +116,19 @@ describe('toolchain pin', () => {
   });
 });
 
-describe('server image', () => {
-  it('ships the runner packages and serves them from PUCK_RUNNER_DOWNLOADS', () => {
-    const dockerfile = read('src/server/Dockerfile');
-    expect(dockerfile).toContain('scripts/package-runner.mjs --out /src/runner-downloads');
-    expect(dockerfile).toContain('COPY --from=runner /src/runner-downloads /app/runner-downloads');
-    expect(dockerfile).toContain('PUCK_RUNNER_DOWNLOADS=/app/runner-downloads');
+describe('local server (compose.yaml)', () => {
+  const compose = parseYaml(read('compose.yaml')) as {
+    services: Record<string, { build: { args?: Record<string, string> }; pull_policy?: string; environment?: Record<string, string> }>;
+  };
+  const service = compose.services['puck-server'];
+
+  it('builds and runs the development server, which hosts the runner packages', () => {
+    expect(service.build.args?.PUCK_DEVELOPMENT).toBe('true');
+    expect(service.environment?.PUCK_DEVELOPMENT).toBe('true');
   });
 
-  it('rebuilds on every compose up, and CI checks the downloads of the started image', () => {
-    expect(read('compose.yaml')).toMatch(/^ {4}pull_policy: build$/m);
-    expect(read('.github/workflows/ci.yml')).toContain('run: node scripts/check-runner-downloads.mjs http://localhost:8765');
+  it('rebuilds the image on every up instead of reusing an older build', () => {
+    expect(service.pull_policy).toBe('build');
   });
 });
 

@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /**
- * Checks that a running Puck server offers this checkout's runner packages:
- * `GET /v1/runner/releases` lists linux-x64, linux-arm64 and macos-arm64 for
- * the package.json version, and each asset's `url` downloads a file whose
- * sha256 matches both the listing and the `<url>.sha256` line. CI runs it
- * against the Compose-started server image; Node built-ins only.
+ * Checks what a running Puck server offers as runner downloads. CI runs it
+ * against both server images; Node built-ins only.
  *
- *   node scripts/check-runner-downloads.mjs [server url]   (default http://localhost:8765)
+ *   node scripts/check-runner-downloads.mjs [server url]          (default http://localhost:8765)
+ *   node scripts/check-runner-downloads.mjs --none [server url]
  *
- * The listing's URLs come from the server's PUCK_SERVER_URL, so the server
- * must be reachable at that URL from here.
+ * By default (a development server): `GET /v1/runner/releases` lists
+ * linux-x64, linux-arm64 and macos-arm64 for the package.json version, and
+ * each asset's `url` downloads a file whose sha256 matches both the listing
+ * and the `<url>.sha256` line. The listing's URLs come from the server's
+ * PUCK_SERVER_URL, so the server must be reachable at that URL from here.
+ *
+ * With --none (a production server): the listing has no assets, and the
+ * version's tarball and checksum answer 404.
  */
 
 import { createHash } from 'node:crypto';
@@ -43,10 +47,26 @@ export async function checkRunnerDownloads(server, version) {
   }
 }
 
+export async function checkNoRunnerDownloads(server, version) {
+  const releases = await (await get(`${server}/v1/runner/releases`)).json();
+  if (releases.latest !== null || releases.assets.length) {
+    throw new Error(`the server offers runners: latest ${JSON.stringify(releases.latest)}, ${releases.assets.length} assets`);
+  }
+  for (const target of EXPECTED) {
+    for (const file of [`puck-runner-${target}-${version}.tar.gz`, `puck-runner-${target}-${version}.tar.gz.sha256`]) {
+      const res = await fetch(`${server}/runner/${version}/${file}`);
+      if (res.status !== 404) throw new Error(`GET /runner/${version}/${file}: ${res.status}, not 404`);
+    }
+  }
+  console.log('no runner downloads offered  ok');
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const server = (process.argv[2] ?? 'http://localhost:8765').replace(/\/+$/, '');
+  const args = process.argv.slice(2);
+  const none = args.includes('--none');
+  const server = (args.find((a) => a !== '--none') ?? 'http://localhost:8765').replace(/\/+$/, '');
   const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-  checkRunnerDownloads(server, version).catch((err) => {
+  (none ? checkNoRunnerDownloads : checkRunnerDownloads)(server, version).catch((err) => {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);
   });

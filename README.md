@@ -277,8 +277,9 @@ docker compose down                      # stop; add -v to also delete the store
 ```
 
 `up` rebuilds the image every time, from the build cache when nothing changed, so it always runs the server of your checkout.
-The image carries that version's runner packages for Linux x64, Linux ARM64 and macOS on Apple silicon, and the server offers them at `GET /v1/runner/releases`, so **This Mac** and the Add runner dialog work out of the box.
+This is a development server (`PUCK_DEVELOPMENT=true`): its image carries that version's runner packages for Linux x64, Linux ARM64 and macOS on Apple silicon, and the server offers them at `GET /v1/runner/releases`, so **This Mac** and the Add runner dialog work out of the box.
 The first build downloads the three pinned Node runtimes the packages bundle and checks their sha256.
+A server outside development mode hosts no runner packages.
 
 Its store lives on the `puck-server-data` volume, and it listens on `127.0.0.1:8765` only (`PUCK_SERVER_LOCAL_PORT` changes the port).
 Without configuration it starts with GitHub disabled.

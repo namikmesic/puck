@@ -10,7 +10,7 @@ Puck becomes an orchestrator of coding agents: you open one environment, talk to
 macOS on Apple silicon, macOS 12 or later.
 Nothing from 0.0.1 is migrated: its agents, environments and conversations are ignored (the README shows how to remove them), and the Claude and Codex sign-ins carry over.
 
-- The `puck-server` image now carries its version's runner tarballs for Linux x64, Linux ARM64 and macOS ARM64 and serves them, so a server started with `docker compose up` offers runners (and sets up **This Mac**) out of the box; `docker compose up` rebuilds the image each time instead of reusing an older build.
+- The Puck server has a development mode (`PUCK_DEVELOPMENT=true`), and only a development server hosts runner downloads; `PUCK_RUNNER_DOWNLOADS` without it stops the server at start. The development image (`--build-arg PUCK_DEVELOPMENT=true`) carries its version's runner tarballs for Linux x64, Linux ARM64 and macOS ARM64, and `docker compose up` builds and runs it, so the local server offers runners (and sets up **This Mac**) out of the box; the default image carries none. `docker compose up` rebuilds the image each time instead of reusing an older build.
 - The environment window is now Puck's only window; the `PUCK_UI` switch is gone.
   The per-agent chat and everything it ran on are removed: agents and environments configured in the app, their conversations and resume ids, the container runner, and the app's own Docker path (environments run on runners; This Mac's runner replaces local Docker, and the app never runs `docker`).
   Settings has Providers, Runners and Support, and the support bundle lists runners and environments instead of agents, local environments and Docker.

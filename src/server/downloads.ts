@@ -1,5 +1,7 @@
 /**
- * Runner downloads. The operator drops release tarballs into the
+ * Runner downloads, served only by a development server (`PUCK_DEVELOPMENT`;
+ * elsewhere the directory is null, the list is empty, and every file is
+ * 404). The development image packages this version's tarballs into the
  * `PUCK_RUNNER_DOWNLOADS` directory as
  *
  *   <version>/puck-runner-<os>-<arch>-<version>.tar.gz     os: linux | macos, arch: x64 | arm64

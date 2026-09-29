@@ -81,15 +81,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-      - name: Build the puck-server image and bring it up with Compose
+      - name: Build the development puck-server image and bring it up with Compose
         run: docker compose up -d --build --wait --wait-timeout 120
       - name: Health check
         run: curl -fsS http://127.0.0.1:8765/healthz
-      - name: The server offers this version's runner packages, and each download matches its sha256
+      - name: The development server offers this version's runner packages, and each download matches its sha256
         run: node scripts/check-runner-downloads.mjs http://localhost:8765
+      - name: Build the default puck-server image and run it
+        run: |
+          docker build -f src/server/Dockerfile -t puck-server .
+          docker run -d --name puck-server-default -p 127.0.0.1:8766:8080 -e PUCK_SERVER_URL=http://localhost:8766 puck-server
+          timeout 60 sh -c 'until curl -fsS http://127.0.0.1:8766/healthz; do sleep 1; done'
+      - name: The default image carries no runner packages and serves none
+        run: |
+          docker run --rm --entrypoint sh puck-server -c 'test ! -e /app/runner-downloads'
+          node scripts/check-runner-downloads.mjs --none http://localhost:8766
       - name: Server logs
         if: always()
-        run: docker compose logs
+        run: |
+          docker compose logs
+          docker logs puck-server-default || true
       - name: Tear down
         if: always()
-        run: docker compose down -v
+        run: |
+          docker compose down -v
+          docker rm -f puck-server-default || true
