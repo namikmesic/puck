@@ -41,15 +41,17 @@
  *   - `ci_rerun` (`policies.github.allowCiRerun`): re-runs the failed jobs
  *     of every failed workflow run on the watched head. Per run it reads
  *     the jobs first, asks GitHub to re-run the failed ones, then re-reads
- *     the jobs and records every one that re-run replaced — the failed jobs
- *     and the dependents GitHub restarts — and only while that watch still
- *     exists: a new head that arrived meanwhile keeps its own watch. A
- *     job's id is its check run id. Those previous ids stop counting, and
- *     each replaced name stays pending until a kept run of that name has a
- *     higher check run id than every superseded run of that name, so an older
- *     result is never reported again and every other check still counts.
- *     The re-run's result is reported like a first one, even when it is the
- *     same failure.
+ *     them. A read that shows a replacement records those jobs, including
+ *     dependents GitHub restarts. A read that throws, or still shows the
+ *     pre-attempt list, records only the jobs that had failed — never a
+ *     skipped job this read did not show replaced. Recording happens only
+ *     while that watch still exists: a new head that arrived meanwhile
+ *     keeps its own watch. A job's id is its check run id. Those previous
+ *     ids stop counting, and each replaced name stays pending until a kept
+ *     run of that name has a higher check run id than every superseded run
+ *     of that name, so an older result is never reported again and every
+ *     other check still counts. The re-run's result is reported like a
+ *     first one, even when it is the same failure.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -1254,12 +1256,7 @@ export class GithubSync {
     };
   }
 
-  /**
-   * Re-run the failed jobs of every failed workflow run on the watched head.
-   * Per run: read its jobs, ask GitHub to re-run the failed ones, then — if
-   * this watch is still current — re-read the jobs and record every one
-   * that re-run replaced.
-   */
+  /** Re-run the failed jobs of the watched head's failed workflow runs. */
   async ciRerun(item: ItemRecord): Promise<Record<string, unknown>> {
     if (!this.deps.definition()?.policies.github.allowCiRerun) {
       throw new WorkError('invalid-state', 'Re-running CI is off in this environment (policies.github.allowCiRerun).');
