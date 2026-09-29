@@ -31,7 +31,6 @@ import type {
   InstanceInfo,
   IntegrationProviderInfo,
   PinSpec,
-  ProviderInfo,
   PuckBridge,
   RunnerRow,
   RunnersState,
