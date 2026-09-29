@@ -975,6 +975,18 @@ describe('review feedback and the trust filter', () => {
       expect(followUps[0].text).toContain('--- @dana on src/a.ts:12:\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\nUse a guard here.');
     }
     if (c.type === 'Bot') expect(permissionReads()).toHaveLength(0);
+    // The user sees people's feedback in work detail, marked whether agents saw it; bots' is not kept.
+    const view = sync.prView(backlog.get(item.id) as ItemRecord);
+    expect(view).toMatchObject({ number: 7, state: 'open', reviewRounds: { max: 5 } });
+    expect(view.feedback.map((f) => [f.kind, f.trusted])).toEqual(
+      c.type === 'Bot'
+        ? []
+        : [
+            ['review', c.reaches],
+            ['inline', c.reaches],
+          ],
+    );
+    if (c.type !== 'Bot') expect(view.feedback[1]?.where).toBe('src/a.ts:12');
   });
 
   it('does not address a review again after the seen list is full', async () => {

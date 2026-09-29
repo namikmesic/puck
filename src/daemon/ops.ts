@@ -166,6 +166,15 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
     if (agent !== undefined && !NAME_RE.test(agent)) bad('agent is not a valid name.');
     return { repo: o.repo, number, agent, position: o.position === undefined ? undefined : position(o.position) };
   },
+  'issue.search': (args) => {
+    const o = obj(args);
+    const query = text(o, 'query', 256, true) as string;
+    const repo = text(o, 'repo', 140, false);
+    if (repo !== undefined && !REPO_RE.test(repo) && !NAME_RE.test(repo)) bad('repo must be owner/name or a directory name.');
+    if (o.state !== undefined && o.state !== 'open' && o.state !== 'closed' && o.state !== 'all') bad('state must be "open", "closed" or "all".');
+    return { query, repo, state: o.state as 'open' | 'closed' | 'all' | undefined };
+  },
+  'item.pr': itemOnly,
   'github.nudge': (args) => {
     const o = obj(args);
     if (typeof o.repo !== 'string' || !REPO_RE.test(o.repo)) bad('repo must be owner/name.');

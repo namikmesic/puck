@@ -647,6 +647,11 @@ export class Daemon {
       if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
       return publicItem(await this.github.importIssue(repo, number, { agent, position }, 'user'));
     },
+    'issue.search': async ({ query, repo, state }) => {
+      if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
+      return this.github.searchIssues(query, { ...(repo ? { repo } : {}), ...(state ? { state } : {}) });
+    },
+    'item.pr': ({ itemId }) => this.github.prView(this.items.item(itemId)),
     'github.nudge': ({ repo, kind, number }) => {
       this.github?.nudge(repo, kind, number);
       return {};
