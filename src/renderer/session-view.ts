@@ -120,6 +120,7 @@ export function initSessionView(ctx: SessionViewContext) {
     if (!host) {
       const made: Host = { scroller, mounted: null, child: null, attached: null, stick: true };
       scroller.addEventListener('scroll', () => {
+        if (scroller.clientHeight === 0) return;
         made.stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
       });
       hosts.set(scroller, made);
@@ -136,6 +137,7 @@ export function initSessionView(ctx: SessionViewContext) {
 
   function scrollHost(host: Host, force = false): void {
     if (!force && !host.stick) return;
+    if (host.scroller.clientHeight === 0) return;
     host.scroller.scrollTop = host.scroller.scrollHeight;
   }
 

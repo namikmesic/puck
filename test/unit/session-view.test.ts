@@ -227,6 +227,28 @@ describe('session view', () => {
     expect(history).toHaveBeenCalledTimes(2);
   });
 
+  it('does not follow the bottom after a zero-height scroll while the reader is above it', async () => {
+    const { view, host, live } = setup(async () => page([user('hello', 1)], 10));
+    view.mount(ORCH, host);
+    await flush();
+    const box = { scrollHeight: 1000, clientHeight: 400 };
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, get: () => box.scrollHeight });
+    Object.defineProperty(host, 'clientHeight', { configurable: true, get: () => box.clientHeight });
+    host.scrollTop = 120;
+    host.dispatchEvent(new Event('scroll'));
+    box.scrollHeight = 0;
+    box.clientHeight = 0;
+    host.scrollTop = 0;
+    host.dispatchEvent(new Event('scroll'));
+    box.scrollHeight = 1200;
+    box.clientHeight = 400;
+    host.scrollTop = 0;
+    live(11, { kind: 'turn.start', sessionId: ORCH, turnId: 't9' });
+    live(12, { kind: 'turn.event', sessionId: ORCH, turnId: 't9', event: { kind: 'text-delta', text: 'Still reading' } });
+    await nextFrame();
+    expect(host.scrollTop).toBe(0);
+  });
+
   it('keeps drafts per environment and session, and survives broken storage', () => {
     const { view, memory } = setup(async () => page([], 1));
     view.saveDraft(ORCH, 'half a thought');

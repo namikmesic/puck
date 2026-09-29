@@ -359,6 +359,26 @@ body.puck .hidden {
   display: none !important;
 }
 
+/* Chat, Board, the sheet, and its panes keep their box while inactive.
+   display:none clamps scrollTop and a zero-height scroll looks like the
+   user followed the bottom. */
+body.puck .keep-scroll.hidden {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+body.puck .oc.keep-scroll.hidden,
+body.puck .board.keep-scroll.hidden,
+body.puck .sheet.keep-scroll.hidden,
+body.puck .wd-conversation.keep-scroll.hidden {
+  display: flex !important;
+}
+
+body.puck .wd-changes.keep-scroll.hidden,
+body.puck .wd-details.keep-scroll.hidden {
+  display: block !important;
+}
+
 .app-shell {
   flex: 1;
   min-width: 0;
@@ -826,9 +846,34 @@ body.puck .hidden {
   flex-direction: column;
 }
 
-/* The full-turn overlay takes the content area. */
-.center.turn-full-open > :not(.turn-full) {
+/* Chat and Board share one cell, so the inactive view keeps its size. */
+.center.stage {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.center > .tb-banner {
+  grid-area: 1 / 1;
+}
+
+.center > .oc,
+.center > .board,
+.center > .fr,
+.center > .turn-full {
+  grid-area: 2 / 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The full-turn overlay covers the content area without unmounting scrollers. */
+.center.turn-full-open > :not(.turn-full):not(.keep-scroll) {
   display: none !important;
+}
+
+.center.turn-full-open > .keep-scroll {
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 .back-btn {

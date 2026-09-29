@@ -25,7 +25,7 @@ import { initBoard } from './renderer/board';
 import { liveWork } from './renderer/board-model';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
 import { initComposer } from './renderer/composer';
-import { el, showToast } from './renderer/dom';
+import { conceal, el, showToast } from './renderer/dom';
 import { initFirstRun } from './renderer/first-run';
 import { fmtTokens, fmtUsd } from './renderer/format';
 import { composerGate, createTicker, isWorking } from './renderer/instance-progress';
@@ -496,8 +496,8 @@ function boot(bridge: PuckBridge): void {
     const env = nav.center === 'env';
     const hasEnv = !!store.envId();
     const chat = env && (nav.view === 'chat' || !hasEnv);
-    byId('oc').classList.toggle('hidden', !chat);
-    byId('board').classList.toggle('hidden', !(env && hasEnv && nav.view === 'board'));
+    conceal(byId('oc'), !chat);
+    conceal(byId('board'), !(env && hasEnv && nav.view === 'board'));
     if (chat) {
       unread = false;
       renderOrchestrator();
@@ -544,7 +544,7 @@ function boot(bridge: PuckBridge): void {
 
     const sheet = byId('wd');
     const open = env && hasEnv && !!itemId;
-    sheet.classList.toggle('hidden', !open);
+    conceal(sheet, !open);
     center.classList.toggle('sheet-open', open);
     if (open && itemId) {
       const opened = before?.itemId !== itemId;

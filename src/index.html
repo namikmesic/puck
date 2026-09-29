@@ -58,7 +58,7 @@
           <div class="turn-full-body" id="turn-full-body"></div>
         </div>
 
-        <section class="oc" id="oc" role="tabpanel" aria-label="Chat">
+        <section class="oc keep-scroll" id="oc" role="tabpanel" aria-label="Chat">
           <header class="oc-head">
             <button class="back-btn hidden" id="oc-child-back" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
@@ -117,7 +117,7 @@
           </div>
         </section>
 
-        <section class="board hidden" id="board" role="tabpanel" aria-label="Board">
+        <section class="board keep-scroll hidden" id="board" role="tabpanel" aria-label="Board">
           <header class="bd-head">
             <div class="bd-capacity" id="bd-capacity"></div>
             <div class="bd-paused hidden" id="bd-paused"></div>
@@ -131,7 +131,7 @@
           <div class="bd-columns" id="bd-columns"></div>
         </section>
 
-        <aside class="sheet hidden" id="wd" role="dialog" aria-modal="false" aria-labelledby="wd-title">
+        <aside class="sheet keep-scroll hidden" id="wd" role="dialog" aria-modal="false" aria-labelledby="wd-title">
           <header class="wd-head">
             <div class="wd-bar">
               <span class="wd-id" id="wd-id"></span>
@@ -153,31 +153,33 @@
             <button data-tab="changes" role="tab" type="button">Changes</button>
             <button data-tab="details" role="tab" type="button">Details</button>
           </nav>
-          <div class="wd-pane wd-conversation" id="wd-conversation">
-            <button class="back-btn wd-child-back hidden" id="wd-child-back" type="button">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
-              <span>Back to the worker</span>
-            </button>
-            <div class="chat" id="wd-thread"></div>
-            <div class="composer-zone" id="wd-composer-zone">
-              <p class="composer-hint hidden" id="wd-hint"></p>
-              <form class="composer" id="wd-composer">
-                <textarea id="wd-prompt" rows="1" aria-label="Follow-up for the worker"></textarea>
-                <div class="composer-tools">
-                  <span class="composer-msg" id="wd-msg" role="status"></span>
-                  <span class="spacer"></span>
-                  <button class="send stop hidden" id="wd-stop" type="button" aria-label="Stop the turn" title="Stop the turn">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
-                  </button>
-                  <button class="send" id="wd-send" type="submit" aria-label="Send">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
-                  </button>
-                </div>
-              </form>
+          <div class="wd-panes">
+            <div class="wd-pane wd-conversation keep-scroll" id="wd-conversation">
+              <button class="back-btn wd-child-back hidden" id="wd-child-back" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+                <span>Back to the worker</span>
+              </button>
+              <div class="chat" id="wd-thread"></div>
+              <div class="composer-zone" id="wd-composer-zone">
+                <p class="composer-hint hidden" id="wd-hint"></p>
+                <form class="composer" id="wd-composer">
+                  <textarea id="wd-prompt" rows="1" aria-label="Follow-up for the worker"></textarea>
+                  <div class="composer-tools">
+                    <span class="composer-msg" id="wd-msg" role="status"></span>
+                    <span class="spacer"></span>
+                    <button class="send stop hidden" id="wd-stop" type="button" aria-label="Stop the turn" title="Stop the turn">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
+                    </button>
+                    <button class="send" id="wd-send" type="submit" aria-label="Send">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+                    </button>
+                  </div>
+                </form>
+              </div>
             </div>
+            <div class="wd-pane wd-changes keep-scroll hidden" id="wd-changes"></div>
+            <div class="wd-pane wd-details keep-scroll hidden" id="wd-details"></div>
           </div>
-          <div class="wd-pane wd-changes hidden" id="wd-changes"></div>
-          <div class="wd-pane wd-details hidden" id="wd-details"></div>
         </aside>
 
         <section class="fr hidden" id="fr" aria-label="Get started"></section>

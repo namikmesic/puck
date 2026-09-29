@@ -15,7 +15,8 @@
  *   pickers, timestamps, creator, last error). The repo picker shows no
  *   repository until one is saved, and is disabled once a worktree exists.
  *   Once an item has a session, the agent picker offers only that agent,
- *   and Unassign is not offered.
+ *   and Unassign is not offered. Assign enables only for an agent the
+ *   item can take, and follows the picker as it changes.
  * - A pending question shows a banner: "Waiting on the orchestrator" with
  *   "Answer myself", or the question card when it is routed to the user.
  *   On the Conversation tab, where the thread already shows the card, the
@@ -27,7 +28,7 @@
 import type { ItemStatus, OpArgs, OpResult, PullView, RendererOp, WorkItem } from '../harness/daemon-protocol';
 import { askCard } from './ask-card';
 import { assignable, canUnassign } from './board-model';
-import { armDelete, el } from './dom';
+import { armDelete, conceal, el } from './dom';
 import { fmtTime, relTime } from './format';
 import type { InstanceStore } from './instance-store';
 import { renderMd } from './markdown';
@@ -555,19 +556,24 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       pick.value = it.agent ?? '';
     }
     const savedAgent = it.sessionId ? (knownAgent ?? '') : (it.agent ?? '');
-    const canAssign = it.sessionId ? choices.includes(pick.value) : it.status === 'backlog' || it.status === 'queued';
-    pick.disabled = !canAssign;
+    const canChangeAgent = it.sessionId ? choices.length > 0 : it.status === 'backlog' || it.status === 'queued';
+    pick.disabled = !canChangeAgent;
     const row = el('div', 'wd-row');
     row.appendChild(pick);
     const assignBtn = button('btn-ghost', 'Assign');
     assignBtn.dataset.action = 'assign';
-    assignBtn.disabled = !canAssign;
+    const syncAssign = (): void => {
+      assignBtn.disabled = !choices.includes(pick.value);
+    };
+    pick.addEventListener('change', syncAssign);
+    syncAssign();
     assignBtn.addEventListener('click', async () => {
-      if (!pick.value) return;
+      if (!choices.includes(pick.value)) return;
       try {
         await ctx.daemon('item.assign', { itemId: it.id, agent: pick.value });
       } catch (err) {
         pick.value = savedAgent;
+        syncAssign();
         ctx.say(errText(err));
       }
     });
@@ -654,9 +660,9 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     for (const b of els.tabs.querySelectorAll<HTMLButtonElement>('[data-tab]')) {
       b.setAttribute('aria-selected', String(b.dataset.tab === tab));
     }
-    els.conversation.classList.toggle('hidden', tab !== 'conversation');
-    els.changes.classList.toggle('hidden', tab !== 'changes');
-    els.details.classList.toggle('hidden', tab !== 'details');
+    conceal(els.conversation, tab !== 'conversation');
+    conceal(els.changes, tab !== 'changes');
+    conceal(els.details, tab !== 'details');
     renderHeader(it);
     renderBanner(it);
     if (tab === 'conversation') renderConversation(it);

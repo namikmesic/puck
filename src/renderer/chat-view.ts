@@ -17,7 +17,7 @@ import type { ProviderCapabilities } from '../harness/bridge';
 import type { Notice, NoticeKind } from '../harness/transcript';
 import type { AskQuestion, HarnessEvent, TurnStats } from '../harness/types';
 import { askCard, askReplayCard, setAskAnswered } from './ask-card';
-import { el } from './dom';
+import { el, syncKeepScroll } from './dom';
 import { dayKey, dayLabel, fmtClock, fmtDuration, fmtTime, fmtTokens, fmtUsd } from './format';
 import { renderMd } from './markdown';
 import { button, errText } from './util';
@@ -263,6 +263,7 @@ export function initChatView(ctx: ChatViewContext) {
     ctx.overlay.crumb.textContent = session.title;
     ctx.overlay.title.textContent = title;
     ctx.overlay.stage.classList.add('turn-full-open');
+    syncKeepScroll(ctx.overlay.stage);
     ctx.overlay.backButton.focus();
   }
 
@@ -271,6 +272,7 @@ export function initChatView(ctx: ChatViewContext) {
     fullTurn.home.appendChild(fullTurn.detail);
     fullTurn = null;
     ctx.overlay.stage.classList.remove('turn-full-open');
+    syncKeepScroll(ctx.overlay.stage);
     lastFullTrigger?.focus();
     lastFullTrigger = null;
   }

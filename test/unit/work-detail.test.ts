@@ -310,6 +310,11 @@ describe('work detail', () => {
     wd.show(open.id, 'details');
     expect(byId('details').querySelector('[data-action="unassign"]')).not.toBeNull();
     expect(options()).toEqual(['', 'implementer', 'reviewer']);
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(true);
+    const queuedPick = byId('details').querySelector('.wd-agent-select') as HTMLSelectElement;
+    queuedPick.value = 'reviewer';
+    queuedPick.dispatchEvent(new Event('change'));
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(false);
     wd.show(held.id, 'details');
     expect(byId('details').querySelector('[data-action="unassign"]')).toBeNull();
     expect(options()).toEqual(['implementer']);
@@ -343,11 +348,13 @@ describe('work detail', () => {
 
     const agent = byId('details').querySelector('.wd-agent-select') as HTMLSelectElement;
     agent.value = 'reviewer';
+    agent.dispatchEvent(new Event('change'));
     daemon.mockRejectedValueOnce(new Error('not that agent'));
     (byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).click();
     await flush();
     wd.render();
     expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).value).toBe('');
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(true);
     expect(say).toHaveBeenCalledWith('not that agent');
 
     wd.show(queued.id, 'details');
@@ -362,11 +369,13 @@ describe('work detail', () => {
     expect((byId('details').querySelector('.wd-repo-select') as HTMLSelectElement).value).toBe('web');
     const keptAgent = byId('details').querySelector('.wd-agent-select') as HTMLSelectElement;
     keptAgent.value = 'reviewer';
+    keptAgent.dispatchEvent(new Event('change'));
     daemon.mockRejectedValueOnce(new Error('not that agent'));
     (byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).click();
     await flush();
     wd.render();
     expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).value).toBe('implementer');
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(true);
 
     wd.show(held.id, 'details');
     const locked = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
@@ -392,7 +401,9 @@ describe('work detail', () => {
     expect(daemon).toHaveBeenCalledWith('item.update', { itemId: it0.id, title: 'New title', body: 'x' });
     const agent = host.querySelector('.wd-agent-select') as HTMLSelectElement;
     expect([...agent.options].map((o) => o.value)).toEqual(['', 'implementer', 'reviewer']);
+    expect((host.querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(true);
     agent.value = 'reviewer';
+    agent.dispatchEvent(new Event('change'));
     (host.querySelector('[data-action="assign"]') as HTMLButtonElement).click();
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.assign', { itemId: it0.id, agent: 'reviewer' });
