@@ -32,9 +32,15 @@ function enrollToken(body: Record<string, unknown>): EnrollToken {
   };
 }
 
-export async function me(): Promise<{ id: string; login: string }> {
-  const body = await authed<{ user?: { id?: unknown; login?: unknown } }>('GET', '/v1/me');
-  return { id: String(body.user?.id ?? ''), login: String(body.user?.login ?? '') };
+/** Who is signed in, and where to install the server's GitHub App (null when the server cannot say). */
+export async function me(): Promise<{ id: string; login: string; installUrl: string | null }> {
+  const body = await authed<{ user?: { id?: unknown; login?: unknown }; github?: { installUrl?: unknown } }>('GET', '/v1/me');
+  const installUrl = body.github?.installUrl;
+  return {
+    id: String(body.user?.id ?? ''),
+    login: String(body.user?.login ?? ''),
+    installUrl: typeof installUrl === 'string' && /^https?:\/\//.test(installUrl) ? installUrl : null,
+  };
 }
 
 /** The user's current GitHub access token (never the refresh token). */

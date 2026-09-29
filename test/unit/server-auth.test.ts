@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { loopbackRedirect } from '../../src/server/auth';
-import { call, pkcePair, signIn, startServer, type Harness } from './server-fakes';
+import { APP_SLUG, call, pkcePair, signIn, startServer, WEB, type Harness } from './server-fakes';
 
 let h: Harness;
 afterEach(async () => {
@@ -48,6 +48,27 @@ describe('web-flow sign-in', () => {
     expect(me.body.user).toMatchObject({ login: 'namik' });
     const audit = await call(h, 'GET', '/v1/audit', { token: s.accessToken });
     expect((audit.body.events as { kind: string }[]).map((e) => e.kind)).toEqual(['session.created', 'user.sign-in']);
+  });
+
+  it('tells a signed-in app where to install the GitHub App, asking GitHub once for its slug', async () => {
+    h = await startServer();
+    h.github.addUser('namik');
+    const s = await signIn(h, 'namik');
+    const before = h.github.calls.filter((c) => c.endsWith('/app')).length;
+    for (let i = 0; i < 2; i++) {
+      const me = await call(h, 'GET', '/v1/me', { token: s.accessToken });
+      expect(me.body.github).toEqual({ installUrl: `${WEB}/apps/${APP_SLUG}/installations/new` });
+    }
+    expect(h.github.calls.filter((c) => c.endsWith('/app')).length - before).toBe(1);
+    await h.close();
+
+    // A configured slug wins, and GitHub is not asked.
+    h = await startServer({ PUCK_GITHUB_APP_SLUG: 'puck-dev' });
+    h.github.addUser('namik');
+    const d = await signIn(h, 'namik');
+    const me = await call(h, 'GET', '/v1/me', { token: d.accessToken });
+    expect(me.body.github).toEqual({ installUrl: `${WEB}/apps/puck-dev/installations/new` });
+    expect(h.github.calls.some((c) => c.endsWith('/app'))).toBe(false);
   });
 
   it('refuses redirect URIs that are not loopback and malformed challenges', async () => {

@@ -20,7 +20,7 @@
  * | PUCK_SERVER_DB | SQLite file (default `puck-server.db`; `:memory:` for tests) |
  * | PUCK_SERVER_TOKEN_KEY[_FILE] | 32 bytes, base64: encrypts GitHub user tokens at rest |
  * | PUCK_GITHUB_APP_ID, PUCK_GITHUB_CLIENT_ID | The GitHub App's id and OAuth client id |
- * | PUCK_GITHUB_APP_SLUG | Optional. When set, the server can link to the App's install page |
+ * | PUCK_GITHUB_APP_SLUG | Optional. The App's slug for its install link; by default the server asks GitHub |
  * | PUCK_GITHUB_CLIENT_SECRET[_FILE] | The App's client secret (web-flow code exchange) |
  * | PUCK_GITHUB_PRIVATE_KEY[_FILE] | The App's private key: PEM, or the PEM base64-encoded on one line (for env files) |
  * | PUCK_GITHUB_API_URL, PUCK_GITHUB_WEB_URL | GitHub endpoints (default github.com) |

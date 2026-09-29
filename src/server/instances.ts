@@ -113,7 +113,7 @@ async function verifyRepos(
       // "not found" is also what a missing installation looks like.
       throw new HttpError(403, 'repo-not-accessible', `${full} was not found, or the Puck GitHub App is not installed on ${owner}.`, {
         repo: full,
-        installUrl: github.installUrl(),
+        installUrl: await github.installUrl(),
       });
     }
     if (!access.push) throw new HttpError(403, 'repo-not-writable', `You need push access to ${full}.`, { repo: full });
@@ -121,7 +121,7 @@ async function verifyRepos(
     if (installationId === null) {
       throw new HttpError(409, 'app-not-installed', `The Puck GitHub App is not installed on ${access.owner}.`, {
         repo: full,
-        installUrl: github.installUrl(),
+        installUrl: await github.installUrl(),
       });
     }
     out.push({ envId, repoId: access.id, owner: access.owner, name: access.name, installationId, verifiedAt: now, revokedAt: null });

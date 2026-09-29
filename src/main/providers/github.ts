@@ -8,6 +8,8 @@
  *  - GitHub API calls use the user's current access token, which the server
  *    hands out (`GET /v1/github/token`); it is cached here until a few
  *    minutes before it expires, in memory only.
+ *  - The GitHub App's install link comes from the server too (`GET
+ *    /v1/me`), once per session: the app holds no App identity of its own.
  *  - Tokens never leave the main process: Settings sees the login, config
  *    repo and installations only.
  */
@@ -29,7 +31,6 @@ import { log } from '../log';
 import * as serverApi from '../server/api';
 import { ServerApiError, serverUrl } from '../server/http';
 import { account, cancelSignIn, current, onSessionChange, signInPending, signOut, startSignIn } from '../server/session';
-import { githubInstallUrl } from './github-app';
 import { signInStatus } from './oauth';
 import { githubSettings, updateGithubSettings } from './providers-store';
 import type { IntegrationProvider } from './types';
@@ -51,11 +52,30 @@ let generation = 0;
 let cached: { token: string; expiresAt: number; generation: number } | null = null;
 let fetching: { promise: Promise<string>; generation: number } | null = null;
 
+/** The install link the server gave for this session, once it answered. */
+let installLink: { url: string | null; generation: number } | null = null;
+
 onSessionChange(() => {
   generation += 1;
   cached = null;
   fetching = null;
+  installLink = null;
 });
+
+/**
+ * Asks the server for the GitHub App's install link once per session, so
+ * `state()` can show it; a failure leaves it unknown until the next call.
+ */
+export async function loadInstallLink(): Promise<void> {
+  if (!current() || installLink?.generation === generation) return;
+  const gen = generation;
+  try {
+    const me = await serverApi.me();
+    if (gen === generation) installLink = { url: me.installUrl, generation: gen };
+  } catch (err) {
+    log.warn('github.install-link-failed', { error: err instanceof Error ? err.message : String(err) });
+  }
+}
 
 async function accessToken(): Promise<string> {
   if (!current()) throw new Error('Sign in to Puck with GitHub first.');
@@ -121,7 +141,7 @@ export const githubProvider: IntegrationProvider = {
     return {
       login: current()?.user.login ?? null,
       configRepo: settings.configRepo,
-      installUrl: githubInstallUrl(),
+      installUrl: installLink?.generation === generation ? installLink.url : null,
       server: serverUrl(),
     };
   },

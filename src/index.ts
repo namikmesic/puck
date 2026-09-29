@@ -185,7 +185,10 @@ function signInProvider(id: string): providerRegistry.HarnessProvider | provider
 
 const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> = {
   [CHANNELS.status]: () => backend.status(),
-  [CHANNELS.providers]: () => providerRegistry.providerInfos(),
+  [CHANNELS.providers]: async () => {
+    await github.loadInstallLink();
+    return providerRegistry.providerInfos();
+  },
   [CHANNELS.openExternal]: (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url);
   },

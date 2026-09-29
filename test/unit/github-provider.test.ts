@@ -5,14 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APP_SLUG_ENV, CLIENT_ID_ENV, githubAppSlug, githubClientId, githubInstallUrl } from '../../src/main/providers/github-app';
-import { githubProvider, installations, repositories, setConfigRepo, useGitHubDeps } from '../../src/main/providers/github';
+import { githubProvider, installations, loadInstallLink, repositories, setConfigRepo, useGitHubDeps } from '../../src/main/providers/github';
 import { githubSettings, updateGithubSettings } from '../../src/main/providers/providers-store';
 import * as api from '../../src/main/server/api';
 import { useServerDeps } from '../../src/main/server/http';
 import { account, current, signInPending } from '../../src/main/server/session';
 import { fakeGitHub, type Recorded, type Scripted } from './github-fakes';
-import { startServer, type Harness } from './server-fakes';
+import { APP_SLUG, startServer, WEB, type Harness } from './server-fakes';
 
 let h: Harness;
 
@@ -47,8 +46,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env[CLIENT_ID_ENV];
-  delete process.env[APP_SLUG_ENV];
   await githubProvider.auth.logout();
   updateGithubSettings({ configRepo: null });
   useGitHubDeps(undefined);
@@ -56,22 +53,20 @@ afterEach(async () => {
   await h.close();
 });
 
-describe('GitHub App identity', () => {
-  it('links the install page of the registered app, with both development overrides as one test app', () => {
-    expect(githubClientId({})).toBe('Iv23liEFTqLz112apImK');
-    expect(githubAppSlug({})).toBe('puck-agents');
-    expect(githubInstallUrl({})).toBe('https://github.com/apps/puck-agents/installations/new');
-    expect(githubClientId({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe('Iv1.dev');
-    expect(githubAppSlug({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe('puck-dev');
-    expect(githubInstallUrl({ [CLIENT_ID_ENV]: 'Iv1.dev', [APP_SLUG_ENV]: ' puck-dev ' })).toBe(
-      'https://github.com/apps/puck-dev/installations/new',
-    );
-  });
+describe('GitHub App install link', () => {
+  it('comes from the Puck server once per session, and is gone after sign-out', async () => {
+    expect(githubProvider.state().installUrl).toBeNull();
+    await loadInstallLink();
+    expect(h.github.calls.some((c) => c.endsWith('/app'))).toBe(false);
 
-  it('keeps a half override on the test app and offers no install link', () => {
-    process.env[CLIENT_ID_ENV] = 'Iv1.dev';
-    expect(githubAppSlug()).toBeNull();
-    expect(githubInstallUrl()).toBeNull();
+    await signIn();
+    expect(githubProvider.state().installUrl).toBeNull();
+    await loadInstallLink();
+    await loadInstallLink();
+    expect(githubProvider.state().installUrl).toBe(`${WEB}/apps/${APP_SLUG}/installations/new`);
+    expect(h.github.calls.filter((c) => c.endsWith('/app'))).toHaveLength(1);
+
+    await githubProvider.auth.logout();
     expect(githubProvider.state().installUrl).toBeNull();
   });
 });
