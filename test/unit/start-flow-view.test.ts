@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { DefinitionListing, HarnessProviderInfo, RunnersState } from '../../src/harness/bridge';
+import type { DefinitionListing, HarnessProviderInfo, IntegrationProviderInfo, RunnersState } from '../../src/harness/bridge';
 import { EXAMPLE_CONFIG_URL } from '../../src/renderer/first-run';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { errorsFor, harnessesFor, initStartFlow, orderRunners } from '../../src/renderer/start-flow';
@@ -35,6 +35,17 @@ function listing(): DefinitionListing {
       { name: 'implementer', path: 'agents/implementer.yaml', description: '', harness: 'codex', valid: true },
     ],
     errors: [{ file: 'environments/broken.yaml', line: 4, column: 3, field: 'image', rule: 'image.required', message: 'image is required', url: 'https://github.com/octo/config/blob/ccc/environments/broken.yaml#L4' }],
+  };
+}
+
+function github(configRepo: string | null): IntegrationProviderInfo {
+  return {
+    kind: 'integration',
+    id: 'github',
+    label: 'GitHub',
+    status: { state: 'connected', detail: '' },
+    auth: { connected: true, detail: '', pending: false },
+    github: { login: 'octocat', configRepo, installUrl: null, server: 'http://localhost:8765' },
   };
 }
 
@@ -246,6 +257,177 @@ describe('start flow', () => {
     expect(q<HTMLSelectElement>('.sf-ref').value).toBe('tag:v9.0.0');
     expect(at).toHaveBeenLastCalledWith({ kind: 'tag', name: 'v9.0.0' });
     expect(q('[data-definition="example"]')).not.toBeNull();
+  });
+
+  it('reads the new repo when commit mode was left blank', async () => {
+    const { flow, q, bridge } = setup();
+    const providers = bridge.providers as ReturnType<typeof vi.fn>;
+    const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
+    const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
+    providers.mockResolvedValue([github('namikmesic/puck'), harness('claude-code', true), harness('codex', true)]);
+    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    at.mockResolvedValue({
+      ...listing(),
+      repo: 'namikmesic/puck',
+      pin: { kind: 'branch', name: 'main', sha: 'e'.repeat(40) },
+      environments: [],
+      agents: [],
+      errors: [],
+    });
+    await flow.open();
+    await flush();
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once you pick a version.');
+    flow.close();
+
+    providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
+    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
+    const fresh = listing();
+    const [example] = fresh.environments;
+    if (!example) throw new Error('fixture');
+    fresh.repo = 'octo/other';
+    fresh.pin = { kind: 'branch', name: 'main', sha: 'f'.repeat(40) };
+    fresh.environments = [{ ...example, name: 'fresh', path: 'environments/fresh.yaml' }];
+    at.mockResolvedValue(fresh);
+    await flow.open();
+    await flush();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('branch:main');
+    expect(q('.sf-sha')).toBeNull();
+    expect(q('[data-definition="fresh"]')).not.toBeNull();
+    expect(at).toHaveBeenLastCalledWith({ kind: 'branch', name: 'main' });
+    expect(q('[data-step="2"]').classList.contains('disabled')).toBe(false);
+  });
+
+  it('drops a commit SHA when the config repo changes', async () => {
+    const { flow, q, bridge } = setup();
+    const providers = bridge.providers as ReturnType<typeof vi.fn>;
+    const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
+    const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
+    providers.mockResolvedValue([github('namikmesic/puck'), harness('claude-code', true), harness('codex', true)]);
+    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    at.mockResolvedValue({
+      ...listing(),
+      repo: 'namikmesic/puck',
+      pin: { kind: 'branch', name: 'main', sha: 'e'.repeat(40) },
+      environments: [],
+      agents: [],
+      errors: [],
+    });
+    await flow.open();
+    await flush();
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    at.mockRejectedValueOnce(new Error('Error invoking remote method \'defs:at\': Error: No commit "deadbee" in namikmesic/puck.'));
+    const sha = q<HTMLInputElement>('.sf-sha');
+    sha.value = 'deadbee';
+    sha.dispatchEvent(new Event('change'));
+    await flush();
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('The chosen version could not be read.');
+    flow.close();
+
+    providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
+    refs.mockResolvedValue({ tags: [{ name: 'v9.0.0', sha: 'a'.repeat(40) }], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: 'v9.0.0' });
+    const fresh = listing();
+    const [example] = fresh.environments;
+    if (!example) throw new Error('fixture');
+    fresh.repo = 'octo/other';
+    fresh.pin = { kind: 'tag', name: 'v9.0.0', sha: 'a'.repeat(40) };
+    fresh.environments = [{ ...example, name: 'fresh', path: 'environments/fresh.yaml' }];
+    at.mockResolvedValue(fresh);
+    await flow.open();
+    await flush();
+    expect(q('.sf-error')).toBeNull();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('tag:v9.0.0');
+    expect(q('.sf-sha')).toBeNull();
+    expect(q('[data-definition="fresh"]')).not.toBeNull();
+    expect(at).toHaveBeenLastCalledWith({ kind: 'tag', name: 'v9.0.0' });
+    expect(q('[data-step="2"] .sf-step-why')).toBeNull();
+  });
+
+  it('keeps the commit and the runner when the config repo stays the same', async () => {
+    const { flow, q, bridge } = setup();
+    const providers = bridge.providers as ReturnType<typeof vi.fn>;
+    providers.mockResolvedValue([github('octo/config'), harness('claude-code', true), harness('codex', true)]);
+    await flow.open();
+    await flush();
+    const pick = q<HTMLInputElement>(`[data-runner="${RID}"] input`);
+    pick.checked = true;
+    pick.dispatchEvent(new Event('change'));
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    const sha = q<HTMLInputElement>('.sf-sha');
+    sha.value = 'abcdef1';
+    sha.dispatchEvent(new Event('change'));
+    await flush();
+    flow.close();
+    await flow.open();
+    await flush();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('commit');
+    expect(q<HTMLInputElement>('.sf-sha').value).toBe('abcdef1');
+    expect(bridge.definitionsAt).toHaveBeenLastCalledWith({ kind: 'commit', name: 'abcdef1' });
+    expect(q(`[data-runner="${RID}"]`).classList.contains('selected')).toBe(true);
+  });
+
+  it('drops the runner when the reopened listing selects a different definition', async () => {
+    const { flow, q, bridge, startBtn } = setup();
+    const providers = bridge.providers as ReturnType<typeof vi.fn>;
+    providers.mockResolvedValue([github('octo/config'), harness('claude-code', true), harness('codex', true)]);
+    await flow.open();
+    await flush();
+    const pick = q<HTMLInputElement>(`[data-runner="${RID}"] input`);
+    pick.checked = true;
+    pick.dispatchEvent(new Event('change'));
+    expect(q(`[data-runner="${RID}"]`).classList.contains('selected')).toBe(true);
+    flow.close();
+
+    providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
+    const fresh = listing();
+    const [example] = fresh.environments;
+    if (!example) throw new Error('fixture');
+    fresh.repo = 'octo/other';
+    fresh.environments = [{ ...example, name: 'fresh', path: 'environments/fresh.yaml', orchestrator: null, agents: [], secrets: [] }];
+    fresh.agents = [];
+    (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockResolvedValue(fresh);
+    await flow.open();
+    await flush();
+    expect(q('[data-definition="fresh"]').classList.contains('selected')).toBe(true);
+    expect(q(`[data-runner="${RID}"]`).classList.contains('selected')).toBe(false);
+    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('Opens once you pick a runner.');
+    expect(q('.sf-why').textContent).toBe('Pick a runner.');
+    expect(startBtn().disabled).toBe(true);
+  });
+
+  it('leaves a commit pin in place while a harness sign-in reloads providers', async () => {
+    const { flow, q, bridge } = setup();
+    const providers = bridge.providers as ReturnType<typeof vi.fn>;
+    providers.mockResolvedValue([github('octo/config'), harness('claude-code', true), harness('codex', false)]);
+    await flow.open();
+    await flush();
+    const pick = q<HTMLInputElement>(`[data-runner="${RID}"] input`);
+    pick.checked = true;
+    pick.dispatchEvent(new Event('change'));
+    const ref = q<HTMLSelectElement>('.sf-ref');
+    ref.value = 'commit';
+    ref.dispatchEvent(new Event('change'));
+    await flush();
+    const sha = q<HTMLInputElement>('.sf-sha');
+    sha.value = 'abcdef1';
+    sha.dispatchEvent(new Event('change'));
+    await flush();
+    providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
+    (q('[data-harness="codex"] button') as HTMLButtonElement).click();
+    await flush();
+    expect(q<HTMLSelectElement>('.sf-ref').value).toBe('commit');
+    expect(q<HTMLInputElement>('.sf-sha').value).toBe('abcdef1');
+    expect(bridge.definitionsAt).toHaveBeenLastCalledWith({ kind: 'commit', name: 'abcdef1' });
+    flow.close();
   });
 
   it('says the chosen version could not be read when that version fails', async () => {

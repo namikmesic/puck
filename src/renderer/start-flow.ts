@@ -29,6 +29,7 @@ import type {
   DefinitionRefs,
   HarnessProviderInfo,
   InstanceInfo,
+  IntegrationProviderInfo,
   PinSpec,
   ProviderInfo,
   PuckBridge,
@@ -102,6 +103,7 @@ export function initStartFlow(ctx: StartFlowContext) {
   let startError = '';
   let startedId: string | null = null;
   let isOpen = false;
+  let seenConfigRepo: string | null | undefined;
 
   function selectedPin(): PinSpec | null {
     if (pinValue === 'commit') return SHA_RE.test(commit.trim()) ? { kind: 'commit', name: commit.trim().toLowerCase() } : null;
@@ -181,7 +183,9 @@ export function initStartFlow(ctx: StartFlowContext) {
       listing = next;
       if (!next.environments.some((e) => e.name === definition && e.startable)) {
         const startable = next.environments.filter((e) => e.startable);
-        definition = startable.length === 1 ? (startable[0]?.name ?? null) : null;
+        const nextName = startable.length === 1 ? (startable[0]?.name ?? null) : null;
+        if (nextName !== definition) runnerId = null;
+        definition = nextName;
       }
     } catch (err) {
       if (mine !== listingToken) return;
@@ -194,9 +198,16 @@ export function initStartFlow(ctx: StartFlowContext) {
     }
   }
 
-  async function loadHarnesses(): Promise<void> {
-    const infos: ProviderInfo[] = await bridge.providers().catch(() => []);
-    harnesses = infos.filter((p): p is HarnessProviderInfo => p.kind === 'harness');
+  async function loadHarnesses(): Promise<string | null | undefined> {
+    try {
+      const infos = await bridge.providers();
+      harnesses = infos.filter((p): p is HarnessProviderInfo => p.kind === 'harness');
+      const github = infos.find((p): p is IntegrationProviderInfo => p.kind === 'integration' && p.id === 'github');
+      return github?.github.configRepo ?? null;
+    } catch {
+      harnesses = [];
+      return undefined;
+    }
   }
 
   function stopPolling(): void {
@@ -577,7 +588,12 @@ export function initStartFlow(ctx: StartFlowContext) {
       listingError = '';
       loading = false;
       render();
-      await loadHarnesses();
+      const repo = await loadHarnesses();
+      if (repo !== undefined && seenConfigRepo !== undefined && repo !== seenConfigRepo) {
+        pinValue = '';
+        commit = '';
+      }
+      if (repo !== undefined) seenConfigRepo = repo;
       try {
         refs = await bridge.definitionRefs();
         refsError = '';
