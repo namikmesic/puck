@@ -95,6 +95,11 @@ describe('session view', () => {
 
   // Follow-up v2-history-failure-drops-replay: a failed history load keeps
   // the events that arrived meanwhile, and a retry shows the page plus them.
+  // The replay cursor no longer depends on history at all: the store's
+  // cursor follows the snapshot and the event stream (main's persisted
+  // lastSeq was never involved), and each thread keeps the live events it
+  // has not shown until its page lands, so a failed load cannot commit a
+  // cursor past events the thread never rendered.
   it('v2-history-failure-drops-replay: a failed load keeps waiting events and Retry renders page plus tail', async () => {
     const pages: (Page | Error)[] = [new Error('connection dropped'), page([user('earlier', 1)], 11)];
     const history = vi.fn(async () => {
