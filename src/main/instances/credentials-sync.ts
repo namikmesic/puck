@@ -56,11 +56,3 @@ export async function syncOnAttach(deps: SyncDeps, used: string[], remove: strin
   if (puts.length) await deps.put({ harness: puts });
   return { pushed: puts.filter((p) => p.content !== null).map((p) => p.id), removed };
 }
-
-/** After a login: push the fresh file for `id` into the attached environment, if it uses it. */
-export async function pushOne(deps: SyncDeps, h: SyncHarness): Promise<boolean> {
-  const fresh = await h.fresh();
-  if (!fresh || !fresh.current()) return false;
-  await deps.put({ harness: [{ id: h.id, content: fresh.content }] });
-  return true;
-}

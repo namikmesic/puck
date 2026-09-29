@@ -151,17 +151,36 @@ function syncDeps(client: DaemonClient): SyncDeps {
   };
 }
 
-async function syncAttached(client: DaemonClient): Promise<void> {
-  const envId = client.envId;
-  const cursor = store.cursor(envId);
-  const pending = cursor?.pendingCredentialRemoval ?? [];
-  try {
-    const { pushed, removed } = await syncOnAttach(syncDeps(client), cursor?.harnesses ?? [], pending);
-    if (pending.length) store.updateCursor(envId, { pendingCredentialRemoval: [] });
-    if (pushed.length || removed.length) log.info('instance.credentials-synced', { envId, pushed, removed });
-  } catch (err) {
-    log.warn('instance.credentials-sync-failed', { envId, error: (err as Error).message.slice(0, 200) });
-  }
+/** Attach-time sync and a live credential delete, one at a time. */
+let credentialChain: Promise<unknown> = Promise.resolve();
+
+function credentialOp<T>(fn: () => Promise<T>): Promise<T> {
+  const next = credentialChain.catch(() => undefined).then(fn);
+  credentialChain = next;
+  void next
+    .finally(() => {
+      if (credentialChain === next) credentialChain = Promise.resolve();
+    })
+    .catch(() => undefined);
+  return next;
+}
+
+function syncAttached(client: DaemonClient): Promise<void> {
+  return credentialOp(async () => {
+    const envId = client.envId;
+    const cursor = store.cursor(envId);
+    const pending = cursor?.pendingCredentialRemoval ?? [];
+    try {
+      const { pushed, removed } = await syncOnAttach(syncDeps(client), cursor?.harnesses ?? [], pending);
+      if (removed.length) {
+        const current = store.cursor(envId)?.pendingCredentialRemoval ?? [];
+        store.updateCursor(envId, { pendingCredentialRemoval: current.filter((id) => !removed.includes(id)) });
+      }
+      if (pushed.length || removed.length) log.info('instance.credentials-synced', { envId, pushed, removed });
+    } catch (err) {
+      log.warn('instance.credentials-sync-failed', { envId, error: (err as Error).message.slice(0, 200) });
+    }
+  });
 }
 
 /** A harness sign-in landed: the attached environment gets the fresh file (if it uses that harness). */
@@ -187,13 +206,15 @@ export async function onHarnessLogout(harnessId: string): Promise<void> {
     }
   }
   if (!live) return;
-  try {
-    await live.cmd('credentials.put', { harness: [{ id: harnessId, content: null }] });
-    const c = store.cursor(live.envId);
-    store.updateCursor(live.envId, { pendingCredentialRemoval: (c?.pendingCredentialRemoval ?? []).filter((id) => id !== harnessId) });
-  } catch (err) {
-    log.warn('instance.credentials-remove-failed', { envId: live.envId, error: (err as Error).message.slice(0, 200) });
-  }
+  await credentialOp(async () => {
+    try {
+      await live.cmd('credentials.put', { harness: [{ id: harnessId, content: null }] });
+      const c = store.cursor(live.envId);
+      store.updateCursor(live.envId, { pendingCredentialRemoval: (c?.pendingCredentialRemoval ?? []).filter((id) => id !== harnessId) });
+    } catch (err) {
+      log.warn('instance.credentials-remove-failed', { envId: live.envId, error: (err as Error).message.slice(0, 200) });
+    }
+  });
 }
 
 /* ---------- Attach ---------- */

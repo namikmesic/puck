@@ -223,6 +223,85 @@ describe('environment manager', { timeout: 30_000 }, () => {
     expect(JSON.parse(fs.readFileSync(path.join(dir, 'daemon.json'), 'utf8')).credentials).toEqual([{ id: 'claude-code', content: '{"token":"s3cret"}' }]);
     app.instances.shutdown();
   });
+
+  it('a sign-out during an attach sync does not restore that harness credential', async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-mgr-'));
+    const socket = path.join(dir, 's.sock');
+    fs.writeFileSync(path.join(dir, 'daemon.json'), JSON.stringify({ events: [], credentials: [{ id: 'claude-code', content: '{"token":"s3cret"}' }] }));
+    await thisMacRunner(socket);
+
+    let releaseRefresh: () => void = () => undefined;
+    let refreshWaiting = false;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let app: Awaited<ReturnType<typeof launch>> | null = null;
+    let claudeAccount: { logout(): Promise<void> } | null = null;
+    let codexAccount: { logout(): Promise<void> } | null = null;
+    const creds = (): { id: string }[] =>
+      (JSON.parse(fs.readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as { credentials: { id: string }[] }).credentials;
+    try {
+      app = await launch();
+      app.store.setLocalRunner({ runnerId: RUNNER, dir, socket });
+      app.runners.onPush({
+        type: 'instance.upsert',
+        instance: { id: ENV, runnerId: RUNNER, definition: 'example', status: 'active', createdAt: 1, updatedAt: 1, repos: [] },
+      });
+      const claude = await import('../../src/main/providers/claude-oauth');
+      const codex = await import('../../src/main/providers/codex-oauth');
+      claudeAccount = claude.account;
+      codexAccount = codex.account;
+      claude.account.save({
+        accessToken: 'claude-access',
+        refreshToken: 'claude-refresh',
+        expiresAt: Date.now() + 60 * 60_000,
+        scopes: ['user:inference'],
+      });
+      codex.account.save({
+        idToken: 'id',
+        accessToken: 'codex-access',
+        refreshToken: 'codex-refresh',
+        accountId: 'acct',
+        lastRefresh: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          if (!url.includes('auth.openai.com')) throw new Error(`unexpected fetch ${url}`);
+          refreshWaiting = true;
+          await refreshGate;
+          return new Response(JSON.stringify({ id_token: 'id2', access_token: 'access2', refresh_token: 'refresh2' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }),
+      );
+      const cursors = await import('../../src/main/instances/store');
+      cursors.updateCursor(ENV, { harnesses: ['claude-code', 'codex'], pendingCredentialRemoval: ['leftover'] });
+
+      await app.instances.open(ENV);
+      await until('codex refresh held', () => refreshWaiting);
+      await claude.account.logout();
+      const removal = app.instances.onHarnessLogout('claude-code');
+      releaseRefresh();
+      await removal;
+      await until('sync put landed', () => creds().some((c) => c.id === 'codex'));
+      const { flushWrites } = await import('../../src/main/jsonstore');
+      await flushWrites();
+      expect(creds().some((c) => c.id === 'claude-code')).toBe(false);
+      const saved = JSON.parse(fs.readFileSync(path.join(app.data, 'puck-instances.json'), 'utf8')) as {
+        instances: Record<string, { pendingCredentialRemoval: string[] }>;
+      };
+      expect(saved.instances[ENV].pendingCredentialRemoval).toEqual(['leftover']);
+    } finally {
+      releaseRefresh();
+      vi.unstubAllGlobals();
+      await claudeAccount?.logout().catch(() => undefined);
+      await codexAccount?.logout().catch(() => undefined);
+      app?.instances.shutdown();
+    }
+  });
 });
 
 describe('puck-instances.json', () => {
