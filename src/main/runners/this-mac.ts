@@ -305,7 +305,10 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
     const releases = await api.releases();
     gate();
     const asset = releases.assets.find((a) => a.os === 'macos' && a.arch === 'arm64' && a.version === releases.latest);
-    if (!asset) throw new Error('The Puck server publishes no runner for macOS on Apple silicon yet.');
+    if (!asset) {
+      const devMode = releases.assets.length === 0 ? ' Runner downloads come only from a Puck server in development mode.' : '';
+      throw new Error(`This Puck server has no runner package for macOS on Apple silicon.${devMode}`);
+    }
 
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

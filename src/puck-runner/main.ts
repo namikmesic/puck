@@ -34,8 +34,9 @@ Registers this machine with Puck as a runner that hosts your environments.
 The runner connects out to the Puck server; nothing connects in.
 
 Needs Docker Engine 24 or newer, usable by this user without sudo, and
-outbound HTTPS to the Puck server. Membership in the docker group is
-equivalent to root on this machine: prefer a dedicated user for the runner.
+outbound HTTP or HTTPS to the Puck server, matching its URL. Membership
+in the docker group is equivalent to root on this machine: prefer a
+dedicated user for the runner.
 
 Options:
   --url <url>                 The Puck server, e.g. https://puck.example.com

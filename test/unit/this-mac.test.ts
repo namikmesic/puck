@@ -314,6 +314,21 @@ describe('This Mac runner', () => {
     await expect(thisMac.install([])).rejects.toThrow(/macOS on Apple silicon/);
   });
 
+  it('says downloads exist only in development mode when the server publishes no runner packages', async () => {
+    fs.rmSync(path.join(downloads, '0.1.0', TARBALL));
+    deps(fakeExec([]), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/^This Puck server has no runner package for macOS on Apple silicon\. Runner downloads come only from a Puck server in development mode\.$/);
+    expect(thisMac.localState().error).toBe('This Puck server has no runner package for macOS on Apple silicon. Runner downloads come only from a Puck server in development mode.');
+  });
+
+  it('names the missing macOS package when the server publishes other platforms', async () => {
+    fs.rmSync(path.join(downloads, '0.1.0', TARBALL));
+    fs.writeFileSync(path.join(downloads, '0.1.0', 'puck-runner-linux-x64-0.1.0.tar.gz'), 'linux bytes');
+    deps(fakeExec([]), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/^This Puck server has no runner package for macOS on Apple silicon\.$/);
+    expect(thisMac.localState().error).toBe('This Puck server has no runner package for macOS on Apple silicon.');
+  });
+
   it('uninstall deregisters keeping the environments, then removes the directory', async () => {
     const calls: Call[] = [];
     thisMac.useThisMacDeps({ exec: fakeExec(calls), platform: 'darwin', arch: 'arm64', hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });

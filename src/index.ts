@@ -13,6 +13,7 @@ import * as github from './main/providers/github';
 import * as instances from './main/instances';
 import * as runners from './main/runners';
 import * as serverApi from './main/server/api';
+import { NotSignedInError, current as currentSession } from './main/server/session';
 import { log } from './main/log';
 import { flushWrites } from './main/jsonstore';
 import { flushRenderers, installQuitDrain } from './main/shutdown';
@@ -155,8 +156,11 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.providerAuthLogout]: (_event, id) => signInProvider(requireId(id, 'provider')).auth.logout(),
   [CHANNELS.runners]: () => runners.state(),
   [CHANNELS.runnerRegistrationToken]: async () => {
+    // Signed out fails here, before any request. Releases still come before
+    // the token so a failed read leaves nothing behind.
+    if (!currentSession()) throw new NotSignedInError();
+    const releases = await serverApi.releases();
     const token = await serverApi.registrationToken();
-    const releases = await serverApi.releases().catch(() => ({ latest: null, assets: [] }));
     return {
       id: token.id,
       token: token.token,

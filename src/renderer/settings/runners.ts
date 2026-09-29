@@ -10,8 +10,15 @@
  *   click). This Mac's Remove uninstalls it.
  * - Add runner, GitHub's self-hosted runner flow: pick This Mac or a
  *   platform, copy the download, checksum, configure and run commands with
- *   a one-hour registration token (Cancel revokes it), and watch the runner
- *   come online with its Docker version and capacity.
+ *   a one-hour registration token (Cancel or Close revokes one still
+ *   outstanding), and watch the runner come online with its Docker version
+ *   and capacity. A platform the server publishes no package for says so
+ *   and waits for nothing. That note mentions development mode only when
+ *   the server publishes no packages at all; a token no platform can use
+ *   is revoked at once. A loopback server URL warns that a runner on
+ *   another machine cannot reach it there, and adds that This Mac still
+ *   works only when This Mac is already installed or the server publishes
+ *   a macOS ARM64 package.
  *
  * A controller that survives re-renders: a runner-list push or a focus
  * refresh redraws the list and restores an open dialog and a half-typed
@@ -31,7 +38,7 @@ import type {
 } from '../../harness/bridge';
 import { armDelete, el } from '../dom';
 import { relTime } from '../format';
-import { button, errText } from '../util';
+import { buildSeg, button, errText } from '../util';
 import { cardShell } from './cards';
 
 const SIGNED_OUT =
@@ -53,7 +60,7 @@ export interface RunnersView {
   close(): void;
 }
 
-type Platform = 'this-mac' | 'linux-x64' | 'linux-arm64' | 'macos-arm64';
+export type Platform = 'this-mac' | 'linux-x64' | 'linux-arm64' | 'macos-arm64';
 
 const PLATFORMS: { id: Platform; label: string }[] = [
   { id: 'this-mac', label: 'This Mac' },
@@ -105,6 +112,28 @@ export function statusWord(r: RunnerRow): string {
   return 'Idle';
 }
 
+/** The package the server publishes for a remote platform, if any. */
+export function assetFor(assets: readonly RunnerAsset[], platform: Platform): RunnerAsset | undefined {
+  const [os, arch] = platform.split('-');
+  return assets.find((a) => a.os === os && a.arch === arch);
+}
+
+/** What the Add runner copy says about the server URL: its scheme, host, and
+ *  whether it is loopback (localhost, 127.0.0.0/8, ::1), which on another
+ *  machine names that machine itself. */
+export function serverAddress(url: string): { scheme: 'HTTP' | 'HTTPS'; host: string; loopback: boolean } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const name = parsed.hostname.toLowerCase();
+  const loopback = name === 'localhost' || name.endsWith('.localhost') || name === '[::1]' || /^127(\.\d{1,3}){3}$/.test(name);
+  return { scheme: parsed.protocol === 'https:' ? 'HTTPS' : 'HTTP', host: parsed.host, loopback };
+}
+
 /** The copy-paste blocks for one platform's tarball. */
 export function commandsFor(asset: RunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
   const mac = asset.os === 'macos';
@@ -146,6 +175,8 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
   let add: {
     platform: Platform;
     reg: RunnerRegistration | null;
+    /** The token was revoked because no platform has a package to use it with. */
+    released: boolean;
     error: string | null;
     openedAt: number;
     known: Set<string>;
@@ -158,6 +189,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     add = {
       platform,
       reg: null,
+      released: false,
       error: null,
       openedAt: now(),
       known: new Set((state?.runners ?? []).map((r) => r.id)),
@@ -165,6 +197,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
       timer: setInterval(() => drawAdd(), 30_000),
     };
     drawAdd();
+    drawFoot();
     void fetchToken();
   }
 
@@ -174,7 +207,14 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     mine.error = null;
     drawAdd();
     try {
-      mine.reg = await ctx.bridge.runnerRegistrationToken();
+      const reg = await ctx.bridge.runnerRegistrationToken();
+      mine.reg = reg;
+      mine.released = false;
+      // Nothing to download on any platform: no runner can register with it.
+      if (!PLATFORMS.some((p) => p.id !== 'this-mac' && assetFor(reg.assets, p.id))) {
+        mine.released = true;
+        void ctx.bridge.runnerRegistrationCancel(reg.id).catch(() => undefined);
+      }
     } catch (err) {
       mine.error = errText(err);
     }
@@ -243,27 +283,39 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     addPanel.appendChild(el('p', 'pv-note', 'A runner is a machine that hosts Puck environments. It connects out to Puck; Puck never connects in.'));
     const picker = el('div', 'seg rn-os');
     picker.id = 'rn-add-os';
-    picker.setAttribute('role', 'radiogroup');
-    for (const p of PLATFORMS) {
-      const b = button('seg-btn', p.label);
-      b.dataset.platform = p.id;
-      b.setAttribute('aria-pressed', String(p.id === add.platform));
-      b.addEventListener('click', () => {
+    picker.setAttribute('role', 'group');
+    picker.setAttribute('aria-label', 'Platform');
+    buildSeg(
+      picker,
+      PLATFORMS.map((p) => ({ value: p.id, label: p.label })),
+      add.platform,
+      (value) => {
         if (!add) return;
-        add.platform = p.id;
+        add.platform = value as Platform;
         drawAdd();
-      });
-      picker.appendChild(b);
-    }
+      },
+    );
     addPanel.appendChild(picker);
 
+    let waiting = false;
     if (add.platform === 'this-mac') {
       addPanel.appendChild(thisMacBlock());
     } else {
-      const host = new URL(add.reg?.serverUrl || state?.server || 'http://puck').host;
+      const server = serverAddress(add.reg?.serverUrl || state?.server || '');
+      const reach = server ? `outbound ${server.scheme} to ${server.host}` : 'outbound access to the Puck server';
       addPanel.appendChild(
-        el('p', 'pv-note', `Needs: Docker Engine 24 or newer that the runner's user can use without sudo, and outbound HTTPS to ${host}. Membership in the docker group is equivalent to root on that machine; a dedicated user is safer.`),
+        el('p', 'pv-note', `Needs: Docker Engine 24 or newer that the runner's user can use without sudo, and ${reach}. Membership in the docker group is equivalent to root on that machine; a dedicated user is safer.`),
       );
+      if (server?.loopback) {
+        const macWorks = !!state?.local.installed || !!assetFor(add.reg?.assets ?? [], 'macos-arm64');
+        const warn = el(
+          'div',
+          'pv-health-msg rn-unreachable',
+          `A runner on another machine can't reach this Puck server at ${server.host}: on that machine, ${server.host.replace(/:\d+$/, '')} is the machine itself. It needs the server at an address it can reach, set as the server's public URL (PUCK_SERVER_URL).${macWorks ? ' This Mac still works as a runner.' : ''}`,
+        );
+        warn.id = 'rn-add-unreachable';
+        addPanel.appendChild(warn);
+      }
       const commands = el('div', 'rn-commands');
       commands.id = 'rn-add-commands';
       if (add.error) {
@@ -274,11 +326,19 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
       } else if (!add.reg) {
         commands.appendChild(el('div', 'cards-loading', 'Getting a registration token…'));
       } else {
-        const [os, arch] = add.platform.split('-');
-        const asset = add.reg.assets.find((a) => a.os === os && a.arch === arch);
+        const asset = assetFor(add.reg.assets, add.platform);
         if (!asset) {
-          commands.appendChild(el('div', 'pv-health-msg', `The Puck server publishes no runner for ${platformText({ os, arch })} yet.`));
+          const [os, arch] = add.platform.split('-');
+          const devMode = add.reg.assets.length === 0 ? ' Runner downloads come only from a Puck server in development mode.' : '';
+          commands.appendChild(
+            el(
+              'div',
+              'pv-health-msg rn-no-package',
+              `This Puck server has no runner package for ${platformText({ os, arch })}.${devMode} With a package, this panel shows the commands to download it and to configure it with this server's address, ${add.reg.serverUrl}, and a registration token.`,
+            ),
+          );
         } else {
+          waiting = true;
           const c = commandsFor(asset, add.reg);
           commands.appendChild(codeBlock('Download', c.download));
           commands.appendChild(codeBlock('Configure', c.configure));
@@ -299,17 +359,13 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
 
     const status = el('div', add.online ? 'rn-online' : 'rn-waiting');
     status.id = 'rn-add-status';
-    status.textContent = add.online
-      ? `✓ ${add.online.name} is online · ${runnerMeta(add.online)}`
-      : add.platform === 'this-mac'
-        ? ''
-        : '◌ Waiting for a runner to register…';
+    status.textContent = add.online ? `✓ ${add.online.name} is online · ${runnerMeta(add.online)}` : waiting ? '◌ Waiting for a runner to register…' : '';
     addPanel.appendChild(status);
     const f = el('div', 'card-foot');
-    const done = button(add.online ? 'btn-primary' : 'btn-ghost', add.online ? 'Done' : 'Cancel');
+    const done = button(add.online ? 'btn-primary' : 'btn-ghost', add.online ? 'Done' : waiting ? 'Cancel' : 'Close');
     done.addEventListener('click', () => {
       const was = add;
-      if (was?.reg && !was.online) void ctx.bridge.runnerRegistrationCancel(was.reg.id).catch(() => undefined);
+      if (was?.reg && !was.released && !was.online) void ctx.bridge.runnerRegistrationCancel(was.reg.id).catch(() => undefined);
       closeAdd();
     });
     f.appendChild(done);

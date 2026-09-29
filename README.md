@@ -286,7 +286,7 @@ Without configuration it starts with GitHub disabled.
 To enable GitHub sign-in, copy `src/server/puck-server.env.example` to `puck-server.env` (git-ignored) and fill in your GitHub App's id, client id, client secret and private key.
 `src/server/README.md` lists every setting, the endpoints, and how secrets reach the container.
 
-A runner on another machine must reach the server at the URL it registers with, so a server on `localhost` can host only This Mac's runner until you publish it at an address those machines can reach.
+A runner on another machine must reach the server at the URL it registers with. On that machine `localhost` is the machine itself, so set `PUCK_SERVER_URL` to an address it can reach before registering it. This Mac works as a runner on the local server when it is already installed, or when the server publishes a macOS ARM64 package.
 
 ## License
 
