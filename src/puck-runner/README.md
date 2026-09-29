@@ -16,7 +16,7 @@ Use a dedicated user for the runner where you can (`sudo ./svc.sh install puck-r
 
 ## Install
 
-In Puck, open Settings → Providers → Runners → Add runner, pick the platform, and copy the commands it shows.
+In Puck, open Settings → Runners → Add runner, pick the platform, and copy the commands it shows.
 They look like this:
 
 ```bash
@@ -51,7 +51,7 @@ Configure with `--disableupdate` to update by hand instead; a server that requir
 
 ## Remove
 
-In Puck, Settings → Providers → Runners → Remove shows the command:
+In Puck, Settings → Runners → Remove shows the command:
 
 ```bash
 ./config.sh remove --token PRR_…
@@ -80,7 +80,7 @@ A runner removed from Settings while its machine was offline stops with exit sta
 - **Encrypted channels.** The app reaches the runner through channels the server relays.
   Each channel's key exchange is signed with the runner's key, so the server forwards bytes it cannot read.
   A control channel carries commands (create, start, stop, rebuild, delete, list, logs); an attach channel pipes the app to one environment's daemon through `docker exec`.
-- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Providers → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket`, and installs the LaunchAgent.
+- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket`, and installs the LaunchAgent.
   With `--local-socket <path>` the runner also listens on that unix socket (0600), and the app on the same machine opens its channels there, unencrypted and without the server; file permissions are the authentication.
 - **Docker, by label.** Environments are containers labelled `puck=instance`, with two named volumes each.
   The runner never mounts a host directory or the Docker socket into them, and copies files in as a tar stream.

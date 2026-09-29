@@ -128,7 +128,7 @@ describe('runner rows', () => {
 
   it('signed out: a note and no Add runner', () => {
     const { card } = mount(runnersState({ signedIn: false, runners: [] }));
-    expect(card.textContent).toContain('Sign in to Puck with GitHub (Integrations below) to add runners.');
+    expect(card.textContent).toContain('Sign in to Puck with GitHub on the Providers page to add runners.');
     expect(btn(card, 'Add runner')).toBeUndefined();
   });
 

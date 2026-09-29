@@ -17,7 +17,7 @@ export interface SettingsModalElements {
   nav: HTMLElement;
   close: HTMLButtonElement;
   sections: Record<SettingsSection, HTMLElement>;
-  providers: Omit<ProvidersElements, 'envCards'>;
+  providers: ProvidersElements;
   runners: { cards: HTMLElement; msg: HTMLElement };
   support: SupportElements;
 }
@@ -83,7 +83,6 @@ export function initSettingsModal(ctx: SettingsModalContext) {
     },
     runnersChanged(state: RunnersState): void {
       runners.runnersChanged(state);
-      providers.runnersChanged(state);
     },
   };
 }

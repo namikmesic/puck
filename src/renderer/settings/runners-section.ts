@@ -1,9 +1,8 @@
 /**
- * Settings → Runners (`rn-*`), the environment window's own section for
- * the machines that host environments: the runner list with Rename,
- * Labels and Remove in each row's menu, and Add runner (see runners.ts,
- * which the older window shows inside Providers). Runner events update the
- * list in place. Context/elements in, controller out.
+ * Settings → Runners (`rn-*`): the machines that host environments, as the
+ * runner list with Rename, Labels and Remove in each row's menu, and Add
+ * runner (the card itself is runners.ts). Runner events update the list
+ * in place. Context/elements in, controller out.
  */
 
 import type { EnvironmentProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../../harness/bridge';
@@ -26,7 +25,6 @@ export function initRunnersSection(ctx: RunnersSectionContext) {
     bridge: ctx.bridge,
     say,
     copy: ctx.copy,
-    signedOutNote: 'Sign in to Puck with GitHub on the Providers page to add runners. Runners belong to your Puck account.',
   });
   let shown = false;
 

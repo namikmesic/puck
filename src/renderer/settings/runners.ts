@@ -1,6 +1,5 @@
 /**
- * Settings → Providers → Runners: the machines that host the user's
- * environments.
+ * Settings → Runners: the machines that host the user's environments.
  *
  * - The list: one row per runner, This Mac first: status (Idle, Active ·
  *   n environments, Offline · last seen), platform, Docker version, CPUs,
@@ -34,17 +33,14 @@ import { relTime } from '../format';
 import { button, errText } from '../util';
 import { cardShell } from './cards';
 
-/** The Providers page: Integrations is the card under Runners. */
-const SIGNED_OUT_ON_PROVIDERS =
-  'Sign in to Puck with GitHub (Integrations below) to add runners. Runners belong to your Puck account.';
+const SIGNED_OUT =
+  'Sign in to Puck with GitHub on the Providers page to add runners. Runners belong to your Puck account.';
 
 export interface RunnersContext {
   bridge: PuckBridge;
   say(text: string): void;
   copy(text: string): Promise<void>;
   now?(): number;
-  /** Signed-out note. Defaults to the Providers-page sentence. */
-  signedOutNote?: string;
 }
 
 export interface RunnersView {
@@ -363,7 +359,6 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
   function inlineEditor(r: RunnerRow, field: 'name' | 'labels'): HTMLElement {
     const form = el('form', 'rn-edit config-form');
     const input = el('input', '');
-    input.dataset.keep = `rn-${field}-${r.id}`;
     input.setAttribute('aria-label', field === 'name' ? 'Runner name' : 'Labels, comma-separated');
     input.value = field === 'name' ? r.name : r.labels.filter((l) => l !== r.os && l !== r.arch).join(', ');
     input.spellcheck = false;
@@ -493,7 +488,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     list.textContent = '';
     if (!state) return;
     if (!state.signedIn) {
-      list.appendChild(el('p', 'pv-note', ctx.signedOutNote ?? SIGNED_OUT_ON_PROVIDERS));
+      list.appendChild(el('p', 'pv-note', SIGNED_OUT));
       return;
     }
     if (state.connection === 'offline') {

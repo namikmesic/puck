@@ -1,8 +1,8 @@
 {
   "name": "puck",
   "productName": "Puck",
-  "version": "0.0.1",
-  "description": "A macOS desktop client for coding agents — Claude Code and Codex conversations running in Docker sandboxes.",
+  "version": "0.1.0",
+  "description": "A macOS desktop app that orchestrates coding agents: environments started from Git definitions work a backlog with Claude Code and Codex on your runners.",
   "main": ".webpack/main",
   "private": true,
   "engines": {
