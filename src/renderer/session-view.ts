@@ -27,10 +27,9 @@ import type { DaemonEvent, OpResult, SessionSummary } from '../harness/daemon-pr
 import type { EntryAuthor, TranscriptEntry } from '../harness/transcript';
 import type { HarnessEvent } from '../harness/types';
 import { setAskAnswered } from './ask-card';
-import { applyEvent, initChatView, type AssistantTurn } from './chat-view';
+import { applyEvent, initChatView, type AssistantTurn, type Session } from './chat-view';
 import { el } from './dom';
 import type { InstanceStore } from './instance-store';
-import type { Session } from './session-store';
 import { button, errText } from './util';
 
 type HistoryPage = OpResult<'session.history'>;
@@ -76,7 +75,6 @@ interface ThreadNode {
 function freshSession(id: number, title: string): Session {
   const thread = el('ol', 'thread');
   return {
-    log: [],
     id,
     title,
     thread,

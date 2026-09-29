@@ -1,7 +1,7 @@
 /**
- * Recognizing "this resume id no longer resolves" harness errors. Shared by
- * the app's turn routing and the environment daemon's turns, which both
- * retry such a turn once with a fresh session instead of surfacing the error.
+ * Recognizing "this resume id no longer resolves" harness errors. The
+ * environment daemon's turns retry such a turn once with a fresh session
+ * instead of surfacing the error.
  */
 
 /** Provider errors that mean "this resume id no longer resolves". Claude

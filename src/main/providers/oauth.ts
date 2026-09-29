@@ -287,14 +287,10 @@ export function signInStatus(account: { lastError(): string | null }, auth: Prov
   return { state, detail: auth.detail };
 }
 
-/** The Provider `container.credential` surface: the CLI file mirrored from
- *  the shared account's (refreshed) tokens. */
-export function providerCredential<T>(
-  account: OAuthAccount<T>,
-  cfg: { containerPath: string; serialize(tokens: T): string },
-): ProviderCredential {
+/** The Provider `credential` surface: the CLI file mirrored from the
+ *  shared account's (refreshed) tokens. */
+export function providerCredential<T>(account: OAuthAccount<T>, cfg: { serialize(tokens: T): string }): ProviderCredential {
   return {
-    containerPath: cfg.containerPath,
     signedIn: () => account.load() !== null,
     fresh: async () => {
       // Taken before the refresh so a logout during it trips the snapshot too.

@@ -7,7 +7,7 @@
  *   config.sh remove [options]   deregister it                → puck-runner config remove
  *   run.sh                       run the runner               → puck-runner run
  *   svc.sh <command>             run it as a service          → puck-runner svc
- *   bin/node bin/puck-runner.js version
+ *   bin/node bin/puck-runner.cjs version
  *
  * `--help` works everywhere without Docker, a server, or a configuration.
  */
@@ -39,7 +39,7 @@ equivalent to root on this machine: prefer a dedicated user for the runner.
 
 Options:
   --url <url>                 The Puck server, e.g. https://puck.example.com
-  --token <token>             The registration token from Settings → Providers → Runners → Add runner (PRT_…)
+  --token <token>             The registration token from Settings → Runners → Add runner (PRT_…)
   --token-file <file>         Read the token from a file instead of the command line
   --name <name>               Runner name (default: this machine's host name)
   --labels <a,b>              Extra labels, comma-separated
@@ -53,7 +53,7 @@ Options:
   -h, --help                  Show this help
 
 Remove options:
-  --token <token>             The removal token from Settings → Providers → Runners → Remove (PRR_…);
+  --token <token>             The removal token from Settings → Runners → Remove (PRR_…);
                               without one, the runner signs the request with its own key
   --token-file <file>         Read the token from a file
   --keep-environments         Keep this machine's environments (delete them later with docker)

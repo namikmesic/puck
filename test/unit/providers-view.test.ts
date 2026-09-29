@@ -49,8 +49,6 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
     providerAuthStart: vi.fn(async () => ({ url: 'https://claude.ai/oauth' })),
     providerAuthCancel: vi.fn(async () => undefined),
     providerAuthLogout: vi.fn(async () => undefined),
-    runners: vi.fn(async () => runnersInfo().runners),
-    runnerUpdate: vi.fn(async () => runnersInfo().runners),
     githubInstallations: vi.fn(async () => []),
     githubRepos: vi.fn(async () => []),
     githubSetConfigRepo: vi.fn(async () => infos),
@@ -59,7 +57,6 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
   } as unknown as PuckBridge;
   const els = {
     harnessCards: document.createElement('div'),
-    envCards: document.createElement('div'),
     integrationCards: document.createElement('div'),
     msg: document.createElement('div'),
   } satisfies ProvidersElements;
@@ -77,18 +74,12 @@ const btn = (root: HTMLElement, text: string): HTMLButtonElement =>
   [...root.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement;
 
 describe('providers view', () => {
-  it('when signed out, the Runners card points at Integrations below it', async () => {
-    const { els, view } = mount([runnersCard({ signedIn: false, runners: [] })]);
-    await view.render();
-    expect(els.envCards.textContent).toContain('Sign in to Puck with GitHub (Integrations below) to add runners.');
-  });
-
-  it('groups cards by kind and shares the list with the harness cache', async () => {
+  it('groups cards by kind, leaves runners to their own section, and shares the list with the harness cache', async () => {
     const infos = [harness(), harness({ id: 'codex', label: 'Codex' }), runnersCard(), gh()];
     const { els, view, onProviders } = mount(infos);
     await view.render();
     expect([...els.harnessCards.querySelectorAll('[data-provider]')].map((n) => (n as HTMLElement).dataset.provider)).toEqual(['claude-code', 'codex']);
-    expect([...els.envCards.querySelectorAll('.pv-card')].map((n) => (n as HTMLElement).dataset.provider)).toEqual(['runner']);
+    expect(card(els.harnessCards, 'runner') ?? card(els.integrationCards, 'runner')).toBeNull();
     expect(card(els.integrationCards, 'github')).toBeTruthy();
     expect(onProviders).toHaveBeenCalledWith(infos);
   });
@@ -199,19 +190,19 @@ describe('GitHub card', () => {
 });
 
 describe('focus refresh', () => {
-  it('keeps what the user was typing in a runner rename', async () => {
+  it('re-checks GitHub without clearing the cards', async () => {
     const githubInstallations = vi.fn(async () => []);
-    const { els, view } = mount([runnersCard(), gh({ login: 'me' }, { connected: true })], { githubInstallations });
+    const { els, view } = mount([gh({ login: 'me' }, { connected: true })], { githubInstallations });
     await view.render();
-    btn(els.envCards.querySelector('[data-runner]') as HTMLElement, 'Rename').click();
-    const input = els.envCards.querySelector<HTMLInputElement>('form.rn-edit input') as HTMLInputElement;
-    input.value = 'renamed-box';
+    await settle();
 
-    // The user switched to a terminal and came back.
-    await view.refresh();
+    // The user installed the app on GitHub and came back.
+    const refreshing = view.refresh();
+    expect(els.integrationCards.getAttribute('aria-busy')).toBeNull();
+    await refreshing;
+    await settle();
 
-    const again = els.envCards.querySelector<HTMLInputElement>('form.rn-edit input') as HTMLInputElement;
-    expect(again.value).toBe('renamed-box');
+    expect(card(els.integrationCards, 'github')).toBeTruthy();
     expect(githubInstallations).toHaveBeenCalledTimes(2); // installations were re-checked
   });
 

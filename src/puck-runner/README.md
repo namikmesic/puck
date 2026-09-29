@@ -16,7 +16,7 @@ Use a dedicated user for the runner where you can (`sudo ./svc.sh install puck-r
 
 ## Install
 
-In Puck, open Settings → Providers → Runners → Add runner, pick the platform, and copy the commands it shows.
+In Puck, open Settings → Runners → Add runner, pick the platform, and copy the commands it shows.
 They look like this:
 
 ```bash
@@ -51,7 +51,7 @@ Configure with `--disableupdate` to update by hand instead; a server that requir
 
 ## Remove
 
-In Puck, Settings → Providers → Runners → Remove shows the command:
+In Puck, Settings → Runners → Remove shows the command:
 
 ```bash
 ./config.sh remove --token PRR_…
@@ -80,7 +80,7 @@ A runner removed from Settings while its machine was offline stops with exit sta
 - **Encrypted channels.** The app reaches the runner through channels the server relays.
   Each channel's key exchange is signed with the runner's key, so the server forwards bytes it cannot read.
   A control channel carries commands (create, start, stop, rebuild, delete, list, logs); an attach channel pipes the app to one environment's daemon through `docker exec`.
-- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Providers → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket`, and installs the LaunchAgent.
+- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket`, and installs the LaunchAgent.
   With `--local-socket <path>` the runner also listens on that unix socket (0600), and the app on the same machine opens its channels there, unencrypted and without the server; file permissions are the authentication.
 - **Docker, by label.** Environments are containers labelled `puck=instance`, with two named volumes each.
   The runner never mounts a host directory or the Docker socket into them, and copies files in as a tar stream.
@@ -91,7 +91,7 @@ A runner removed from Settings while its machine was offline stops with exit sta
 
 For contributors; the code's module headers carry the detail.
 
-- **One bundle, thin scripts.** `config.sh`, `run.sh` and `svc.sh` only call `bin/puck-runner.js` with the bundled Node, so the Docker argv, the service units and their `systemctl`/`launchctl` calls are unit-tested TypeScript. `npm run build:runner` bundles `ws` and allows only Node built-ins; `npm run package:runner` writes the three tarballs, their `.sha256` files and `SHA256SUMS` in the layout the server's `PUCK_RUNNER_DOWNLOADS` serves. macOS is `macos` in file names, as the server names it.
+- **One bundle, thin scripts.** `config.sh`, `run.sh` and `svc.sh` only call `bin/puck-runner.cjs` with the bundled Node, so the Docker argv, the service units and their `systemctl`/`launchctl` calls are unit-tested TypeScript. `npm run build:runner` bundles `ws` and allows only Node built-ins; `npm run package:runner` writes the three tarballs, their `.sha256` files and `SHA256SUMS` in the layout the server's `PUCK_RUNNER_DOWNLOADS` serves. macOS is `macos` in file names, as the server names it.
 - **Pinned runtime.** The Node release and the sha256 of each platform's archive are pinned in `scripts/package-runner.mjs`; a download that does not match is refused. Archives come from the runner's own ustar writer (`tar.ts`) with fixed owners and modes and the commit time, so the same commit packs to the same bytes.
 - **Exit codes are the service contract.** 0 stopped, 3 updated (run.sh starts the new version), 78 removed from Puck (systemd's `RestartPreventExitStatus`; run.sh reports it as a clean exit under launchd, which has no such setting).
 - **The channel stream is shared.** `src/channel/stream.ts` (encryption, framing and credit for one channel) is written for both ends, and the runner and the app both use it. Credit returns only once the consumer took the bytes, so a slow `docker exec` stdin holds the app back rather than filling the runner's memory. An end must install a channel in the same tick its `accept` or `open` is handled: the first data frame can arrive in the same socket read.

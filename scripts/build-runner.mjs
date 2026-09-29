@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Builds puck-runner into one file, `.webpack/runner/puck-runner.js`, that
+ * Builds puck-runner into one file, `.webpack/runner/puck-runner.cjs`, that
  * runs on the tarball's bundled Node 22 with no node_modules: `ws` is
  * bundled, SQLite is Node's built-in `node:sqlite`, and every `node:`
  * import stays external. ws's optional native helpers (bufferutil,
@@ -28,7 +28,7 @@ export async function buildRunner() {
     target: 'node22',
     context: root,
     entry: './src/puck-runner/main.ts',
-    output: { path: RUNNER_OUT, filename: 'puck-runner.js', clean: true },
+    output: { path: RUNNER_OUT, filename: 'puck-runner.cjs', clean: true },
     // The real __filename at runtime: the runner finds its directory from it.
     node: { __filename: false, __dirname: false },
     devtool: false,
@@ -54,7 +54,7 @@ export async function buildRunner() {
     throw new Error(stats.toString({ all: false, errors: true }));
   }
 
-  const bundlePath = join(RUNNER_OUT, 'puck-runner.js');
+  const bundlePath = join(RUNNER_OUT, 'puck-runner.cjs');
   const bundle = readFileSync(bundlePath, 'utf8');
   const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`), 'node:sqlite']);
   const foreign = [...bundle.matchAll(/require\("([^"]+)"\)/g)].map((m) => m[1]).filter((name) => !builtins.has(name) && !OPTIONAL.includes(name));

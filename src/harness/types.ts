@@ -1,10 +1,9 @@
 /**
- * Wire-level protocol between the renderer and the harness backend.
+ * The harness event protocol: what one turn of a harness session emits.
  *
- * Turns run in the main process — the active provider's SDK executes inside
- * the active environment's Docker container — and stream back over the
- * preload bridge as `HarnessEvent`s. `IpcHarness` (src/harness/ipc.ts)
- * adapts that callback stream into the `AsyncGenerator` protocol below.
+ * The environment daemon's adapters translate each harness SDK's stream
+ * into `HarnessEvent`s, record them in the session transcript, and publish
+ * them to attached apps as `turn.event`s.
  */
 
 export interface TurnStats {
@@ -56,20 +55,6 @@ type HarnessEventBody =
   | { kind: 'error'; message: string }
   | { kind: 'turn-end'; stats: TurnStats };
 
-/** Wall-clock stamp is added renderer-side when an event is recorded, so
- *  replayed history keeps original tool-call times and durations. */
+/** Wall-clock stamp added when the daemon records an event, so replayed
+ *  history keeps original tool-call times and durations. */
 export type HarnessEvent = HarnessEventBody & { ts?: number };
-
-export interface Harness {
-  /**
-   * Send one user prompt to an agent's conversation. Returns the turn's id
-   * (for interrupt / answerAsk routing) plus its event stream. Turns for
-   * different agents may run concurrently; the backend keeps per-agent
-   * history via provider resume ids.
-   */
-  send(agentId: string, prompt: string): { turnId: string; events: AsyncGenerator<HarnessEvent> };
-  /** Interrupt a specific in-flight turn. */
-  interrupt(turnId: string): void;
-  /** Answer (or dismiss, with null) a mid-turn question from the agent. */
-  answerAsk(turnId: string, askId: string, answers: Record<string, string> | null): Promise<void>;
-}

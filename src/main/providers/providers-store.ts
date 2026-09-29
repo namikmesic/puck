@@ -4,8 +4,8 @@
  * through secrets.ts).
  *
  * Migrate, don't break: every field gets a default at load, so a file
- * written by an older build (or a hand-edited one) still reads. The
- * `sshHosts` list an earlier build kept is dropped on load.
+ * written by an older build (or a hand-edited one) still reads, and fields
+ * this build does not know are dropped.
  */
 
 import { defineStore } from '../store';

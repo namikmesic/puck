@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   CHANNELS,
   DAEMON_EVENT_CHANNEL,
-  ENV_EVENT_CHANNEL,
-  EVENT_CHANNEL,
   FLUSH_CHANNEL,
   FLUSHED_CHANNEL,
   INSTANCE_EVENT_CHANNEL,
@@ -18,8 +16,6 @@ describe('IPC channel table', () => {
   it('channel names are unique (and distinct from the push channels)', () => {
     const values = [
       ...Object.values(CHANNELS),
-      EVENT_CHANNEL,
-      ENV_EVENT_CHANNEL,
       FLUSH_CHANNEL,
       FLUSHED_CHANNEL,
       RUNNER_EVENT_CHANNEL,

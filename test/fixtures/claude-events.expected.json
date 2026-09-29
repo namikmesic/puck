@@ -1,0 +1,135 @@
+{
+  "events": [
+    {
+      "kind": "thinking",
+      "active": true
+    },
+    {
+      "kind": "thinking",
+      "active": false
+    },
+    {
+      "kind": "text-delta",
+      "text": "Let me "
+    },
+    {
+      "kind": "text-delta",
+      "text": "check the tests."
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "toolu_bash",
+      "tool": "Bash",
+      "summary": "npm test",
+      "input": "{\n  \"command\": \"npm test\",\n  \"description\": \"run tests\"\n}"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "toolu_bash",
+      "ok": true,
+      "output": "12 passed"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "toolu_read",
+      "tool": "Read",
+      "summary": "/workspace/app/README.md",
+      "input": "{\n  \"file_path\": \"/workspace/app/README.md\"\n}"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "toolu_mcp",
+      "tool": "mcp__puck__backlog_list",
+      "summary": "{\"limit\":5}",
+      "input": "{\n  \"limit\": 5\n}"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "toolu_read",
+      "ok": true,
+      "output": "# App"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "toolu_mcp",
+      "ok": false,
+      "output": "(no output)"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "toolu_task",
+      "tool": "Agent",
+      "summary": "Audit dependencies - general-purpose",
+      "input": "List outdated deps.",
+      "agent": true
+    },
+    {
+      "kind": "text-delta",
+      "text": "Checking package.json\n\n",
+      "parentId": "toolu_task"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "toolu_sub_grep",
+      "tool": "Grep",
+      "summary": "\"dependencies\"",
+      "input": "{\n  \"pattern\": \"\\\"dependencies\\\"\"\n}",
+      "parentId": "toolu_task"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "toolu_sub_grep",
+      "ok": true,
+      "output": "package.json:12"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "toolu_task",
+      "ok": true,
+      "output": "Two deps are outdated."
+    },
+    {
+      "kind": "text-delta",
+      "text": " Done."
+    },
+    {
+      "kind": "turn-end",
+      "stats": {
+        "inputTokens": 1050,
+        "outputTokens": 70,
+        "durationMs": 0,
+        "costUsd": 0.042
+      }
+    }
+  ],
+  "sessions": [
+    "sess-claude-1"
+  ],
+  "permissions": [
+    {
+      "behavior": "allow",
+      "updatedInput": {
+        "questions": [
+          {
+            "question": "Upgrade them?",
+            "header": "Deps",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Yes",
+                "description": "Bump both"
+              },
+              {
+                "label": "No",
+                "description": ""
+              }
+            ]
+          }
+        ],
+        "answers": {
+          "Upgrade them?": "Yes"
+        }
+      }
+    }
+  ]
+}

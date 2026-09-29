@@ -174,7 +174,9 @@ export function registerAuthRoutes(router: Router, ctx: ServerContext): void {
 
   router.add('GET', '/v1/me', async (req) => {
     const { user } = await sessionFor(ctx, req);
-    return { body: { user: { id: user.id, login: user.login, githubId: user.githubId } } };
+    // The App's install link: the app holds no GitHub App identity of its own.
+    const installUrl = ctx.github ? await ctx.github.installUrl() : null;
+    return { body: { user: { id: user.id, login: user.login, githubId: user.githubId }, github: { installUrl } } };
   });
 
   router.add('GET', '/v1/github/token', async (req) => {

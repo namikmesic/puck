@@ -11,7 +11,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 child=
 trap 'if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; fi' TERM INT
 while :; do
-  "$DIR/bin/node" "$DIR/bin/puck-runner.js" run "$@" &
+  "$DIR/bin/node" "$DIR/bin/puck-runner.cjs" run "$@" &
   child=$!
   wait "$child"
   code=$?

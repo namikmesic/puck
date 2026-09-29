@@ -134,7 +134,7 @@ function fakeGitHub() {
         const page = paged(url, list.filter((c) => Date.parse(String(c.updated_at)) >= since));
         return [200, page.body, page.link ? { link: page.link } : undefined];
       }
-      const c = { id: gh.nextId++, body: body?.body, user: { login: 'puck-agents[bot]', type: 'Bot' }, author_association: 'NONE', created_at: iso(T0), updated_at: iso(T0), html_url: `https://github.com/octo/app/issues/${n}#c` };
+      const c = { id: gh.nextId++, body: body?.body, user: { login: 'puck-app[bot]', type: 'Bot' }, author_association: 'NONE', created_at: iso(T0), updated_at: iso(T0), html_url: `https://github.com/octo/app/issues/${n}#c` };
       gh.comments.set(n, [...list, c]);
       return [201, c];
     }
@@ -835,7 +835,7 @@ describe('the status comment', () => {
   it('finds its own comment after a crash lost the id, instead of writing a second one', async () => {
     policies = { intake: 'off' };
     const item = linkedItem(1, 'running');
-    fake.gh.comments.set(1, [comment(77, 'puck-agents[bot]', 'NONE', `Puck · W-1 · implementer · environment example — queued\n\n${marker(item)}`)]);
+    fake.gh.comments.set(1, [comment(77, 'puck-app[bot]', 'NONE', `Puck · W-1 · implementer · environment example — queued\n\n${marker(item)}`)]);
     await sync.poll();
     expect(writes().map((w) => `${w.method} ${w.path}`)).toEqual(['PATCH /repos/octo/app/issues/comments/77']);
     expect(fake.gh.comments.get(1)).toHaveLength(1);

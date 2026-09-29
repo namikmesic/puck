@@ -3,10 +3,9 @@
  *
  * Electron exits as soon as the `before-quit` listeners return, so anything
  * still queued at that moment is lost: atomic store writes in flight
- * (jsonstore), the renderer's debounced conversation saves, and the composer
- * draft that only lives in the textarea. The first quit request is
- * intercepted; the renderer is asked to persist, then the store chains are
- * awaited; then quit resumes. The wait is bounded so a stuck disk or an
+ * (jsonstore) and the environment replay cursor. The first quit request is
+ * intercepted; the renderer is asked to persist anything it still holds,
+ * then the store chains are awaited; then quit resumes. The wait is bounded so a stuck disk or an
  * unresponsive renderer cannot wedge quit.
  */
 

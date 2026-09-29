@@ -1,24 +1,20 @@
 /**
  * The Settings → Providers section, grouped by kind: Harnesses (Claude
- * Code, Codex: Connect / Cancel / Disconnect), Runners (the machines that
- * host environments, see runners.ts) and Integrations (GitHub, signing in
- * to Puck, see github.ts). A sign-in completes in the system browser, so
+ * Code, Codex: Connect / Cancel / Disconnect) and Integrations (GitHub,
+ * signing in to Puck, see github.ts). Runners have a section of their own
+ * (runners-section.ts). A sign-in completes in the system browser, so
  * while main reports `auth.pending` the view polls until it settles.
- * Runner events update the Runners card in place. Context/elements in,
- * controller out, no DOM lookups inside.
+ * Context/elements in, controller out, no DOM lookups inside.
  */
 
-import type { HarnessProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../../harness/bridge';
+import type { HarnessProviderInfo, ProviderInfo, PuckBridge } from '../../harness/bridge';
 import { el, statusEl } from '../dom';
 import { button, errText, latestToken } from '../util';
 import { cardShell, loadingInto } from './cards';
 import { githubCard } from './github';
-import { initRunnersView } from './runners';
 
 export interface ProvidersElements {
   harnessCards: HTMLElement;
-  /** Where the Runners card goes; absent when runners have a section of their own. */
-  envCards?: HTMLElement;
   integrationCards: HTMLElement;
   msg: HTMLElement;
 }
@@ -40,20 +36,16 @@ export interface ProvidersView {
   stopPolling(): void;
   /**
    * The window regained focus: re-check (installations may have changed on
-   * GitHub), keeping what the user was typing - they often switch away to
-   * run the runner commands in a terminal, and come back to finish.
+   * GitHub) without clearing the cards first.
    */
   refresh(): Promise<void>;
-  /** A pushed runner-list or connection change. */
-  runnersChanged(state: RunnersState): void;
-  /** Leaving Settings: stop polling and close the Add runner dialog. */
+  /** Leaving Settings: stop polling. */
   close(): void;
 }
 
 export function initProvidersView(ctx: ProvidersContext): ProvidersView {
   const { bridge, els } = ctx;
   const grid = latestToken();
-  const runners = initRunnersView({ bridge: bridge as PuckBridge, say: (t) => say(t), copy: ctx.copy });
   let poll: ReturnType<typeof setInterval> | null = null;
   let rendered = false;
 
@@ -125,34 +117,12 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     return card;
   }
 
-  const containers = [els.harnessCards, ...(els.envCards ? [els.envCards] : []), els.integrationCards];
+  const containers = [els.harnessCards, els.integrationCards];
 
-  /** In-progress form state, keyed by the `data-keep` tags the cards set. */
-  type FormState = Map<string, string>;
-
-  function snapshotForms(): FormState {
-    const state: FormState = new Map();
-    for (const c of containers) {
-      c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
-        if (i.value) state.set(i.dataset.keep as string, i.value);
-      });
-    }
-    return state;
-  }
-
-  function restoreForms(state: FormState): void {
-    for (const c of containers) {
-      c.querySelectorAll<HTMLInputElement>('input[data-keep]').forEach((i) => {
-        const value = state.get(i.dataset.keep as string);
-        if (value !== undefined) i.value = value;
-      });
-    }
-  }
-
-  async function draw(given: ProviderInfo[] | undefined, keepForms: boolean): Promise<void> {
+  async function draw(given: ProviderInfo[] | undefined, quiet: boolean): Promise<void> {
     if (!bridge) return;
     const token = grid.next();
-    if (!given && !keepForms) for (const c of containers) loadingInto(c);
+    if (!given && !quiet) for (const c of containers) loadingInto(c);
     const infos = given ?? (await bridge.providers().catch((err: unknown) => {
       say(errText(err));
       return [] as ProviderInfo[];
@@ -167,8 +137,6 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
       onChange: (next?: ProviderInfo[]) => void view.render(next),
       onSignInStarted: (id: string) => pollUntilSettled(id),
     };
-    // Taken as late as possible, so typing during the fetch is kept too.
-    const kept = keepForms ? snapshotForms() : null;
     for (const c of containers) {
       c.removeAttribute('aria-busy');
       c.textContent = '';
@@ -176,9 +144,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     for (const info of infos) {
       if (info.kind === 'harness') {
         els.harnessCards.appendChild(harnessCard(info));
-      } else if (info.kind === 'environment') {
-        els.envCards?.appendChild(runners.card(info));
-      } else {
+      } else if (info.kind === 'integration') {
         els.integrationCards.appendChild(githubCard(shared, info));
       }
       // Settings reopened mid-sign-in: resume watching it.
@@ -186,7 +152,6 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
         pollUntilSettled(info.id);
       }
     }
-    if (kept) restoreForms(kept);
   }
 
   const view: ProvidersView = {
@@ -195,13 +160,7 @@ export function initProvidersView(ctx: ProvidersContext): ProvidersView {
     async refresh() {
       if (rendered && !poll) await draw(undefined, true);
     },
-    runnersChanged(state) {
-      if (rendered) runners.update(state);
-    },
-    close() {
-      stopPolling();
-      runners.close();
-    },
+    close: stopPolling,
   };
   return view;
 }

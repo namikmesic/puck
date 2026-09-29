@@ -221,7 +221,7 @@ export function pathsFor(dataDir: string, id: string): { dir: string; socket: st
 }
 
 function runnerJs(dir: string): { node: string; bundle: string } {
-  return { node: path.join(dir, 'bin', 'node'), bundle: path.join(dir, 'bin', 'puck-runner.js') };
+  return { node: path.join(dir, 'bin', 'node'), bundle: path.join(dir, 'bin', 'puck-runner.cjs') };
 }
 
 async function runner(dir: string, args: string[], what: string, timeoutMs = 120_000): Promise<string> {

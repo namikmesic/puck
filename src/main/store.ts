@@ -1,7 +1,7 @@
 /**
- * Persisted-store primitive shared by the entity modules (agents,
- * environments): lazy load from userData, a migrate hook for legacy on-disk
- * shapes (dual-reads live there), and atomic serialized writes. Keeping the
+ * Persisted-store primitive shared by the app's stores (providers,
+ * instances, runners): lazy load from userData, a migrate hook for older
+ * on-disk shapes (dual-reads live there), and atomic serialized writes. Keeping the
  * lazy singleton here means importing an entity module never touches
  * Electron paths.
  */

@@ -146,11 +146,7 @@ describe('createOAuthAccount', () => {
     it('a credential snapshot knows when a logout happened after it was taken', async () => {
       const account = makeAccount(async (t) => t);
       account.save({ v: 'x', at: 5000 });
-      const cred = providerCredential(account, {
-        hostPath: '/host/cred',
-        containerPath: '/root/.cli/cred',
-        serialize: (t) => t.v,
-      });
+      const cred = providerCredential(account, { serialize: (t) => t.v });
       expect(cred.signedIn()).toBe(true);
       const snapshot = await cred.fresh();
       expect(snapshot?.content).toBe('x');

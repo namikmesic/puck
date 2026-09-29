@@ -118,7 +118,7 @@ describe('This Mac runner', () => {
     const record = await thisMac.install([]);
     const dir = macDir();
     const node = path.join(dir, 'bin', 'node');
-    const bundle = path.join(dir, 'bin', 'puck-runner.js');
+    const bundle = path.join(dir, 'bin', 'puck-runner.cjs');
     expect(record).toEqual({ runnerId: RUNNER_ID, dir, socket: path.join(dir, 'local.sock'), accountId: current()?.user.id });
     expect(localRunner()).toEqual(record);
     expect(calls[0]).toEqual({ file: '/usr/bin/tar', args: ['-xzf', path.join(dir, TARBALL), '-C', dir] });

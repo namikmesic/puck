@@ -1,45 +1,57 @@
 # Puck
 
-A macOS desktop client for coding agents.
-Puck gives Claude Code and Codex Slack-style, long-lived conversations, with each agent a contact in the sidebar.
-Every turn executes inside a Docker container you configure.
+A macOS desktop app that orchestrates coding agents.
+You open one environment, talk to its orchestrator, and it works a prioritized backlog by handing items to Claude Code and Codex workers that run in parallel, each on its own git branch.
+Environments run in Docker on your runners: this Mac, or any machine you register.
 
 ## How it works
 
-- **Agents** are named provider configurations: provider, model, system instructions, thinking level, a schema-driven options form, and an advanced JSON passthrough.
-  The options form covers permission and sandbox modes, per-tool toggles, and limits, declared per provider and rendered generically.
-  Each agent has one permanent conversation, persisted as a structured event log and replayed on launch.
-  Clickable turn cards, tool calls, and sub-agent chats survive restarts.
-- **Environments** you create in **Settings → Environments** are persistent Docker containers with a host directory mounted at `/workspace`.
-  Puck installs the provider CLIs and SDKs into the container, deploys a small runner agent, and speaks NDJSON to it over `docker exec` stdio.
-  The container is the safety boundary: agents run with full tool access inside it, and the workspace folder is the only host folder they reach.
-- **Providers** come in three kinds sharing one registry (`src/main/providers/`): harnesses (Claude Code, Codex), runners (where environments run), and integrations (GitHub).
-  Harness sign-in happens in the system browser with a loopback callback, RFC 8252 style; signing in to Puck with GitHub goes through the Puck server and the "Puck Agents" GitHub App (<https://github.com/apps/puck-agents>) the same way.
-- **Runners** are the machines that host environments: this Mac (set up in one click in **Settings → Providers → Runners**) or any Linux machine you register with **Add runner**, which shows copy-paste commands like GitHub's self-hosted runners.
+- **Definitions live in Git.**
+  Agents (`kind: Agent`) and environments (`kind: Environment`) are YAML files in one GitHub config repo.
+  You start an environment from a definition pinned to a tag, a branch, or a commit, and Puck offers an update when the pin moves.
+  `docs/examples/config-repo/` is a working example, with the JSON Schema that validates it.
+- **One orchestrator per environment.**
+  Each environment has a single long-lived orchestrator session (Claude Code).
+  You tell it what you want; it creates backlog items, assigns them to the environment's agents, answers their questions or passes them to you, and reacts when their work lands.
+- **Backlog, workers, branches, pull requests.**
+  Every work item runs in its own git worktree and `puck/W-<n>-…` branch inside the environment.
+  Its result is commits, a diff stat, and a summary; publishing pushes the branch and opens or updates a draft pull request.
+  When an environment opts in, issues carrying its intake label become items; pull requests close their issues, and CI results and review feedback reach the orchestrator.
+- **Work continues with the app closed.**
+  Inside each environment's container a daemon, `puckd`, owns everything: provisioning, sessions, the backlog, the scheduler, transcripts, and publishing.
+  The app is a client that attaches to it and replays what it missed.
+- **Runners host environments.**
+  A runner is `puck-runner` installed on a machine with Docker: this Mac (one click in **Settings → Runners**), or any Linux machine you register with **Add runner**, which shows copy-paste commands like GitHub's self-hosted runners.
   The app reaches a runner through the Puck server's end-to-end encrypted relay, and this Mac's runner over a local socket; see `src/puck-runner/README.md`.
-  Tokens are encrypted via the OS keychain.
-  Adding a harness is one pure descriptor under `src/harness/providers/`, its host half, one registry entry, and one entry in the container runner's `PROVIDERS` table.
+  The app itself never runs `docker`.
+- **The Puck server** holds your Puck account (you sign in with GitHub in the system browser), your runners, the index of your environments, and the Puck GitHub App's secrets.
+  It gives each environment one-hour GitHub App installation tokens for its repositories, so agents can push and open pull requests while your laptop is closed.
+  For now you run it yourself with Docker Compose (**Run the Puck server locally**).
+- **Harness sign-in** for Claude Code and Codex happens in the system browser with a loopback callback, RFC 8252 style.
+  Tokens are encrypted via the OS keychain, and Puck keeps the environments' copies in sync.
 
-Turns stream live.
-Text renders as markdown, tool calls collapse into a per-turn card that opens full-screen, and sub-agents get their own nested chats.
-Claude's mid-turn questions render as answerable cards.
+The window shows one environment at a time: the backlog on the left, the orchestrator chat (or one item's detail) in the center, and work in progress on the right.
+Turns stream live: text renders as markdown, tool calls collapse into a per-turn card, sub-agents get their own nested chats, and questions render as answerable cards.
 
 ## Requirements
 
 - A Mac with Apple silicon, running macOS 12 (Monterey) or later.
-- [Docker](https://docs.docker.com/) running: Docker Desktop or colima.
-- A Claude account, a ChatGPT account, or both.
+- A Puck account through GitHub, and a runner:
+  - a GitHub account, with the Puck GitHub App installed on the accounts that own your repositories, and a config repo holding your definitions;
+  - a Puck server to sign in to, which for now you run locally (**Run the Puck server locally**);
+  - a runner: this Mac with [Docker](https://docs.docker.com/) running (Docker Desktop or colima), or a Linux x64 or ARM64 machine with Docker Engine 24 or newer.
+- A Claude account for the orchestrator; a ChatGPT account too if your agents use Codex.
 
 ## Install
 
-Release 0.0.1 ships as a ZIP file with a checksum file beside it.
+Release 0.1.0 ships as a ZIP file with a checksum file beside it.
 The distribution channel is still an open release decision (C-2), so the two files are handed over directly.
 
-1. Put `Puck-darwin-arm64-0.0.1.zip` and `Puck-darwin-arm64-0.0.1.zip.sha256` in the same folder.
+1. Put `Puck-darwin-arm64-0.1.0.zip` and `Puck-darwin-arm64-0.1.0.zip.sha256` in the same folder.
 2. Verify the download in Terminal:
 
    ```bash
-   shasum -a 256 -c Puck-darwin-arm64-0.0.1.zip.sha256
+   shasum -a 256 -c Puck-darwin-arm64-0.1.0.zip.sha256
    ```
 
    The output must end with `OK`.
@@ -49,7 +61,7 @@ The distribution channel is still an open release decision (C-2), so the two fil
 
 ## First run
 
-Release 0.0.1 is ad hoc signed and not notarized, because the Developer ID credentials are an open release decision (C-3).
+Release 0.1.0 is ad hoc signed and not notarized, because the Developer ID credentials are an open release decision (C-3).
 macOS blocks the first launch with a message that Puck could not be verified.
 Approve it once:
 
@@ -64,91 +76,104 @@ The Terminal alternative removes the quarantine flag instead:
 xattr -d com.apple.quarantine /Applications/Puck.app
 ```
 
-Then, in the app:
+Then Puck walks you through six steps, each also reachable later from Settings:
 
-1. **Settings → Providers**: connect Claude, ChatGPT, or both.
-   The sign-in opens in your default browser, where your existing sessions live, and completes when the browser redirects back to Puck.
-2. **Settings → Environments**: create an environment (base image or Dockerfile), choose its workspace folder, and start it.
-   The first start installs the CLIs and SDKs into the container, which takes a few minutes.
-3. Pick an agent in the sidebar and say hello.
+1. **Sign in with GitHub.**
+   The sign-in opens in your default browser and goes through the Puck server; the app keeps only its Puck session.
+2. **Install Puck on an account**: the GitHub App, on the accounts that own the repositories your environments use.
+3. **Pick the config repo.**
+   A repository without definitions points you at the example config repo.
+4. **Connect Claude Code.**
+   The orchestrator needs it; connect ChatGPT as well in **Settings → Providers** if your agents use Codex.
+5. **Set up a runner**: **This Mac** in one click, or **Add runner** for another machine.
+6. **Start an environment**: pick a definition at a tag, branch, or commit, and a runner.
+   The first start pulls or builds the image and installs the harness CLIs into the container, which takes a few minutes.
 
-## What the container can write
+Then tell the orchestrator what you want done.
 
-An environment you create in **Settings → Environments** runs agents as root with full tool access inside its container.
-Read this before you choose a workspace folder.
-An environment on a runner does not mount a folder from your Mac; that contract is in `src/puck-runner/README.md`.
+## What agents can reach
 
-- **The workspace folder is writable.**
-  The folder you set as the workspace path is mounted read-write at `/workspace`.
-  An agent can create, change, and delete any file in it, including hidden files and `.git`.
-  Give an agent a folder you can afford to lose, or a checkout whose remote holds everything you need.
-- **The container filesystem is writable.**
-  An agent can install tools and change anything inside the container.
-  Rebuild resets the container to its image.
-- **The network is reachable.**
-  The container has Docker's default network access, so an agent can download packages and call APIs.
-- **Secrets and credentials are readable inside the container.**
-  Environment secrets and the provider credential files that Puck copies in are visible to the agent.
-- **Nothing else on your Mac is mounted.**
-  Your home folder, `~/.claude`, `~/.codex`, and Puck's own data folder stay outside the container.
+Every environment is a container on a runner, and the container is the safety boundary.
 
-When you leave the workspace path empty, Puck uses `~/puck-workspaces/<environment id>`.
-Release 0.0.1 keeps these container defaults (release decision C-6).
+- **No host folders.**
+  Nothing from the runner machine is mounted: no home folder, no workspace folder, no Docker socket.
+  Files reach the container as a tar stream.
+- **Two volumes per environment.**
+  `puck-<id>-ws` holds the repositories at `/workspace`, cloned inside the container; `puck-<id>-data` holds the daemon's state at `/puck`.
+  Rebuild recreates the container and keeps both, so all work survives it.
+- **Agents run as the unprivileged `puck` user** (uid 10001), with full tool access inside the container and Docker's default network access, so they can install packages and call APIs.
+- **Agents can read** the harness credential files (Claude Code, Codex) and the environment's secrets, because the CLIs and their tools need them.
+- **Agents cannot read** the GitHub token or the daemon's state and transcripts.
+  The daemon runs as root and does all git pushes and GitHub calls itself; pushes are limited to `puck/*` branches, and the token is a one-hour installation token scoped to the environment's repositories.
+- **A runner is trusted with its environments.**
+  Whoever is root on a runner machine, or in its `docker` group, can read everything its environments hold, including their short-lived GitHub tokens.
+  Register runners only on machines you control; `src/puck-runner/README.md` covers running the runner as a dedicated user.
 
 ## Where Puck keeps its data
 
-Everything Puck stores on your Mac is in one folder: `~/Library/Application Support/Puck`.
+Everything the app stores on your Mac is in one folder: `~/Library/Application Support/Puck`.
 **Settings → Support** shows the exact path.
 
 | Path | Holds |
 | --- | --- |
-| `puck-agents.json` | Agents: name, provider, model, system instructions, options |
-| `puck-environments.json` | Environments: name, image, Dockerfile, workspace path, environment variables |
-| `puck-resume.json` | Provider session ids, so a conversation continues after a restart |
-| `puck-convos/<agent id>.json` | One conversation transcript per agent |
 | `puck-providers.json` | Provider settings: the GitHub config repo |
 | `puck-session.bin` | Your Puck session (signed in with GitHub), encrypted through the macOS Keychain |
+| `puck-instances.json` | Per environment: the last event seen (for replay), its definition pin, and the environment on screen |
 | `puck-runners.json` | Runner key fingerprints first seen, and the This Mac runner's location |
-| `puck-instances.json` | Per environment on a runner: the last event seen (for replay) and its definition pin |
 | `r/<eight hex digits>/` | The This Mac runner for one Puck account: its release, registration, key, local socket and logs |
 | `puck-defs-cache/<commit>.json` | Cached config-repo files for one commit; safe to delete |
 | `claude-oauth.bin`, `codex-oauth.bin` | Harness tokens, encrypted through the macOS Keychain |
-| `env-secrets-<environment id>.bin` | Environment secrets, encrypted the same way |
 | `logs/puck.log`, `logs/puck.log.1`, `logs/puck.log.2` | The diagnostic log: three files of at most 1 MiB each |
-| `Cache`, `Local Storage`, and similar folders | Electron's own browser data |
+| `Cache`, `Local Storage`, and similar folders | Electron's own browser data, including composer drafts |
 
-Outside that folder, Puck creates:
+Everything about the work itself (backlog, sessions, transcripts, events, secrets) lives in the environment's `puck-<id>-data` volume on its runner.
+Both volumes can be backed up with standard Docker tooling.
 
-- Docker containers named `puck-env-<environment id>`, labeled `puck=environment`.
-- Docker images named `puck-img-<environment id>` for environments built from a Dockerfile.
-- Workspace folders you chose, or `~/puck-workspaces/<environment id>` by default.
-- A LaunchAgent at `~/Library/LaunchAgents/com.puck.runner.<eight hex digits>.plist` when This Mac is set up as a runner. The same eight digits name its `r/` directory. Its containers are labeled `puck=instance` (`src/puck-runner/README.md`).
+Outside that folder, this Mac's runner creates:
 
-Puck keeps conversations and environments until you delete them (release decision C-8).
+- A LaunchAgent at `~/Library/LaunchAgents/com.puck.runner.<eight hex digits>.plist` when This Mac is set up as a runner. The same eight digits name its `r/` directory.
+- For each environment it hosts: a container `puck-<environment id>` labeled `puck=instance`, the volumes `puck-<environment id>-data` and `puck-<environment id>-ws`, and `puck-img-<environment id>` when the definition builds a Dockerfile.
+
+Puck keeps environments until you delete them (release decision C-8).
 Delete asks for a second click before it acts.
-Rebuild acts on the first click and resets the container, so stop and think before you click it.
+
+### Data from Puck 0.0.1
+
+Puck 0.1.0 does not read or migrate anything the 0.0.1 build stored: agents, environments, conversations, and resume ids are ignored and never deleted.
+Your Claude and Codex sign-ins carry over.
+To clean up by hand, quit Puck and remove the old files and containers:
+
+```bash
+cd ~/Library/Application\ Support/Puck
+rm -rf puck-agents.json puck-environments.json puck-resume.json puck-convos puck-convos.json env-secrets-*.bin
+docker rm -f $(docker ps -aq --filter label=puck=environment)
+```
+
+The old build's workspace folders (by default `~/puck-workspaces`) are yours to keep or delete.
 
 ## Sign out
 
-**Settings → Providers → Disconnect** signs a provider out of Puck (release decision C-7):
+**Settings → Providers → Disconnect** signs a harness out of Puck (release decision C-7):
 
 - Puck deletes its own token file for that provider (`claude-oauth.bin` or `codex-oauth.bin`).
-- Puck removes the credential file it copied into every running environment.
-  A stopped environment is cleaned on its next start.
+- Puck removes the credential file from the environment on screen, and from every other environment the next time you open it.
 - A sign-in still in progress is canceled.
 
 Disconnect does not sign you out of the provider in your browser.
 It also leaves the provider CLI's own files in your home folder alone: `~/.claude/.credentials.json` and `~/.codex/auth.json`.
 Puck never copies those files into an environment, and host environment variables such as `ANTHROPIC_API_KEY` do not reach containers either.
-To give an environment an API key, add it as an environment secret.
+To give an environment an API key, declare it as a secret in its definition and enter the value when you start it.
+
+**Sign out of Puck** in the GitHub card ends your Puck session on the server.
+Your environments keep running on their runners.
 
 ## Wipe everything
 
-To remove every trace of Puck's configuration and conversations:
+To remove every trace of Puck:
 
-1. In Puck, open **Settings → Environments** and delete each environment.
-   This removes its container, its image, and its secrets.
-2. If This Mac is a runner, remove it under **Settings → Providers → Runners**.
+1. In Puck, delete each environment from the environment switcher.
+   This removes its container, both volumes, and its image on the runner.
+2. If This Mac is a runner, remove it under **Settings → Runners**.
    That uninstalls the LaunchAgent and keeps the containers it created. A runner on another machine is unchanged; `src/puck-runner/README.md` covers removing it there.
 3. Quit Puck.
 4. Delete the data folder:
@@ -157,12 +182,11 @@ To remove every trace of Puck's configuration and conversations:
    rm -rf ~/Library/Application\ Support/Puck
    ```
 
-5. Optional: delete the workspace folders you no longer need, for example `~/puck-workspaces`.
-6. Optional, for containers you did not delete in step 1, or that This Mac kept: remove them by hand.
+5. Optional, for environments you did not delete in step 1, or that This Mac kept: remove them by hand.
 
    ```bash
-   docker rm -f $(docker ps -aq --filter label=puck=environment)
    docker rm -f $(docker ps -aq --filter label=puck=instance)
+   docker volume rm $(docker volume ls -q --filter label=puck=instance)
    docker image ls --format '{{.Repository}}' | grep '^puck-img-' | xargs docker rmi
    ```
 
@@ -180,23 +204,24 @@ When something goes wrong:
 1. Open **Settings → Support** and click **Export support bundle…**.
 2. Save the ZIP where the dialog suggests, or anywhere else.
    Inside are `README.txt`, `summary.json`, and a `logs/` folder.
-   The summary holds ids, names, versions, states, and key names, plus the data folder and workspace paths.
+   The summary holds ids, names, versions, and states of your providers, runners, and environments, plus the data folder path.
    It holds no tokens, secret values, environment-variable values, prompts, or transcripts.
 3. Open an issue at <https://github.com/namikmesic/puck/issues>, describe what you did and what you expected, and attach the bundle.
 
 ## Update
 
-Release 0.0.1 does not update itself (release decision C-9).
+Release 0.1.0 does not update itself (release decision C-9).
 To move to a newer version:
 
 1. Download the new ZIP and its checksum file, and verify the checksum as in **Install**.
 2. Quit Puck.
+   Your environments keep working on their runners.
 3. Replace `/Applications/Puck.app` with the new one.
 4. Approve the first launch again when the new build is still ad hoc signed.
-5. In **Settings → Environments**, restart each running environment.
-   The runner inside a container updates only when the environment restarts.
+5. When the new build carries a newer environment daemon, the top bar offers **Daemon update** for each environment: after running turns finish, or at once.
 
-Your agents, environments, conversations, and sign-ins stay, because they live in the data folder and not in the app.
+Runners update themselves from the Puck server (`src/puck-runner/README.md`).
+Your sign-ins stay, because they live in the data folder and not in the app.
 `CHANGELOG.md` lists what each version contains, and every release is tagged `v<version>`.
 
 ## Develop
@@ -222,23 +247,20 @@ With `PUCK_ISOLATED_BROWSER=off` as well, signing in to Puck does not open the s
 Never replace `HOME` to isolate Puck: macOS then finds no keychain and pops up a "Reset To Defaults" dialog on the desktop.
 
 ```bash
-npm run typecheck   # strict tsc
+npm run typecheck     # strict tsc
 npm run lint
-npm test            # vitest unit suites
-npm run test:e2e    # boots the real app isolated and smoke-checks the UI
-npm run schema      # regenerates both committed puck.schema.json copies (CI fails on drift)
+npm test              # vitest unit suites
+npm run test:e2e      # boots the real app isolated and smoke-checks the UI
+npm run schema        # regenerates both committed puck.schema.json copies (CI fails on drift)
 npm run build:server  # the Puck server as one file, .webpack/server/puck-server.js
-npm run build:daemon
-npm run build:runner   # puck-runner bundle; see src/puck-runner/README.md
+npm run build:daemon  # the environment daemon, .webpack/daemon/puckd.js
+npm run build:runner  # puck-runner bundle; see src/puck-runner/README.md
 npm run package:runner
-npm run test:docker # real containers; needs a Docker engine
-npm run make        # the release ZIP and its checksum, see RELEASE.md
+npm run test:docker   # real containers, runners and a server; needs a Docker engine
+npm run make          # the release ZIP and its checksum, see RELEASE.md
 ```
 
-The container runner lives in `src/main/runner/runner.js`.
-It is plain CommonJS, bundled as a raw string and docker-cp'd into environments on start.
-Runner changes take effect on the next environment restart.
-The environment daemon, puckd, is built beside that runner (`npm run build:daemon` writes `.webpack/daemon/puckd.js`). Which start deploys it is `src/main/daemon-source.ts`.
+The environment daemon, `puckd` (`src/daemon/`), is a second webpack build that the app embeds as a string (`src/main/daemon-source.ts`) and hands to runners; a daemon change reaches an environment through **Daemon update**.
 
 `RELEASE.md` covers versioning, the build target, signing and notarization, and the release checklist.
 
@@ -246,7 +268,7 @@ The environment daemon, puckd, is built beside that runner (`npm run build:daemo
 
 The Puck server (`src/server/`) is the backend that runners register with and that holds GitHub sign-in.
 The app signs in to it and reaches runners through it, at `http://localhost:8765` unless `PUCK_SERVER_URL` says otherwise.
-For now it runs on your own machine with Docker Compose:
+There is no public deployment yet: run it on your own machine with Docker Compose.
 
 ```bash
 docker compose up -d --wait              # builds the puck-server image, waits until healthy
@@ -256,8 +278,10 @@ docker compose down                      # stop; add -v to also delete the store
 
 Its store lives on the `puck-server-data` volume, and it listens on `127.0.0.1:8765` only (`PUCK_SERVER_LOCAL_PORT` changes the port).
 Without configuration it starts with GitHub disabled.
-To enable GitHub sign-in, copy `src/server/puck-server.env.example` to `puck-server.env` (git-ignored) and fill it in.
+To enable GitHub sign-in, copy `src/server/puck-server.env.example` to `puck-server.env` (git-ignored) and fill in your GitHub App's id, client id, client secret and private key.
 `src/server/README.md` lists every setting, the endpoints, and how secrets reach the container.
+
+A runner on another machine must reach the server at the URL it registers with, so a server on `localhost` can host only This Mac's runner until you publish it at an address those machines can reach.
 
 ## License
 

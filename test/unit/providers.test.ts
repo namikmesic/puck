@@ -128,8 +128,7 @@ describe('provider registry', () => {
     // Every container package is pinned to an exact version (no ranges):
     // provisioning verifies the installed version against it after install.
     for (const pkg of [...clis, ...sdks]) expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
-    // Today's runner runs as root; the descriptors name the unprivileged layout.
-    for (const p of byKind('harness')) expect(p.credential.containerPath.startsWith('/root/.')).toBe(true);
+    // Agents run as the unprivileged puck user, HOME=/puck/home.
     expect(harnessDescriptors.map((d) => d.credentialPath)).toEqual([
       '/puck/home/.claude/.credentials.json',
       '/puck/home/.codex/auth.json',

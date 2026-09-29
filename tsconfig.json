@@ -13,6 +13,5 @@
     "moduleResolution": "node",
     "resolveJsonModule": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["src/main/runner/runner.js"]
+  "include": ["src/**/*"]
 }

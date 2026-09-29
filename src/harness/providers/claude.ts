@@ -8,7 +8,7 @@ import type { ProviderOption, SettingsMap } from '../options';
 import { activeSettings, compileGeneric } from '../options';
 import type { HarnessDescriptor } from './index';
 
-/** Built-in tools the editor exposes as per-tool toggles (`tool.<Name>` ids). */
+/** Built-in tools exposed as per-tool options (`tool.<Name>` ids). */
 const CLAUDE_TOOLS: ReadonlyArray<{ name: string; description: string }> = [
   { name: 'Bash', description: 'Run shell commands in the container' },
   { name: 'Read', description: 'Read files' },
@@ -25,8 +25,8 @@ const CLAUDE_TOOLS: ReadonlyArray<{ name: string; description: string }> = [
 
 // Verified against @anthropic-ai/claude-agent-sdk 0.3.280 typings (Options,
 // PermissionMode, ThinkingConfig). Excluded on purpose: includePartialMessages
-// (Puck streaming requires it), resume/session fields (backend-managed),
-// canUseTool (runner-owned Ask bridge), env (environment-level config
+// (Puck streaming requires it), resume/session fields (daemon-managed),
+// canUseTool (the daemon's Ask bridge), env (environment-level config
 // exists), spawnClaudeCodeProcess (the daemon runs the CLI as its own user),
 // agents/hooks/skills (future). cwd and mcpServers are set per session by
 // the environment daemon.
@@ -201,8 +201,8 @@ export const claudeHarness: HarnessDescriptor = {
   },
   // Claude Code refuses --dangerously-skip-permissions as root unless it
   // can tell it's sandboxed; the container is exactly that sandbox. The
-  // container runner runs the CLI as root and needs this; the environment
-  // daemon runs it as an unprivileged user, where it is not needed.
+  // environment daemon runs the CLI as an unprivileged user, where it is
+  // not needed, and it stays harmless there.
   containerEnv: { IS_SANDBOX: '1' },
   credentialPath: '/puck/home/.claude/.credentials.json',
 };

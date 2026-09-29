@@ -9,7 +9,7 @@ npm run typecheck && npm run lint && npm test
 ```
 
 Lint is at **zero problems** - keep it there.
-CI runs these plus `node --check src/main/runner/runner.js`, the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), `npm run build:server`, `npm run build:daemon` then `node .webpack/daemon/puckd.js version`, `npm run build:runner` and the macOS runner tarball's `config.sh --help`, `npm run test:docker` on the Linux `daemon-docker` job, `npm run package`, and a `docker compose up` of the server image.
+CI runs these plus the definitions schema drift check (`npm run schema`, then `git diff --exit-code`), `npm run build:server`, `npm run build:daemon` then `node .webpack/daemon/puckd.js version`, `npm run build:runner` and the macOS runner tarball's `config.sh --help`, `npm run test:docker` on the Linux `daemon-docker` job, `npm run package`, and a `docker compose up` of the server image.
 
 ## Things that bite
 
@@ -20,39 +20,26 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   Forge has done exactly that on a newer Node.
   CI installs with `npm ci`, so regenerate a drifted lockfile with the pinned Node's npm (`npm install --package-lock-only`).
   `test/unit/build-checks.test.ts` keeps the pin, the CI workflow, and the scripts in agreement.
-- **The container runner** (`src/main/runner/runner.js`) is plain CommonJS deployed INTO Docker containers.
-  It cannot import host code, and changes only take effect after an environment restart or rebuild from Settings.
-  Its `PROVIDERS` table mirrors the host registry.
-  `test/unit/runner-source.test.ts` enforces the sync from the live registry, so a new provider without a runner entry fails the suite.
-  The wire contract (opcodes and protocol revision) is declared twice: `WIRE` in `src/main/runner.ts` and `OP`/`RV` at the top of runner.js.
-  The same test asserts they match.
-  Bump the revision whenever the turn-request wire format grows.
-- **The environment daemon** (`puckd`, `src/daemon/main.ts`) is built beside the container runner.
-  `npm run build:daemon` writes `.webpack/daemon/puckd.js`.
-  Which start deploys it is `src/main/daemon-source.ts`: runner environments get that bundle; the legacy environment start still deploys the container runner.
-  Its client protocol is `src/harness/daemon-protocol.ts`.
-  It may import only `src/harness` and itself.
+- **The environment daemon** (`puckd`, `src/daemon/main.ts`) runs as each environment container's main process and drives the harnesses in it.
+  `npm run build:daemon` writes the one-file bundle `.webpack/daemon/puckd.js`; the SDKs stay external and load from the container's pinned packages.
+  The app embeds the bundle as a string (`src/main/daemon-source.ts`, the `raw-daemon` alias) and hands it to runners; a changed daemon reaches an environment only through the explicit daemon update, never silently.
+  Its client protocol is `src/harness/daemon-protocol.ts`, whose header says when `PROTOCOL_VERSION` bumps.
+  It may import only `src/harness` and itself, and `src/main` and `src/renderer` never import it (`.eslintrc.json`).
 - **IPC channels** live in one table: `src/harness/channels.ts` (`CHANNELS`).
   `preload.ts` and `src/index.ts` both import it.
   The `satisfies` clause keeps it total over `PuckBridge`, and `test/unit/channels.test.ts` asserts main registers a handler for every entry.
   Adding a bridge method = bridge type + CHANNELS entry + preload line + handler.
-  Push channels from main to the renderer (`EVENT_CHANNEL`, `ENV_EVENT_CHANNEL`, `RUNNER_EVENT_CHANNEL`, `INSTANCE_EVENT_CHANNEL`, `DAEMON_EVENT_CHANNEL`, `FLUSH_CHANNEL`, `FLUSHED_CHANNEL`) sit outside the table.
+  Push channels from main to the renderer (`RUNNER_EVENT_CHANNEL`, `INSTANCE_EVENT_CHANNEL`, `DAEMON_EVENT_CHANNEL`, `FLUSH_CHANNEL`, `FLUSHED_CHANNEL`) sit outside the table.
   The `satisfies` clause excludes their bridge methods by name.
-- **Environment readiness is Puck state, not Docker liveness.**
-  `EnvLifecycle` (`src/harness/bridge.ts`) has the states stopped, starting, ready, stopping, and failed.
-  The reducer and its invariants live in `src/main/env-lifecycle.ts`: `ready` is reachable only through the `probing-runner` stage, after the runner handshake.
-  `environments.ts` owns the state and streams every stage through `onLifecycle`, and `backend.ts` gates turns on `lifecycle(id).status === 'ready'`.
-  A container found running at boot is re-provisioned through the normal start before it is trusted.
-  Credential purge and push still follow Docker liveness, because the file must land wherever a container exists.
-  Labels and messages shared by both processes live in `src/harness/lifecycle.ts`.
-  Reserve "is Docker running?" for a failed `dockerHealth()` check, never for a slow pull or run.
-- **Docker CLI discovery** (`src/main/docker-discovery.ts`): Finder launches do not inherit the shell PATH.
-  The binary is resolved in this order: configured path (`PUCK_DOCKER_BIN`), well-known install locations, inherited PATH, login-shell probe.
-  The not-found error lists what was searched.
-  Everything goes through `docker-client.ts` (argv, timeouts, abort signal, line streaming), and `TIMEOUTS` in `environments.ts` is the one table.
+- **Environment readiness is the daemon's state, not Docker liveness.**
+  An environment is ready only when its daemon reports `instance.status` ready over an attached connection.
+  `composerGate` in `src/renderer/instance-progress.ts` reads the app's operation, the attach state, and the daemon's status, in that order.
+  Reserve "is Docker running?" for a failed Docker health check on the runner, never for a slow pull or run.
+- **The app never runs `docker`.**
+  Every Docker operation is on a runner (`src/puck-runner/docker/`), argv only, with `TIMEOUTS` in `ops.ts` as the one table.
+  Docker CLI discovery (`discovery.ts`) exists because launchd and Finder launches do not inherit the shell PATH: configured path (`PUCK_DOCKER_BIN`), well-known install locations, inherited PATH, login-shell probe, and the not-found error lists what was searched.
 - **Provider packages are pinned** (`PinnedPackage` in `src/harness/providers/index.ts`).
-  `src/harness/provisioning.ts` checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every start.
-  With auto-install on, any drift fails the start, and with it off only a missing SDK fails.
+  The daemon's provisioning (`src/harness/provisioning.ts`) checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every boot; any drift fails provisioning.
   Bump a pin only together with what that `PinnedPackage` comment names.
   colima does not share host temp dirs either, so scripts reach containers as `sh -lc` arguments.
 - **Provider ids** (`claude-code`, `codex`) are persisted in user stores - never rename them.
@@ -67,33 +54,30 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   The support bundle (`src/main/support.ts`) ships those files plus a summary of key NAMES only, through `support:export`.
 - **Quit is a drain** (`src/main/shutdown.ts`).
   The first `before-quit` is held while the renderer flushes and every queued store write settles.
-  The renderer flush runs over `FLUSH_CHANNEL` into `session-store.flushPending`, which saves debounced conversations and the composer draft.
-  `jsonstore.flushWrites` awaits the queued writes.
+  The renderer acknowledges over `FLUSH_CHANNEL` (its drafts already live in `localStorage`); then the instance replay cursor is flushed and `jsonstore.flushWrites` awaits the queued writes.
   Then quit re-issues, bounded by a timeout.
-  Anything that must survive quit goes through `jsonstore` in main or the session store's `persist` in the renderer.
+  Anything that must survive quit goes through `jsonstore` in main; everything about the work itself lives in the daemon.
 - **Secrets** (`src/main/secrets.ts`) have one backend, Electron safeStorage.
   `saveSecret` throws `SecureStorageUnavailableError` when the keychain cannot encrypt.
   There is no plaintext fallback, and a file that does not decrypt reads as absent.
   The Settings copy in `index.html` states this behavior.
-- **Persisted stores** live in Electron `userData`.
+- **Persisted stores** live in Electron `userData`: `puck-providers.json`, `puck-runners.json`, `puck-instances.json`, `puck-defs-cache/`, and encrypted `*.bin` secrets (`puck-session.bin`, `claude-oauth.bin`, `codex-oauth.bin`).
   Migrate, don't break: new fields get `??` defaults at load, and legacy keys are dual-read, never rewritten in place.
-  Layout: `puck-agents.json`, `puck-environments.json`, `puck-providers.json`, `puck-runners.json`, `puck-instances.json`, `puck-resume.json`, `puck-convos/<agentId>.json` (one file per agent), and encrypted `*.bin` secrets.
-  Resume ids are keyed `agentId@envId`, scoped to the environment because a rebuilt container loses its transcripts.
-  A legacy single-blob `puck-convos.json` is still read.
-  Conversation files carry a format version `v`.
-  See `ConversationData` in `src/harness/bridge.ts` for the persisted event dialect and its append-only rule.
+  Stores of the 0.0.1 chat app (`puck-agents.json`, `puck-environments.json`, `puck-resume.json`, `puck-convos*`, `env-secrets-*.bin`) are ignored, never read or deleted.
+  Everything about the work (backlog, sessions, transcripts, events) lives in the daemon's stores under `/puck/state`, with a `formatVersion` and ordered migrations on boot; the same rule applies there.
+  See `src/harness/transcript.ts` for the transcript format and its append-only rule.
 - **Per-agent provider options** are schema-driven.
   Adding one is a single `ProviderOption` descriptor in the provider module (`configOptions`).
-  The editor UI, validation, persistence, and wire transport all follow the schema (`src/harness/options.ts`).
+  An agent definition's `options:` are checked strictly against that schema (`checkSettings` in `src/harness/options.ts`), and the generated JSON Schema follows it.
   Only options needing cross-key coupling get a line in the provider's `compileSettings`.
   A test asserts every overridden option reaches the compiled output.
-  Values are sparse (only user overrides are stored and compiled), and the runner base encodes the defaults.
+  Values are sparse (only overrides are compiled), and the daemon's adapters encode the defaults.
 - **Driving the running app for verification**: launch with `npm run start:isolated -- -- --remote-debugging-port=9222` (throwaway data dir, mock keychain, never replace HOME) and attach playwright-core over CDP.
   Never call `page.setViewportSize` on the live app.
   The emulation override outlives the script and breaks the real window's layout.
   Use `Emulation.setDeviceMetricsOverride` inside try/finally with `clearDeviceMetricsOverride` instead.
 - **Provider logins** for harnesses run in the system browser (RFC 8252).
-  GitHub sign-in is the Puck server's web flow (`src/main/server/session.ts`); the server holds the App's client secret and the app keeps only its Puck session - never add a client secret to the app (`src/main/providers/github-app.ts` has the public identity; `PUCK_GITHUB_CLIENT_ID` and `PUCK_GITHUB_APP_SLUG` override that app as one pair).
+  GitHub sign-in is the Puck server's web flow (`src/main/server/session.ts`); the server holds the App's identity and client secret and the app keeps only its Puck session - never add GitHub App credentials to the app (the install link comes from the server's `GET /v1/me`).
   The authorize URL goes through `shell.openExternal`.
   The redirect lands on the shared loopback listener `src/main/providers/loopback.ts` (127.0.0.1 only, one request, state check, timeout).
   Claude binds an ephemeral port (`http://localhost:<port>/callback`, the shape Claude Code registers).
@@ -102,7 +86,7 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
   Logout is a fence, implemented by `createOAuthAccount` in `src/main/providers/oauth.ts`.
   It advances an epoch, so an exchange or refresh already in flight drops its result (`LogoutFence`).
   Adoption of container credentials requires a signed-in account.
-  `environments.purgeCredentials` removes the mirrored file from running containers, and a stopped container is cleaned on its next start.
+  Sign-out removes the credential from the attached environment and marks every other one for removal on its next attach (`onHarnessLogout` in `src/main/instances/index.ts`).
   Any new path that writes tokens asynchronously must take a fence first.
 - **colima** does not share `$HOME` with containers, so credential files reach containers via `docker cp` only.
   Host dirs are deliberately not mounted (sandbox escape via CLI hook files).
@@ -113,77 +97,57 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 2. OAuth module (transport and token mapping).
    Shared PKCE and token-store helpers live in `oauth.ts`.
 3. Registry entry in `src/main/providers/index.ts`.
-4. Runner side: `PROVIDERS` entry and `run<Name>` function in `src/main/runner/runner.js`.
-   It is untyped JS, so keep it thin and translate SDK events into `HarnessEvent`s.
-   Daemon side, beside that: an adapter under `src/daemon/harness/`, registered from `createAdapters`.
+4. Daemon side: an adapter under `src/daemon/harness/` that translates SDK events into `HarnessEvent`s, registered from `createAdapters`.
 5. Run the suite.
-   `runner-source.test.ts` checks the runner `PROVIDERS` table, and `provider-settings.test.ts` checks compiled options.
+   `provider-settings.test.ts` checks compiled options, and `providers.test.ts` checks the pins against the daemon's type devDependencies.
 
 ## Terminology
 
-- *Agent* = a named provider configuration (`AgentConfig`).
-  The Task-tool sub-agents inside a chat are "sub-agents".
-  The process today's containers run is the container runner (`src/main/runner/runner.js`); `puckd` is the environment daemon built beside it.
-  `puck-runner` (`src/puck-runner/`) is the program installed on a machine that hosts environments; the app reaches it through `src/main/runners/`. See `src/puck-runner/README.md`.
-  A `kind: Agent` file in a config repo is a definition (`src/harness/definitions/`), not this record.
-- `AgentConfig.options` = sparse schema-option overrides.
-  `TurnRequest.settings` = the *compiled* SDK fragment, whose wire field names are frozen until the next protocol-revision bump.
+- *Agent definition* = a `kind: Agent` YAML file in the config repo (harness, model, effort, instructions, options); *environment definition* = a `kind: Environment` file (image, repos, orchestrator, agent assignments with `maxParallel`, policies). Both live in `src/harness/definitions/`.
+- *Environment* (an instance in code, id `env_<ulid>`) = one container and its two volumes, created from a definition at a pin on a runner.
+  *Runner* = `puck-runner` (`src/puck-runner/`), installed on a machine that hosts environments; the app reaches it through `src/main/runners/`. See `src/puck-runner/README.md`.
+  *Daemon* = `puckd`, the process inside the container that owns all environment state and work.
+- *Orchestrator* = the environment's one long-lived session; *worker* = a session bound to one *work item* (`W-<n>`).
+  A *notice* is a daemon-written message delivered to the orchestrator in its next turn.
+  The Task-tool sub-agents inside a session are "sub-agents", distinct from workers.
+- An agent's `options` = sparse schema-option overrides, compiled into the SDK fragment by the provider's `compileSettings`.
   The app's Settings modal is UI-level and unrelated.
-  On disk, pre-rename records carry `settings`/`thinking` keys, dual-read at load and written back with the new names.
-- `AgentConfig.effort` compiles to Claude's `effort` / Codex's `model_reasoning_effort`.
+- An agent's `effort` compiles to Claude's `effort` / Codex's `model_reasoning_effort`.
   The `thinking` *event kind* is the UI indicator.
 
 ## Layout
 
 - `src/index.ts` - main process: window hardening, IPC handler registration, and quit drain wiring.
-  Ids, strings, and configs are validated in `src/main/ipcguard.ts`.
-  The conversation payload codec lives with its format in `src/main/conversations.ts`: strict `fromIpc` on save, lenient `normalize` on load, one shared field assembly.
+  Ids, pins, specs, and daemon calls are validated in `src/main/ipcguard.ts`.
 - `src/harness/` - contracts shared by the renderer, main, and the environment daemon, plus the pure definition library.
   Keep this directory free of node/electron imports.
   `bridge.ts` holds the types and `PuckBridge`, `channels.ts` the IPC channel table, `types.ts` the `HarnessEvent` wire protocol.
-  `options.ts` holds the provider option schema and `ipc.ts` the `IpcHarness`.
+  `options.ts` holds the provider option schema.
   `providers/` holds the pure harness descriptors and `github/` the shared GitHub client.
   `definitions/` holds agent and environment definitions: YAML parse, validation, resolution, JSON Schema, and update-class diff.
   `provisioning.ts` is the container package plan, `daemon-protocol.ts` the puckd protocol, and `transcript.ts` transcript format v2.
-- `src/daemon/` - puckd. Entry `main.ts`. Which start launches it: `src/main/daemon-source.ts`.
+- `src/daemon/` - puckd. Entry `main.ts`; the app embeds its bundle through `src/main/daemon-source.ts`.
 - `src/puck-runner/` - the host runner. Contract: `src/puck-runner/README.md`.
 - `src/main/providers/` - the provider kinds (`types.ts`) and the registry (`index.ts`).
   The header comments say what a new provider needs.
-- `src/main/backend.ts` - turn orchestration: active agent × environment, resume-id map, stale-resume retry state machine.
 - `src/main/config-repo.ts` - the GitHub config repo at a pinned ref: tree and file fetch, tag, branch and commit pins, the SHA cache, and `definitionRefs` / `definitionsAt`.
-- `src/main/environments.ts` - Puck lifecycle state, Docker lifecycle, bootstrap, credential and secret injection, credential purge on logout (all registry-driven, no provider names).
-- `src/main/runner.ts` - docker-exec stdio bridge (handshake, watchdog, stderr diagnostics, `WIRE` contract).
+- `src/main/instances/` - environments: the start flow, the daemon client (attach, replay from the cursor), credential sync, updates.
+- `src/main/runners/` and `src/main/server/` - the user's runners (This Mac's install, control channels) and the Puck server (session, API, the app's socket).
 - `src/main/shutdown.ts` - the quit drain (`installQuitDrain`) and the renderer flush request (`flushRenderers`).
-- `src/renderer.ts` - the legacy window: DOM lookups, nav applier and settings modal, composer/turn loop, settings card grids, shortcuts, boot.
-  `nav()` is the single entry point for navigation.
-  Element ids follow prefixes: `a-*` agent editor, `d-*` environment editor, `sec-*` settings sections, `aed-*` agent-editor cards, `sm-*` settings modal.
-  Settings sections are `agents`, `providers`, `envs`, and `support` (`SettingsSection` in `nav.ts`).
-- `src/renderer-v2.ts` - the environment window (`PUCK_UI=v2`); the legacy window stays the default until cutover. Each module's header under `src/renderer/` is its contract.
-- `src/styles/` - one stylesheet per surface (`shell`, `settings`, `editors`, `chat`, `work`, `flows`, `overlays`).
-  The import order in `renderer.ts` and `renderer-v2.ts` preserves the cascade.
-- `src/renderer/` - extracted, unit-tested modules.
-  The house style (proven by `options.ts`): context/elements in, controller out, no `getElementById` inside, jsdom tests.
-  - `session-store.ts` - the Session model: conversations, sub-agent children, spawn/teardown, rename sync, debounced persistence, the quit flush.
-  - `chat-view.ts` - message rows, Slack grouping, streaming turns (markdown committer, tool cards, sub-agents behind a `spawnChild` seam), replay (`REPLAY_WINDOW`), full-turn overlay.
-  - `ask-card.ts` - the mid-turn question card (live and replay variants, submit hook rejects to re-arm).
-  - `roster.ts` - the sidebar list: agent rows, unread/running dots, nested sub-agent chats, rAF-coalesced `render()`.
-  - `palette.ts` - the Cmd+K palette: agent switcher and history search.
-  - `settings/agent-editor.ts` - segmented pickers, dirty tracking, section rail and scroll-spy, epoch-guarded async population, save.
-  - `settings/env-editor.ts` - the environment detail page: config form, env-var/secret kv lists, header with the shared op rail, save.
-  - `settings/cards.ts` and `settings/env-rail.ts` - card-grid kit and the ONE environment op ladder (list cards and detail header share it).
-  - `env-progress.ts` - lifecycle presentation: status chip, "stage · elapsed" line, and composer gate text.
-    Its tracker merges pushed lifecycle events and runs the elapsed-time ticker.
-  - `settings/providers.ts` - the Providers section grouped by kind, with `github.ts` and `runners.ts` for its cards.
-  - `settings/support.ts` - the Support section: version, data paths, and the support-bundle export button.
-  - `nav.ts` - pure nav state machine (`navTransition`, `escapeTarget`).
-  - `options.ts`, `util.ts`, `dom.ts`, `format.ts`, `markdown.ts`.
+- `src/renderer.ts` - the window: DOM lookups, the nav applier, keyboard shortcuts, boot.
+  Navigation is the pure state machine in `src/renderer/view-nav.ts` (`navTransition`, `escapeTarget`).
+  Element ids follow prefixes: `tb-*` top bar, `bl-*` backlog, `oc-*` orchestrator chat, `wd-*` work detail, `wp-*` work pane, `sf-*` start flow, `fr-*` first run, `sm-*` settings modal, `sec-*` settings sections, `pv-*` provider cards, `rn-*` runners.
+  Settings sections are `providers`, `runners`, and `support` (`SettingsSection` in `view-nav.ts`).
+- `src/styles/` - one stylesheet per surface (`shell`, `settings`, `work`, `flows`, `chat`, `overlays`).
+  The import order in `renderer.ts` preserves the cascade.
+- `src/renderer/` - extracted, unit-tested modules; each module's header is its contract.
+  The house style: context/elements in, controller out, no `getElementById` inside, jsdom tests.
+  `instance-store.ts` is the client projection of daemon state, `instance-sync.ts` keeps it current, and `session-view.ts` renders sessions through `chat-view.ts`.
 
 ## Roadmap (deliberately deferred)
 
-- Runner as a typed per-provider adapter bundle (retires the hand-synced `PROVIDERS` table structurally).
 - A prepared base image that bakes in the pinned provider packages, replacing the per-start `npm install`.
   The pins in `src/harness/provisioning.ts` are what it would install.
-- Wire envelope `{op, req}` at the next protocol-revision bump.
 - Ask-answer encoding (keyed by question text, lossy) redesign.
 
 ## Maintaining this file

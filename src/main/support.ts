@@ -5,8 +5,8 @@
  * files plus a sanitized summary of the configuration, zipped to a location
  * the user picks in a save dialog. The summary carries ids, names, versions,
  * states, and key NAMES. It never carries token material, secret or env-var
- * values, system prompts, prompts, or transcripts. Default for the open
- * release call C-10: a local export, no hosted crash reporting.
+ * values, prompts, or transcripts. A local export, no hosted crash
+ * reporting.
  */
 
 import { app, dialog, type BrowserWindow } from 'electron';
@@ -14,9 +14,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { SupportInfo } from '../harness/bridge';
-import * as agents from './agents';
-import { docker } from './docker-client';
-import * as environments from './environments';
 import { log, redact } from './log';
 import * as instances from './instances';
 import { byKind } from './providers';
@@ -43,31 +40,6 @@ export interface SupportSummary {
     dataDir: string;
   };
   providers: Array<{ id: string; label: string; connected: boolean; pending: boolean }>;
-  agents: Array<{
-    id: string;
-    name: string;
-    provider: string;
-    model: string;
-    effort: string;
-    optionKeys: string[];
-    systemPromptChars: number;
-    advancedSet: boolean;
-    active: boolean;
-  }>;
-  environments: Array<{
-    id: string;
-    name: string;
-    image: string;
-    dockerfileSet: boolean;
-    workspacePath: string;
-    autoInstall: boolean;
-    envVarKeys: string[];
-    secretKeys: string[];
-    /** Lifecycle status, and the current or failing stage when there is one. */
-    status: string;
-    stage: string | null;
-    active: boolean;
-  }>;
   /** The Puck server connection and the user's runners (no keys, no tokens). */
   runners: {
     server: string;
@@ -78,20 +50,11 @@ export interface SupportSummary {
   };
   /** Environments on runners, by id, definition name, runner, and state. */
   instances: Array<{ id: string; name: string; runnerId: string; status: string; attach: string | null; daemon: string | null; lastSeq: number | null }>;
-  docker: { version: string; containers: string[] };
   logs: string[];
 }
 
 /** The sanitized configuration summary. Every field is a name, an id, a flag, a count, or a version. */
 export async function supportSummary(now: Date = new Date()): Promise<SupportSummary> {
-  const [agentInfos, envInfos, version, containers] = await Promise.all([
-    Promise.resolve(agents.list()),
-    environments.list().catch(() => []),
-    docker(['version', '--format', '{{.Client.Version}} client, {{.Server.Version}} server']),
-    docker(['ps', '-a', '--filter', 'label=puck=environment', '--format', '{{.Names}} | {{.Status}} | {{.Image}}']),
-  ]);
-  const dockerError = (r: { code: number | null; stderr: string }): string =>
-    `unavailable: ${r.stderr.trim() || `docker exited ${r.code}`}`;
   return {
     generatedAt: now.toISOString(),
     app: {
@@ -110,30 +73,6 @@ export async function supportSummary(now: Date = new Date()): Promise<SupportSum
       const auth = p.auth.status();
       return { id: p.id, label: p.label, connected: auth.connected, pending: auth.pending };
     }),
-    agents: agentInfos.map((a) => ({
-      id: a.id,
-      name: a.name,
-      provider: a.provider,
-      model: a.model,
-      effort: a.effort,
-      optionKeys: Object.keys(a.options).sort(),
-      systemPromptChars: a.systemPrompt.length,
-      advancedSet: a.advanced.trim().length > 0,
-      active: a.active,
-    })),
-    environments: envInfos.map((e) => ({
-      id: e.id,
-      name: e.name,
-      image: e.image,
-      dockerfileSet: e.dockerfile.trim().length > 0,
-      workspacePath: e.workspacePath,
-      autoInstall: e.autoInstall,
-      envVarKeys: Object.keys(e.envVars).sort(),
-      secretKeys: [...e.secretKeys].sort(),
-      status: e.status,
-      stage: e.stage,
-      active: e.active,
-    })),
     runners: (() => {
       const r = runners.state();
       return {
@@ -162,27 +101,20 @@ export async function supportSummary(now: Date = new Date()): Promise<SupportSum
       daemon: i.daemon?.status ?? null,
       lastSeq: i.lastSeq,
     })),
-    docker: {
-      version: version.code === 0 ? version.stdout.trim() : dockerError(version),
-      containers:
-        containers.code === 0
-          ? containers.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-          : [dockerError(containers)],
-    },
     logs: log.files().map((f) => path.basename(f)),
   };
 }
 
 const BUNDLE_README = `Puck support bundle
 
-summary.json  app, Electron, and Docker versions; providers (connected or not);
-              agents and environments by id and name, with option and key NAMES only;
-              runners and environments on them by id, name and state.
+summary.json  app and Electron versions; harness providers (connected or not);
+              the Puck server connection; runners (with their Docker version) and
+              the environments on them, by id, name and state.
 logs/         Puck's diagnostic log, newest file first (puck.log, then puck.log.1, ...).
 
 Nothing here is a token, a secret value, an environment-variable value, a
-system prompt, a prompt, or a transcript. Review the files before you share
-them; they do include the data folder and workspace paths on your Mac.
+prompt, or a transcript. Review the files before you share them; they do
+include the data folder path on your Mac.
 `;
 
 export interface SupportBundle {

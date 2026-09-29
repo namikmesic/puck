@@ -18,12 +18,10 @@
     ".webpack/",
     "out/",
     "dist/",
-    "coverage/",
-    "src/main/runner/runner.js"
+    "coverage/"
   ],
   "settings": {
     "import/core-modules": [
-      "raw-runner",
       "raw-daemon",
       "raw-daemon-meta",
       "vitest/config"

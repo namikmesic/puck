@@ -2,7 +2,7 @@
  * The runner directory: what the tarball ships and what registration adds.
  *
  *   config.sh  run.sh  svc.sh  VERSION        the scripts and the release version
- *   bin/node  bin/puck-runner.js             the bundled Node runtime and the runner
+ *   bin/node  bin/puck-runner.cjs            the bundled Node runtime and the runner
  *   .runner         { runnerId, name, serverUrl, labels, maxEnvironments, disableUpdate, owner, localSocket, serviceLabel }   0644
  *   .credentials    { runnerId, keyFile, keyFingerprint }                                        0600
  *   .runner_key     the runner's Ed25519 private key, PKCS#8 PEM                                0600
@@ -48,7 +48,7 @@ export function runnerPaths(root: string): RunnerPaths {
     update: at('_update'),
     version: at('VERSION'),
     bin: at('bin'),
-    bundle: at('bin', 'puck-runner.js'),
+    bundle: at('bin', 'puck-runner.cjs'),
     node: at('bin', 'node'),
   };
 }

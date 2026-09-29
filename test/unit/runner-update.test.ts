@@ -28,9 +28,9 @@ function release(version: string, echo = version): Buffer {
     { name: 'run.sh', type: 'file', mode: 0o755, body: `#!/bin/sh\n# ${version}\n` },
     { name: 'VERSION', type: 'file', mode: 0o644, body: `${version}\n` },
     { name: 'bin/', type: 'dir', mode: 0o755 },
-    // The smoke test runs `bin/node bin/puck-runner.js version`; a shell script stands in for Node.
+    // The smoke test runs `bin/node bin/puck-runner.cjs version`; a shell script stands in for Node.
     { name: 'bin/node', type: 'file', mode: 0o755, body: `#!/bin/sh\necho ${echo}\n` },
-    { name: 'bin/puck-runner.js', type: 'file', mode: 0o644, body: `// runner ${version}\n` },
+    { name: 'bin/puck-runner.cjs', type: 'file', mode: 0o644, body: `// runner ${version}\n` },
   ]);
 }
 

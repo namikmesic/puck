@@ -1,6 +1,5 @@
 /**
- * Settings → Providers → Runners: the machines that host the user's
- * environments.
+ * Settings → Runners: the machines that host the user's environments.
  *
  * - The list: one row per runner, This Mac first: status (Idle, Active ·
  *   n environments, Offline · last seen), platform, Docker version, CPUs,
@@ -14,9 +13,10 @@
  *   a one-hour registration token (Cancel revokes it), and watch the runner
  *   come online with its Docker version and capacity.
  *
- * A controller that survives re-renders: runner events update the list in
- * place without losing an open dialog or a half-typed rename. Context in,
- * elements built here, no DOM lookups.
+ * A controller that survives re-renders: a runner-list push or a focus
+ * refresh redraws the list and restores an open dialog and a half-typed
+ * Rename or Labels field (`input[data-keep]`). Context in, elements built
+ * here, no DOM lookups.
  */
 
 import type {
@@ -34,17 +34,14 @@ import { relTime } from '../format';
 import { button, errText } from '../util';
 import { cardShell } from './cards';
 
-/** The Providers page: Integrations is the card under Runners. */
-const SIGNED_OUT_ON_PROVIDERS =
-  'Sign in to Puck with GitHub (Integrations below) to add runners. Runners belong to your Puck account.';
+const SIGNED_OUT =
+  'Sign in to Puck with GitHub on the Providers page to add runners. Runners belong to your Puck account.';
 
 export interface RunnersContext {
   bridge: PuckBridge;
   say(text: string): void;
   copy(text: string): Promise<void>;
   now?(): number;
-  /** Signed-out note. Defaults to the Providers-page sentence. */
-  signedOutNote?: string;
 }
 
 export interface RunnersView {
@@ -360,12 +357,15 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     return box;
   }
 
-  function inlineEditor(r: RunnerRow, field: 'name' | 'labels'): HTMLElement {
+  function inlineEditor(r: RunnerRow, field: 'name' | 'labels', draft: ReadonlyMap<string, string>): HTMLElement {
     const form = el('form', 'rn-edit config-form');
     const input = el('input', '');
-    input.dataset.keep = `rn-${field}-${r.id}`;
+    const key = `${field}:${r.id}`;
+    input.dataset.keep = key;
     input.setAttribute('aria-label', field === 'name' ? 'Runner name' : 'Labels, comma-separated');
-    input.value = field === 'name' ? r.name : r.labels.filter((l) => l !== r.os && l !== r.arch).join(', ');
+    const saved = field === 'name' ? r.name : r.labels.filter((l) => l !== r.os && l !== r.arch).join(', ');
+    const kept = draft.get(key);
+    input.value = kept !== undefined ? kept : saved;
     input.spellcheck = false;
     const save = el('button', 'btn-primary', 'Save');
     save.type = 'submit';
@@ -402,7 +402,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     return box;
   }
 
-  function rowEl(r: RunnerRow): HTMLElement {
+  function rowEl(r: RunnerRow, draft: ReadonlyMap<string, string>): HTMLElement {
     const row = el('div', `rn-row rn-${r.status}`);
     row.dataset.runner = r.id;
     const head = el('div', 'rn-row-head');
@@ -422,7 +422,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
       row.appendChild(el('div', 'pv-note', 'Offline for more than two weeks. Remove it if the machine is gone.'));
     }
     if (expanded.has(r.id)) row.appendChild(details(r));
-    if (editing?.runnerId === r.id) row.appendChild(inlineEditor(r, editing.field));
+    if (editing?.runnerId === r.id) row.appendChild(inlineEditor(r, editing.field, draft));
     const removal = removals.get(r.id);
     if (removal) row.appendChild(removalBlock(r, removal));
 
@@ -490,10 +490,18 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
   }
 
   function drawList(): void {
+    const draft = new Map<string, string>();
+    let focused: string | null = null;
+    for (const input of list.querySelectorAll<HTMLInputElement>('input[data-keep]')) {
+      const key = input.dataset.keep;
+      if (!key) continue;
+      draft.set(key, input.value);
+      if (input === document.activeElement) focused = key;
+    }
     list.textContent = '';
     if (!state) return;
     if (!state.signedIn) {
-      list.appendChild(el('p', 'pv-note', ctx.signedOutNote ?? SIGNED_OUT_ON_PROVIDERS));
+      list.appendChild(el('p', 'pv-note', SIGNED_OUT));
       return;
     }
     if (state.connection === 'offline') {
@@ -502,10 +510,14 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
     if (!state.runners.length) {
       list.appendChild(el('p', 'pv-note', 'Set up This Mac, or add a Linux machine with Add runner.'));
     }
-    for (const r of state.runners) list.appendChild(rowEl(r));
+    for (const r of state.runners) list.appendChild(rowEl(r, draft));
     const local = state.local;
     if (local.busy || (local.error && !add)) {
       list.appendChild(el('div', local.busy ? 'rn-waiting' : 'pv-health-msg', local.busy ? `◌ This Mac: ${local.detail}` : `This Mac: ${local.error}`));
+    }
+    if (!focused) return;
+    for (const input of list.querySelectorAll<HTMLInputElement>('input[data-keep]')) {
+      if (input.dataset.keep === focused && input.isConnected) input.focus();
     }
   }
 

@@ -6,8 +6,8 @@ The install and update steps for users are in the README.
 ## Version and tag
 
 - The version lives in `package.json` and `package-lock.json`, and the top entry of `CHANGELOG.md` repeats it.
-- Each release is tagged `v<version>` on `main`, for example `v0.0.1`.
-- Release 0.0.1 uses version `0.0.1` and tag `v0.0.1` (working assumption C-1).
+- Each release is tagged `v<version>` on `main`, for example `v0.1.0`.
+- Release 0.1.0 uses version `0.1.0` and tag `v0.1.0` (working assumption C-1).
 - `test/unit/build-checks.test.ts` fails when the changelog entry and the package version disagree.
 
 ## Target
@@ -37,7 +37,7 @@ The artifacts land in `out/make/zip/darwin/arm64/`.
 Verify the checksum with:
 
 ```bash
-cd out/make/zip/darwin/arm64 && shasum -a 256 -c Puck-darwin-arm64-0.0.1.zip.sha256
+cd out/make/zip/darwin/arm64 && shasum -a 256 -c Puck-darwin-arm64-0.1.0.zip.sha256
 ```
 
 The pure helpers behind these steps are in `scripts/release.mjs`, and `test/unit/release.test.ts` covers them.
@@ -90,13 +90,13 @@ Never write them into the repository.
 
 Until C-2 is decided, the artifact is a local ZIP plus its checksum file, handed over by the captain.
 `forge.config.ts` has no publisher, and no workflow uploads anywhere.
-`npm run publish` still calls `electron-forge publish` directly and is not part of the 0.0.1 flow.
+`npm run publish` still calls `electron-forge publish` directly and is not part of the 0.1.0 flow.
 
 ## Updates (working assumption C-9)
 
-Release 0.0.1 has no automatic updates.
+Release 0.1.0 has no automatic updates.
 Users replace `Puck.app` by hand, as the README describes.
-Data stays in the app data folder, so a replacement keeps agents, environments, conversations, and sign-ins.
+Sign-ins stay in the app data folder and all work stays in the environments on their runners, so a replacement keeps both.
 
 ## Release checklist
 

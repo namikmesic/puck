@@ -40,7 +40,7 @@ function fileFor(name: string): string {
  * rotated token pair replaces the old one whole or not at all, because the
  * old pair is already dead on the provider's side. Throws
  * SecureStorageUnavailableError - and writes nothing - when the OS store
- * cannot encrypt. Callers surface the message as-is (auth status, editor).
+ * cannot encrypt. Callers surface the message as-is on auth status.
  */
 export function saveSecret(name: string, json: string): void {
   if (!safeStorage.isEncryptionAvailable()) throw new SecureStorageUnavailableError();

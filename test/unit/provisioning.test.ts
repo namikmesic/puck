@@ -94,50 +94,29 @@ describe('version verification', () => {
     expect(parsed.get('@a/sdk')).toBeNull();
   });
 
-  it('managed (auto-install) containers fail on any drift or absence', () => {
+  it('fails on any drift or absence', () => {
     const report = verifyPins(
       expected,
       new Map([
         ['@a/cli', '0.9.0'],
         ['@a/sdk', null],
       ]),
-      true,
     );
     expect(report.errors).toEqual([
       '@a/cli is 0.9.0 globally, expected 1.0.0',
       `@a/sdk is not installed under ${SDK_PREFIX}, expected 2.0.0`,
     ]);
-    expect(report.notes).toEqual([]);
-    expect(describePinFailure(report, true)).toMatch(/verification failed: @a\/cli is 0\.9\.0/);
+    expect(describePinFailure(report)).toMatch(/verification failed: @a\/cli is 0\.9\.0/);
   });
 
-  it('user-managed containers fail only on a missing SDK; CLI absence and drift are notes', () => {
-    const missingSdk = verifyPins(expected, new Map([['@a/cli', null]]), false);
-    expect(missingSdk.errors).toEqual([`@a/sdk is not installed under ${SDK_PREFIX}, expected 2.0.0`]);
-    expect(missingSdk.notes).toEqual(['@a/cli is not installed globally, expected 1.0.0']);
-    expect(describePinFailure(missingSdk, false)).toMatch(/Auto-install is off/);
-
-    const drift = verifyPins(
-      expected,
-      new Map([
-        ['@a/cli', '1.0.0'],
-        ['@a/sdk', '2.1.0'],
-      ]),
-      false,
-    );
-    expect(drift.errors).toEqual([]);
-    expect(drift.notes).toEqual([`@a/sdk is 2.1.0 under ${SDK_PREFIX}, expected 2.0.0`]);
-  });
-
-  it('an exact match produces neither errors nor notes', () => {
+  it('an exact match produces no errors', () => {
     const report = verifyPins(
       expected,
       new Map([
         ['@a/cli', '1.0.0'],
         ['@a/sdk', '2.0.0'],
       ]),
-      true,
     );
-    expect(report).toEqual({ errors: [], notes: [] });
+    expect(report).toEqual({ errors: [] });
   });
 });

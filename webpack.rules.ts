@@ -1,13 +1,9 @@
 import type { ModuleOptions } from 'webpack';
 
 export const rules: Required<ModuleOptions>['rules'] = [
-  // The container runner ships as a raw string (written to a temp file and
-  // docker-cp'd into environments) — import it as source, don't bundle it.
-  {
-    test: /runner[/\\]runner\.js$/,
-    type: 'asset/source',
-  },
-  // The environment daemon ships the same way (built by scripts/build-daemon.mjs).
+  // The environment daemon ships as a raw string (built by
+  // scripts/build-daemon.mjs; the app sends it to runners) — import it as
+  // source, don't bundle it.
   {
     test: /daemon[/\\]puckd\.js$/,
     type: 'asset/source',

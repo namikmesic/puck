@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -6,6 +7,10 @@ import { defineConfig } from 'vitest/config';
  * because it needs a Docker engine; CI runs it on Linux.
  */
 export default defineConfig({
+  resolve: {
+    // The golden scenario drives main-process modules; the Docker suite never boots Electron.
+    alias: { electron: path.resolve(__dirname, 'test/mocks/electron.ts') },
+  },
   test: {
     include: ['test/docker/**/*.test.ts'],
     globalSetup: ['test/docker/setup.ts'],

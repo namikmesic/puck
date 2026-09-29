@@ -1,55 +1,37 @@
 /**
  * Main-process composition root: constructs the window, wires the services
- * together (runner transport, env-reset → resume-id invalidation, login →
- * credential push), and registers the IPC surface from one handler table.
- * Domain logic lives in src/main/*; this file only assembles it.
+ * together (runner and environment events → the renderer, harness sign-in
+ * and sign-out → the attached environment), and registers the IPC surface
+ * from one handler table. Domain logic lives in src/main/*; this file only
+ * assembles it.
  */
 
 import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
-import * as agents from './main/agents';
-import * as backend from './main/backend';
 import * as configRepo from './main/config-repo';
-import * as conversations from './main/conversations';
 import * as providerRegistry from './main/providers';
 import * as github from './main/providers/github';
-import * as environments from './main/environments';
 import * as instances from './main/instances';
 import * as runners from './main/runners';
 import * as serverApi from './main/server/api';
 import { log } from './main/log';
-import * as runner from './main/runner';
-import * as sessionRegistry from './main/session-registry';
 import { flushWrites } from './main/jsonstore';
 import { flushRenderers, installQuitDrain } from './main/shutdown';
 import * as support from './main/support';
 import {
-  agentConfigFrom,
-  askAnswersFrom,
+  appliedPinFrom,
   daemonCallFrom,
   enrollTokenIdFrom,
-  envConfigFrom,
   instanceIdFrom,
   objArgs,
-  appliedPinFrom,
   pinFrom,
   repoNameFrom,
   requireId,
-  requireSecretKey,
-  requireString,
   runnerIdFrom,
   runnerPatchFrom,
   startSpecFrom,
 } from './main/ipcguard';
-import {
-  CHANNELS,
-  DAEMON_EVENT_CHANNEL,
-  ENV_EVENT_CHANNEL,
-  EVENT_CHANNEL,
-  INSTANCE_EVENT_CHANNEL,
-  RUNNER_EVENT_CHANNEL,
-} from './harness/channels';
+import { CHANNELS, DAEMON_EVENT_CHANNEL, INSTANCE_EVENT_CHANNEL, RUNNER_EVENT_CHANNEL } from './harness/channels';
 import type { RunnerEvent } from './harness/bridge';
-import { dockerLocation } from './main/docker-client';
 import { applyIsolatedLaunch } from './main/isolation';
 
 // Tests and live checks launch isolated (PUCK_ISOLATED=1): data paths and the
@@ -73,25 +55,15 @@ process.on('uncaughtException', (err) => {
   );
 });
 
-// Composition: the runner bridge speaks NDJSON over whatever exec transport
-// it is handed; environments supplies the docker adapter and explains a
-// runner death caused by its own lifecycle ops. A destroyed container
-// invalidates its resume ids, a completed login pushes credentials into
-// every running environment, a logout removes them again (the container
-// side of the logout fence; its failure surfaces to the Disconnect button
-// through the IPC rejection), and every lifecycle change streams to the UI.
-runner.useExecSpawner(environments.runnerExecSpawner);
-runner.useDisconnectExplainer(environments.explainDisconnect);
-environments.onEnvReset(sessionRegistry.forgetEnvironment);
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload);
   }
 }
-environments.onLifecycle((payload) => broadcast(ENV_EVENT_CHANNEL, payload));
-// Environments on runners: runner-list, environment and daemon events stream
-// to the renderer; a harness sign-in or sign-out reaches the attached
-// environment over its daemon connection (the others on their next attach).
+// Composition: runner-list, environment and daemon events stream to the
+// renderer; a harness sign-in or sign-out reaches the attached environment
+// over its daemon connection (the others on their next attach). A failed
+// removal surfaces to the Disconnect button through the IPC rejection.
 runners.onRunnersChange((e) => {
   const event: RunnerEvent = e.kind === 'state' ? { kind: 'state', state: runners.state() } : e;
   broadcast(RUNNER_EVENT_CHANNEL, event);
@@ -99,46 +71,29 @@ runners.onRunnersChange((e) => {
 instances.onInstanceEvent((e) => broadcast(INSTANCE_EVENT_CHANNEL, e));
 instances.onDaemonEvent((e) => broadcast(DAEMON_EVENT_CHANNEL, e));
 providerRegistry.setOnLogin(() => {
-  environments.injectCredentialsIntoRunning().catch((err) => {
-    log.error('Credential push into running environments failed', err);
-  });
   instances.onHarnessLogin().catch((err) => log.error('Credential push into the attached environment failed', err));
 });
 providerRegistry.setOnLogout(async (provider) => {
   await instances.onHarnessLogout(provider.id);
-  await environments.purgeCredentials(provider);
 });
 
 // Injected by Forge's webpack plugin: dev-server vs packaged bundle URLs.
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
-declare const MAIN_WINDOW_V2_WEBPACK_ENTRY: string;
-declare const MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY: string;
-
-/**
- * PUCK_UI=v2 loads the environment window (three panes, so a larger
- * minimum size). The legacy window stays the default until cutover.
- */
-function windowAssets(): { url: string; preload: string; minWidth: number; minHeight: number } {
-  if (process.env.PUCK_UI === 'v2') {
-    return { url: MAIN_WINDOW_V2_WEBPACK_ENTRY, preload: MAIN_WINDOW_V2_PRELOAD_WEBPACK_ENTRY, minWidth: 960, minHeight: 600 };
-  }
-  return { url: MAIN_WINDOW_WEBPACK_ENTRY, preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY, minWidth: 720, minHeight: 520 };
-}
 
 const createWindow = (): void => {
-  const assets = windowAssets();
   const mainWindow = new BrowserWindow({
     height: 800,
     width: 1120,
-    minHeight: assets.minHeight,
-    minWidth: assets.minWidth,
+    // Three panes need the room.
+    minHeight: 600,
+    minWidth: 960,
     backgroundColor: '#FFFDF7',
     titleBarStyle: 'hiddenInset',
     // An isolated launch must not take focus from the person at the desk.
     show: !isolated,
     webPreferences: {
-      preload: assets.preload,
+      preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -155,14 +110,14 @@ const createWindow = (): void => {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== assets.url) {
+    if (url !== MAIN_WINDOW_WEBPACK_ENTRY) {
       event.preventDefault();
       if (/^https?:/i.test(url)) void shell.openExternal(url);
     }
   });
 
   if (isolated) mainWindow.once('ready-to-show', () => mainWindow.showInactive());
-  mainWindow.loadURL(assets.url);
+  mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
   log.info('window.created');
 };
 
@@ -171,9 +126,8 @@ const createWindow = (): void => {
 // One handler per CHANNELS entry (the Record type keeps the table total —
 // an unhandled channel is a compile error, and channels.test.ts asserts the
 // registration from the outside). Payloads arrive untrusted; every argument
-// goes through a validating coercion — ipcguard for ids/strings/configs,
-// conversations.fromIpc for the persisted transcript — before touching a
-// store or docker. No handler casts its args.
+// goes through a validating coercion in ipcguard before it reaches a store,
+// the Puck server, a runner or a daemon. No handler casts its args.
 type IpcHandler = (event: IpcMainInvokeEvent, args: unknown) => unknown;
 
 /** Providers with a sign-in (harness and integration kinds). */
@@ -184,8 +138,10 @@ function signInProvider(id: string): providerRegistry.HarnessProvider | provider
 }
 
 const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> = {
-  [CHANNELS.status]: () => backend.status(),
-  [CHANNELS.providers]: () => providerRegistry.providerInfos(),
+  [CHANNELS.providers]: async () => {
+    await github.loadInstallLink();
+    return providerRegistry.providerInfos();
+  },
   [CHANNELS.openExternal]: (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) void shell.openExternal(url);
   },
@@ -267,75 +223,9 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.definitionRefs]: () => configRepo.definitionRefs(),
   [CHANNELS.definitionsAt]: (_event, pin) => configRepo.definitionsAt(pinFrom(pin)),
 
-  [CHANNELS.agentList]: () => agents.list(),
-  [CHANNELS.agentCreate]: (_event, cfg) => agents.create(agentConfigFrom(cfg)),
-  [CHANNELS.agentUpdate]: (_event, args) => {
-    const a = objArgs(args);
-    return agents.update(requireId(a.id, 'agent'), agentConfigFrom(a.cfg));
-  },
-  [CHANNELS.agentDelete]: (_event, id) => agents.remove(requireId(id, 'agent')),
-  [CHANNELS.agentSelect]: (_event, id) => {
-    agents.select(requireId(id, 'agent'));
-    return backend.status();
-  },
-
-  [CHANNELS.envList]: () => environments.list(),
-  [CHANNELS.envCreate]: (_event, cfg) => environments.create(envConfigFrom(cfg)),
-  [CHANNELS.envUpdate]: (_event, args) => {
-    const a = objArgs(args);
-    return environments.update(requireId(a.id, 'environment'), envConfigFrom(a.cfg));
-  },
-  [CHANNELS.envDelete]: (_event, id) => environments.remove(requireId(id, 'environment')),
-  [CHANNELS.envStart]: (_event, id) => environments.start(requireId(id, 'environment')),
-  [CHANNELS.envStop]: (_event, id) => environments.stop(requireId(id, 'environment')),
-  [CHANNELS.envRestart]: (_event, id) => environments.restart(requireId(id, 'environment')),
-  [CHANNELS.envRebuild]: (_event, id) => environments.rebuild(requireId(id, 'environment')),
-  [CHANNELS.envSecretSet]: (_event, args) => {
-    const a = objArgs(args);
-    return environments.secretSet(
-      requireId(a.id, 'environment'),
-      requireSecretKey(a.key),
-      requireString(a.value, 'secret value'),
-    );
-  },
-  [CHANNELS.envSecretDelete]: (_event, args) => {
-    const a = objArgs(args);
-    return environments.secretDelete(requireId(a.id, 'environment'), requireSecretKey(a.key));
-  },
-  [CHANNELS.envSelect]: (_event, id) => {
-    environments.select(requireId(id, 'environment'));
-    return backend.status();
-  },
-
-  [CHANNELS.convoLoad]: () => conversations.loadAll(),
-
   [CHANNELS.supportInfo]: () => support.supportInfo(),
   [CHANNELS.supportExport]: (event) =>
     support.exportSupportBundle(BrowserWindow.fromWebContents(event.sender)),
-  [CHANNELS.convoSave]: (_event, args) => {
-    const a = objArgs(args);
-    return conversations.save(requireId(a.agentId, 'agent'), conversations.fromIpc(a.data));
-  },
-
-  [CHANNELS.startTurn]: async (event, args) => {
-    const a = objArgs(args);
-    const turnId = requireString(a.turnId, 'turn id');
-    const agentId = requireId(a.agentId, 'agent');
-    const promptText = requireString(a.prompt, 'prompt');
-    for await (const harnessEvent of backend.runTurn(turnId, agentId, promptText)) {
-      if (event.sender.isDestroyed()) return;
-      event.sender.send(EVENT_CHANNEL, { turnId, event: harnessEvent });
-    }
-  },
-  [CHANNELS.interrupt]: (_event, turnId) => backend.interrupt(requireString(turnId, 'turn id')),
-  [CHANNELS.answerAsk]: (_event, args) => {
-    const a = objArgs(args);
-    return backend.answerAsk(
-      requireString(a.turnId, 'turn id'),
-      requireString(a.askId, 'ask id'),
-      askAnswersFrom(a.answers),
-    );
-  },
 };
 
 for (const [channel, handler] of Object.entries(ipcHandlers)) {
@@ -380,9 +270,6 @@ app.on('ready', () => {
   // window showed last (it replays from its cursor).
   runners.start();
   instances.resumeCurrent();
-  // Locate the docker CLI up front (Finder launches do not inherit the shell
-  // PATH); a miss is reported by the first environment operation that needs it.
-  void dockerLocation().catch((err) => console.error('Docker discovery:', err));
 });
 
 // Quit is a drain: the first request is held while the renderer flushes its
@@ -397,8 +284,6 @@ installQuitDrain(app, {
   timeoutMs: 5_000,
 });
 
-// Kill runner docker-exec children on quit — no orphaned processes.
-app.on('before-quit', () => runner.detachAll());
 // will-quit fires once, after the drain has re-issued quit; before-quit fires twice.
 // Environment connections close last: every environment keeps working.
 app.on('will-quit', () => {

@@ -1,5 +1,3 @@
-import { createRequire } from 'node:module';
-import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
@@ -11,17 +9,15 @@ import type { AdapterContext, AdapterRequest, OrchestratorTool, ToolResult } fro
 import { nullLogger } from '../../src/daemon/log';
 import { claudeHarness } from '../../src/harness/providers';
 import fixture from '../fixtures/claude-events.json';
+import recorded from '../fixtures/claude-events.expected.json';
 
 type SdkTool = { inputSchema: unknown; handler(args: unknown, extra: unknown): Promise<ToolResult> };
 
 // The Claude adapter is a port of the container runner's runClaude. The
 // port is checked two ways: directly against a scripted SDK stream, and
-// differentially against runner.js itself on the same stream, so "kept
+// against what the container runner emitted for the same stream (recorded
+// in claude-events.expected.json before the runner was removed), so "kept
 // exactly" is a test, not a promise.
-const requireCjs = createRequire(path.join(process.cwd(), 'package.json'));
-const runner = requireCjs('./src/main/runner/runner.js') as {
-  runClaude(req: unknown, sdk: unknown, ctx: unknown): Promise<void>;
-};
 
 type Script = Array<Record<string, unknown>>;
 
@@ -111,56 +107,6 @@ async function drive(script: Script, over: Partial<AdapterRequest> = {}, answers
   return { events, sessions, asked, spawner, ...s };
 }
 
-/** The same script through runner.js, with the runner's context shape. */
-async function driveRunner(script: Script) {
-  const events: HarnessEvent[] = [];
-  const sessions: string[] = [];
-  let thinking = false;
-  let session: string | null = null;
-  const ctx = {
-    emit: (e: HarnessEvent) => events.push(e),
-    thinkingOn: () => {
-      if (!thinking) {
-        thinking = true;
-        events.push({ kind: 'thinking', active: true });
-      }
-    },
-    thinkingOff: () => {
-      if (thinking) {
-        thinking = false;
-        events.push({ kind: 'thinking', active: false });
-      }
-    },
-    session: (id: string) => {
-      session = id;
-      sessions.push(id);
-    },
-    setSession: (id: string) => (session = id),
-    sessionId: () => session,
-    endTurn: (stats: unknown) => events.push({ kind: 'turn-end', stats } as HarnessEvent),
-    onInterrupt: () => undefined,
-    askUser: async () => ({ 'Upgrade them?': 'Yes' }),
-    cancelAsks: () => undefined,
-  };
-  const s = scriptedSdk(script);
-  await runner.runClaude(
-    {
-      id: 't1',
-      provider: 'claude-code',
-      model: 'claude-opus-5',
-      systemPrompt: 'Be brief.',
-      thinking: 'high',
-      settings: JSON.stringify({ disallowedTools: ['WebSearch'] }),
-      advanced: JSON.stringify({ maxTurns: 7 }),
-      resume: null,
-      prompt: 'check deps',
-    },
-    s.sdk,
-    ctx,
-  );
-  return { events, sessions, ...s };
-}
-
 const script = fixture as Script;
 const strip = (events: HarnessEvent[]) =>
   events.map((e) => (e.kind === 'turn-end' ? { ...e, stats: { ...e.stats, durationMs: 0 } } : e));
@@ -168,10 +114,9 @@ const strip = (events: HarnessEvent[]) =>
 describe('daemon Claude adapter', () => {
   it('emits exactly what the container runner emitted for the same SDK stream', async () => {
     const ported = await drive(script);
-    const original = await driveRunner(script);
-    expect(strip(ported.events)).toEqual(strip(original.events));
-    expect(ported.sessions).toEqual(original.sessions);
-    expect(ported.permissions).toEqual(original.permissions);
+    expect(strip(ported.events)).toEqual(recorded.events);
+    expect(ported.sessions).toEqual(recorded.sessions);
+    expect(ported.permissions).toEqual(recorded.permissions);
   });
 
   it('translates text, tools, sub-agents, and strips sub-agent plumbing', async () => {

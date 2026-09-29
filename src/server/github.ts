@@ -106,9 +106,24 @@ export class GitHubApp {
     return `${this.config.webUrl}/login/oauth/authorize?${q}`;
   }
 
-  /** Where a user installs the App on an account, when its slug is known. */
-  installUrl(): string | null {
-    return this.config.slug ? `${this.config.webUrl}/apps/${encodeURIComponent(this.config.slug)}/installations/new` : null;
+  private slug: string | null = null;
+
+  /**
+   * Where a user installs the App on an account. The slug is the configured
+   * one, or the one GitHub reports for the App (`GET /app`, asked once);
+   * null while GitHub cannot say.
+   */
+  async installUrl(): Promise<string | null> {
+    if (!this.slug && this.config.slug) this.slug = this.config.slug;
+    if (!this.slug) {
+      try {
+        const res = await this.appClient.request<{ slug?: unknown }>('/app');
+        if (typeof res.data.slug === 'string' && res.data.slug) this.slug = res.data.slug;
+      } catch {
+        return null;
+      }
+    }
+    return this.slug ? `${this.config.webUrl}/apps/${encodeURIComponent(this.slug)}/installations/new` : null;
   }
 
   private async oauth(form: Record<string, string>): Promise<Record<string, unknown>> {

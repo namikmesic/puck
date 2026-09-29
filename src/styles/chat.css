@@ -8,13 +8,6 @@
   display: flex;
 }
 
-.stage-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
 /* ---------- Turn detail: inline expansion + full-screen view ---------- */
 
 .turn-detail {
@@ -37,8 +30,7 @@
 }
 
 .stage.turn-full-open .chat,
-.stage.turn-full-open .composer-zone,
-.stage.turn-full-open .hero {
+.stage.turn-full-open .composer-zone {
   display: none;
 }
 
@@ -48,10 +40,6 @@
   align-items: center;
   gap: 8px;
   padding-bottom: 12px;
-}
-
-.turn-full-head .back-link {
-  margin: 0;
 }
 
 .crumb-sep {
@@ -178,19 +166,6 @@
 }
 
 /* Conversation intro — the Slack "beginning of your conversation" block. */
-.hero {
-  display: none;
-  flex: 1;
-  width: 100%;
-  max-width: var(--content-col);
-  margin: 0 auto;
-  padding: 28px var(--content-pad) 0;
-  animation: fade-in 0.15s ease;
-}
-
-.stage.empty .hero {
-  display: block;
-}
 
 .hero-avatar {
   width: 54px;
@@ -204,50 +179,6 @@
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 10px rgba(46, 94, 78, 0.22);
-}
-
-.hero-title {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 14px 0 6px;
-}
-
-.hero-subtitle {
-  font-size: 14px;
-  color: var(--gray);
-  margin: 0;
-}
-
-.hero-cta {
-  margin-top: 18px;
-}
-
-.stage.connected .hero-cta {
-  display: none;
-}
-
-.chat-head {
-  flex: none;
-  width: 100%;
-  max-width: var(--content-col);
-  margin: 0 auto;
-  padding: 0 var(--content-pad) 10px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.chat-head-name {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.chat-head.hidden,
-.stage.empty .chat-head {
-  display: none;
 }
 
 .chat {
@@ -652,8 +583,6 @@
 }
 
 /* Keyboard operability: focused cards and options must be visible. */
-.card.clickable:focus-visible,
-.card.add:focus-visible,
 .turn-card:focus-visible,
 .ask-option:focus-visible,
 .agent-link:focus-visible {
@@ -905,59 +834,6 @@
   flex: 1;
 }
 
-.picker.sel {
-  gap: 7px;
-  padding: 6px 10px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--gray);
-  max-width: 260px;
-}
-
-.picker.sel span:not(.dot-mini) {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.dot-mini {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--gray-light);
-}
-
-.dot-mini.on {
-  background: var(--emerald);
-  box-shadow: 0 0 6px rgba(46, 94, 78, 0.45);
-}
-
-.dot-mini.off {
-  background: var(--red);
-}
-
-.dot-mini.busy {
-  background: var(--gold);
-  animation: lifecycle-pulse 1.2s ease-in-out infinite;
-}
-
-.dot-mini.bad {
-  background: var(--red);
-}
-
-/* The composer while the environment is not ready: sending is blocked, the
-   placeholder names the environment and stage; drafts stay editable. */
-.composer.gated .send {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.model-menu.menu-up {
-  top: auto;
-  bottom: 56px;
-}
-
 .send {
   width: 34px;
   height: 34px;
@@ -998,35 +874,3 @@
   animation: pulse 1s ease-in-out infinite;
   cursor: default;
 }
-
-/* Settings sections while their bridge fetch is in flight. */
-.cards-loading {
-  font-size: 13px;
-  color: var(--gray-light);
-  padding: 18px 4px;
-}
-
-/* Roster stop button for a background turn (revealed on hover). */
-.recent-stop {
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  padding: 4px;
-  border-radius: 6px;
-  color: var(--red);
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.recent-stop svg {
-  width: 13px;
-  height: 13px;
-  fill: currentColor;
-}
-
-.recent-item:hover .recent-stop {
-  opacity: 1;
-}
-

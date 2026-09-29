@@ -20,7 +20,7 @@
  *   list       docker ps -a --filter label=puck=instance (rediscovery; nothing else is touched)
  *
  * The label `puck=instance` is the whole contract: containers labelled
- * otherwise (the desktop app's own `puck=environment` containers, test
+ * otherwise (an earlier Puck build's `puck=environment` containers, test
  * containers) are never listed or changed. No host directory and no Docker
  * socket is ever mounted, and `-e` carries only non-secret configuration;
  * secrets and credentials travel in the copy-in tar.

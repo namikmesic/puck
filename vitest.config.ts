@@ -7,9 +7,6 @@ export default defineConfig({
       // Unit tests never boot Electron; the mock covers the small surface
       // the main-process modules touch (paths, safeStorage, windows).
       electron: path.resolve(__dirname, 'test/mocks/electron.ts'),
-      // Webpack ships runner.js as a raw string (asset/source); vite's ?raw
-      // import gives tests the same shape.
-      'raw-runner': `${path.resolve(__dirname, 'src/main/runner/runner.js')}?raw`,
       // The daemon bundle is a build output; unit tests get a small stand-in.
       'raw-daemon-meta': path.resolve(__dirname, 'test/mocks/raw-daemon-meta.ts'),
       'raw-daemon': path.resolve(__dirname, 'test/mocks/raw-daemon.ts'),

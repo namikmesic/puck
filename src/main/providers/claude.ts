@@ -26,7 +26,6 @@ export const claudeProvider: HarnessProvider = {
   },
 
   credential: providerCredential(oauth.account, {
-    containerPath: '/root/.claude/.credentials.json',
     serialize: oauth.credentialsFileContent,
   }),
 };

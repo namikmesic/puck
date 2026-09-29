@@ -69,7 +69,7 @@ http.createServer((req, res) => {
     if ((m = /^\\/issues\\/(\\d+)\\/comments$/.exec(sub))) {
       const list = (s.comments[m[1]] = s.comments[m[1]] || []);
       if (req.method === 'GET') return send(200, list);
-      const c = { id: s.nextId++, body: body.body, user: { login: 'puck-agents[bot]', type: 'Bot' }, author_association: 'NONE', created_at: now(), updated_at: now(), html_url: 'https://github.com/octo/app/issues/' + m[1] + '#c' };
+      const c = { id: s.nextId++, body: body.body, user: { login: 'puck-app[bot]', type: 'Bot' }, author_association: 'NONE', created_at: now(), updated_at: now(), html_url: 'https://github.com/octo/app/issues/' + m[1] + '#c' };
       list.push(c);
       return send(201, c);
     }

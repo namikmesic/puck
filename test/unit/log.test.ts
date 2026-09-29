@@ -36,7 +36,7 @@ describe('redact', () => {
 
   it('leaves ordinary diagnostics alone', () => {
     const plain =
-      'env.start {"envId":"6f3c2a10-1b2c-4d5e-8f90-1234567890ab","image":"node:22-bookworm"} token expired: 401 at /Users/x/Library/Application Support/Puck/puck-agents.json';
+      'env.start {"envId":"6f3c2a10-1b2c-4d5e-8f90-1234567890ab","image":"node:22-bookworm"} token expired: 401 at /Users/x/Library/Application Support/Puck/puck-instances.json';
     expect(redact(plain)).toBe(plain);
   });
 });

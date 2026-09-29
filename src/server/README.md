@@ -40,7 +40,7 @@ Each secret can be given as `NAME` or as `NAME_FILE`, a path to a file holding i
 | `PUCK_SERVER_DB` | SQLite file (the image uses `/data/puck-server.db`). |
 | `PUCK_SERVER_TOKEN_KEY[_FILE]` | 32 random bytes, base64. Encrypts users' GitHub tokens at rest. Required when GitHub sign-in is on. |
 | `PUCK_GITHUB_APP_ID`, `PUCK_GITHUB_CLIENT_ID` | The GitHub App's id and OAuth client id. |
-| `PUCK_GITHUB_APP_SLUG` | Optional. When set, the server can link to the App's install page. |
+| `PUCK_GITHUB_APP_SLUG` | Optional. The App's slug for its install link; by default the server asks GitHub (`GET /app`). |
 | `PUCK_GITHUB_CLIENT_SECRET[_FILE]` | The App's client secret, for the web-flow code exchange. |
 | `PUCK_GITHUB_PRIVATE_KEY[_FILE]` | The App's private key: PEM, or PEM base64-encoded on one line. Signs App JWTs. |
 | `PUCK_GITHUB_API_URL`, `PUCK_GITHUB_WEB_URL` | GitHub endpoints (default github.com). Optional. |
@@ -62,7 +62,7 @@ A hosted deployment should prefer the `_FILE` forms.
 | `POST /v1/auth/github/start` | app | GitHub authorize URL for a loopback redirect and a PKCE challenge |
 | `GET /v1/auth/github/callback` | browser | code exchange, then a redirect to the app's loopback with a one-time code |
 | `POST /v1/auth/token` | app | `authorization_code` (with the PKCE verifier) or `refresh_token`: a 15-minute access token and a rotating 30-day refresh token |
-| `POST /v1/auth/logout`, `GET /v1/me` | session | sign out; who am I |
+| `POST /v1/auth/logout`, `GET /v1/me` | session | sign out; who am I, and the GitHub App's install link |
 | `GET /v1/github/token` | session | the user's current GitHub access token (never the refresh token) |
 | `GET /v1/audit` | session | the user's audit events |
 | `POST /v1/runners/registration-token`, `POST /v1/runners/removal-token` | session | one-hour tokens for `config.sh`; `DELETE .../:id` revokes |

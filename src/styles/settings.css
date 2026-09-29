@@ -95,13 +95,6 @@
   margin: 4px 0 18px;
 }
 
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
-}
-
 .form-msg {
   min-height: 20px;
   font-size: 12.5px;
@@ -169,53 +162,6 @@
   }
 }
 
-/* Stage · elapsed line under a status chip (env cards + env detail header). */
-.env-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-height: 0;
-  font-size: 12px;
-  color: var(--gray);
-}
-
-.env-progress:empty {
-  display: none;
-}
-
-.env-progress-line {
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.env-progress.failed .env-progress-line {
-  color: var(--red);
-}
-
-.env-progress-detail {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--gray-light);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-.env-progress.failed .env-progress-detail {
-  white-space: normal;
-  color: var(--red);
-  font-family: var(--font-ui);
-  font-size: 12px;
-}
-
-.card .env-progress {
-  margin: 6px 0 2px;
-}
-
-#detail-progress {
-  margin: -6px 0 6px;
-}
 
 .badge-active {
   flex: none;
@@ -228,12 +174,6 @@
   border: 1px solid rgba(46, 94, 78, 0.18);
   border-radius: 999px;
   padding: 1px 7px;
-}
-
-.row-actions {
-  display: flex;
-  gap: 6px;
-  justify-content: flex-end;
 }
 
 /* ---------- Support section ---------- */
@@ -280,6 +220,20 @@
 }
 
 /* ---------- Settings cards ---------- */
+
+/* Keyboard operability: focused cards must be visible. */
+.card.clickable:focus-visible,
+.card.add:focus-visible {
+  outline: 2px solid var(--emerald);
+  outline-offset: 2px;
+}
+
+/* Settings sections while their bridge fetch is in flight. */
+.cards-loading {
+  font-size: 13px;
+  color: var(--gray-light);
+  padding: 18px 4px;
+}
 
 .settings-section {
   margin-top: 14px;
@@ -396,7 +350,6 @@
   border-color: rgba(46, 94, 78, 0.35);
   background: var(--emerald-tint);
 }
-
 
 /* ---------- Providers section (pv-*): grouped by kind ---------- */
 

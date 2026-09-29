@@ -22,6 +22,7 @@ export const WEB = 'https://github.test';
 export const CLIENT_ID = 'Iv1.fakeclient';
 export const CLIENT_SECRET = 'fake-client-secret';
 export const APP_ID = '424242';
+export const APP_SLUG = 'puck-test-app';
 
 interface FakeRepo {
   id: number;
@@ -196,6 +197,10 @@ export class FakeGitHub {
     }
     if (url.origin !== API) return json(404, { message: 'Not Found' });
 
+    if (url.pathname === '/app') {
+      if (!this.appJwtOk(auth)) return json(401, { message: 'A JSON web token could not be decoded' });
+      return json(200, { id: Number(APP_ID), slug: APP_SLUG, name: 'Puck Test' });
+    }
     if (url.pathname === '/user') {
       const login = this.userFor(auth);
       return login ? json(200, { id: this.users.get(login), login }) : json(401, { message: 'Bad credentials' });
@@ -304,7 +309,6 @@ async function runServer(
           PUCK_GITHUB_CLIENT_ID: CLIENT_ID,
           PUCK_GITHUB_CLIENT_SECRET: CLIENT_SECRET,
           PUCK_GITHUB_PRIVATE_KEY: github.privateKeyPem,
-          PUCK_GITHUB_APP_SLUG: 'puck-test',
           PUCK_GITHUB_API_URL: API,
           PUCK_GITHUB_WEB_URL: WEB,
         }),

@@ -1,0 +1,115 @@
+{
+  "collab": [
+    {
+      "kind": "tool-start",
+      "toolId": "item_0",
+      "tool": "Agent",
+      "summary": "draft a plan",
+      "input": "draft a plan",
+      "agent": true
+    },
+    {
+      "kind": "text-delta",
+      "text": "Started as Codex thread `thread-child` (running).\n\n",
+      "parentId": "item_0"
+    },
+    {
+      "kind": "text-delta",
+      "text": "Follow-up input from the parent agent:\n\n> keep it under one page\n\n",
+      "parentId": "item_0"
+    },
+    {
+      "kind": "text-delta",
+      "text": "Status: running.\n\n",
+      "parentId": "item_0"
+    },
+    {
+      "kind": "text-delta",
+      "text": "Finished: completed - Plan drafted in PLAN.md.\n\n",
+      "parentId": "item_0"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "item_0",
+      "ok": true,
+      "output": "completed - Plan drafted in PLAN.md"
+    },
+    {
+      "kind": "text-delta",
+      "text": "The plan is in PLAN.md."
+    },
+    {
+      "kind": "turn-end",
+      "stats": {
+        "inputTokens": 1500,
+        "outputTokens": 80,
+        "durationMs": 0
+      }
+    }
+  ],
+  "tools": [
+    {
+      "kind": "thinking",
+      "active": true
+    },
+    {
+      "kind": "thinking",
+      "active": false
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "c1",
+      "tool": "Shell",
+      "summary": "ls",
+      "input": "ls"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "c1",
+      "ok": false,
+      "output": "nope"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "f1",
+      "tool": "Edit",
+      "summary": "add a.ts",
+      "input": "add a.ts"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "f1",
+      "ok": true,
+      "output": "(done)"
+    },
+    {
+      "kind": "tool-start",
+      "toolId": "x1",
+      "tool": "brand_new_item",
+      "summary": "{\"id\":\"x1\",\"type\":\"brand_new_item\",\"foo\":1}",
+      "input": "{\n  \"id\": \"x1\",\n  \"type\": \"brand_new_item\",\n  \"foo\": 1\n}"
+    },
+    {
+      "kind": "tool-end",
+      "toolId": "x1",
+      "ok": true,
+      "output": "(done)"
+    },
+    {
+      "kind": "error",
+      "message": "rate limited"
+    },
+    {
+      "kind": "text-delta",
+      "text": "done"
+    },
+    {
+      "kind": "turn-end",
+      "stats": {
+        "inputTokens": 15,
+        "outputTokens": 5,
+        "durationMs": 0
+      }
+    }
+  ]
+}
