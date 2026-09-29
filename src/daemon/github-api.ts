@@ -105,6 +105,7 @@ export interface GhRun {
   status: string;
   conclusion: string | null;
   head_sha: string;
+  run_attempt?: number | null;
   run_started_at?: string | null;
 }
 

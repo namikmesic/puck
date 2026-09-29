@@ -24,11 +24,11 @@
  *     redacted log tails of failed workflow jobs. A success or failure is
  *     a notice; `ci: fix` also queues a follow-up whenever the item can
  *     take one, up to `maxCiFixAttempts`. After ci_rerun the watch stays
- *     pending while a check that was failing is still that pre-rerun run,
- *     until the re-run has replaced one and finished. The notice is the
- *     latest run of every check name, so a check the re-run did not
- *     replace still counts. Nothing reported settles as neutral and stays
- *     watched, so a check that appears later still reports.
+ *     pending until each workflow run it re-ran reports a higher
+ *     run_attempt and has completed, or the quiet window passes. The
+ *     notice is the latest run of every check name, so a check the re-run
+ *     did not replace still counts. Nothing reported settles as neutral
+ *     and stays watched, so a check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -267,18 +267,18 @@ function newerCheck(a: GhCheckRun, b: GhCheckRun): boolean {
   return delta !== 0 ? delta > 0 : a.id >= b.id;
 }
 
-function rerunReady(checks: readonly GhCheckRun[], actions: readonly GhRun[], rerunAt: number, failingNames: readonly string[]): boolean {
-  const after = (value: string | null | undefined): boolean => parseTime(value, 0) > rerunAt;
-  if (checks.some((c) => c.status !== 'completed') || actions.some((r) => r.status !== 'completed')) return false;
-  const watched = failingNames
-    .map((name) => checks.find((c) => oneLine(c.name, 120) === name))
-    .filter((run): run is GhCheckRun => run != null);
-  const fresh = watched.filter((run) => after(run.started_at));
-  if (watched.length > 0 && fresh.length === watched.length) return true;
-  if (fresh.length > 0 && actions.some((r) => after(r.run_started_at))) return true;
-  if (watched.length > 0) return false;
-  if (checks.length > 0) return checks.some((c) => after(c.started_at));
-  return actions.some((r) => after(r.run_started_at));
+/** GitHub numbers attempts from 1; a body that omits `run_attempt` is that first attempt. */
+function runAttempt(run: { run_attempt?: number | null } | undefined): number {
+  return typeof run?.run_attempt === 'number' ? run.run_attempt : 1;
+}
+
+/** A ci_rerun settles once every run it re-requested has a higher attempt and has finished. The quiet window settles on the latest results if that never happens. */
+function rerunReady(actions: readonly GhRun[], pending: readonly { id: number; attempt: number }[], since: number, now: number): boolean {
+  if (now - since >= POLL.quietChecksMs) return true;
+  return pending.every((recorded) => {
+    const run = actions.find((candidate) => candidate.id === recorded.id);
+    return run !== undefined && run.status === 'completed' && runAttempt(run) > recorded.attempt;
+  });
 }
 
 /* ---------- The workflow ---------- */
@@ -800,7 +800,7 @@ export class GithubSync {
     this.kick();
   }
 
-  private watch(sha: string, rerunAt: number | null = null, rerunFailing: readonly string[] = []): CiWatch {
+  private watch(sha: string, rerunRuns: readonly { id: number; attempt: number }[] = []): CiWatch {
     return {
       sha,
       state: 'pending',
@@ -809,8 +809,7 @@ export class GithubSync {
       logs: [],
       failedRuns: [],
       notified: null,
-      rerunAt,
-      rerunFailing: [...rerunFailing],
+      rerunRuns: rerunRuns.map((run) => ({ id: run.id, attempt: run.attempt })),
     };
   }
 
@@ -997,16 +996,15 @@ export class GithubSync {
     const s = this.deps.store.get().items[itemId];
     const ci = s?.ci;
     if (!item?.pr || !repo || !ci || ci.notified === ci.sha) return;
-    const awaitingRerun = ci.rerunAt != null;
+    const awaitingRerun = ci.rerunRuns.length > 0;
     const [polled, status, workflowRuns] = await Promise.all([
       this.deps.api.checkRuns(repo.github, ci.sha),
       this.deps.api.combinedStatus(repo.github, ci.sha),
       awaitingRerun ? this.deps.api.runs(repo.github, ci.sha) : Promise.resolve([] as GhRun[]),
     ]);
     if (s.ci !== ci) return;
-    const rerunAt = ci.rerunAt;
     const checks = latestCheckRuns(polled.data ?? []);
-    if (rerunAt != null && !rerunReady(checks, workflowRuns, rerunAt, ci.rerunFailing)) return;
+    if (awaitingRerun && !rerunReady(workflowRuns, ci.rerunRuns, ci.since, this.now())) return;
     const result = evaluateChecks(checks, status.data ?? null, polled.incomplete === true || status.incomplete === true);
     const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
     ci.failing = result.failing;
@@ -1112,17 +1110,18 @@ export class GithubSync {
     const { s, repo } = this.pullOf(item);
     const ci = s.ci;
     if (!ci || ci.state === 'pending') throw new WorkError('invalid-state', `${itemLabel(item)}'s CI has not finished.`);
-    let runs = ci.failedRuns;
+    let recorded: { id: number; attempt: number }[];
     try {
-      if (!runs.length) {
-        runs = (await this.deps.api.runs(repo.github, ci.sha))
-          .filter((r) => r.status === 'completed' && FAILED_CONCLUSIONS.has(r.conclusion ?? ''))
-          .map((r) => r.id);
-      }
-      if (!runs.length) {
+      const listed = await this.deps.api.runs(repo.github, ci.sha);
+      const byId = new Map(listed.map((run) => [run.id, run]));
+      const ids = ci.failedRuns.length
+        ? ci.failedRuns
+        : listed.filter((r) => r.status === 'completed' && FAILED_CONCLUSIONS.has(r.conclusion ?? '')).map((r) => r.id);
+      if (!ids.length) {
         throw new WorkError('invalid-state', `${itemLabel(item)} has no failed GitHub Actions runs to re-run (other CI systems re-run on their side).`);
       }
-      for (const id of runs) await this.deps.api.rerunFailedJobs(repo.github, id);
+      recorded = ids.map((id) => ({ id, attempt: runAttempt(byId.get(id)) }));
+      for (const { id } of recorded) await this.deps.api.rerunFailedJobs(repo.github, id);
     } catch (err) {
       if (err instanceof WorkError) throw err;
       if (err instanceof NoGrantError) throw new WorkError('invalid-state', err.message);
@@ -1135,11 +1134,11 @@ export class GithubSync {
       );
     }
     const current = this.syncOf(item.id);
-    current.ci = this.watch(ci.sha, this.now(), ci.failing.map((f) => f.name));
+    current.ci = this.watch(ci.sha, recorded);
     this.save();
     this.patchPr(item, { checks: { sha: ci.sha, state: 'pending', failing: [] } });
     this.kick(POLL.checksMs);
-    return { rerun: runs.length };
+    return { rerun: recorded.length };
   }
 
   /** An item's pull request: state, CI, and feedback from people with write access. */

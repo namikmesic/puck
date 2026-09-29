@@ -44,10 +44,8 @@ export interface CiWatch {
   failedRuns: number[];
   /** The sha whose success or failure was reported. Neutral is not reported, so a later check still is. */
   notified: string | null;
-  /** ci_rerun request time for this sha, or null when none is outstanding. */
-  rerunAt: number | null;
-  /** Check names that were failing at `rerunAt`. */
-  rerunFailing: string[];
+  /** Workflow runs ci_rerun re-requested, with the attempt seen before the request. Empty when none is outstanding. */
+  rerunRuns: { id: number; attempt: number }[];
 }
 
 export interface ItemSync {
@@ -90,7 +88,32 @@ export function emptySync(): ItemSync {
 }
 
 const nums = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number') : []);
-const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((n): n is string => typeof n === 'string') : []);
+
+function parseRerunRuns(v: unknown): { id: number; attempt: number }[] {
+  if (!Array.isArray(v)) return [];
+  const runs: { id: number; attempt: number }[] = [];
+  for (const row of v) {
+    if (!row || typeof row !== 'object') continue;
+    const id = (row as { id?: unknown }).id;
+    const attempt = (row as { attempt?: unknown }).attempt;
+    if (typeof id !== 'number' || typeof attempt !== 'number') continue;
+    runs.push({ id, attempt });
+  }
+  return runs;
+}
+
+function normalizeCi(raw: CiWatch): CiWatch {
+  return {
+    sha: raw.sha,
+    state: raw.state,
+    since: raw.since,
+    failing: raw.failing ?? [],
+    logs: raw.logs ?? [],
+    failedRuns: nums(raw.failedRuns),
+    notified: raw.notified ?? null,
+    rerunRuns: parseRerunRuns(raw.rerunRuns),
+  };
+}
 
 function normalizeSync(raw: Partial<ItemSync>): ItemSync {
   const base = emptySync();
@@ -108,13 +131,7 @@ function normalizeSync(raw: Partial<ItemSync>): ItemSync {
     reviewRounds: typeof raw.reviewRounds === 'number' ? raw.reviewRounds : 0,
     ci:
       raw.ci && typeof raw.ci.sha === 'string'
-        ? {
-            ...raw.ci,
-            logs: raw.ci.logs ?? [],
-            failedRuns: nums(raw.ci.failedRuns),
-            rerunAt: typeof raw.ci.rerunAt === 'number' ? raw.ci.rerunAt : null,
-            rerunFailing: strs(raw.ci.rerunFailing),
-          }
+        ? normalizeCi(raw.ci)
         : base.ci,
     ciFixAttempts: typeof raw.ciFixAttempts === 'number' ? raw.ciFixAttempts : 0,
   };
