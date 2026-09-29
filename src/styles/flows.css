@@ -438,6 +438,7 @@
   gap: 7px;
   font-size: 13px;
   font-weight: 600;
+  line-height: normal; /* a button's, so the pill matches its height */
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 7px 17px;
