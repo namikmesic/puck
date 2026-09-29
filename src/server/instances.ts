@@ -232,13 +232,25 @@ export function registerInstanceRoutes(router: Router, ctx: ServerContext): void
     const now = ctx.clock.now();
     await ctx.store.setPermissions(instance.id, permissions, now);
     // Committed: the reply is a success and the app hears of it, whatever
-    // fails after this point. Without the repositories there is no view to push.
+    // fails after this point.
     const failed = (err: unknown) =>
       ctx.log.error('grant.permissions', { envId: instance.id, error: err instanceof Error ? err.name : 'unknown' });
+    const recorded = { ...instance, permissions, updatedAt: now };
     let view: InstanceView | null = null;
     try {
-      view = await instanceView(ctx, { ...instance, permissions, updatedAt: now });
-      ctx.hub.push(user.id, { type: 'instance.upsert', instance: view });
+      view = await instanceView(ctx, recorded);
+    } catch {
+      try {
+        view = await instanceView(ctx, recorded);
+      } catch (err) {
+        failed(err);
+      }
+    }
+    try {
+      ctx.hub.push(user.id, {
+        type: 'instance.upsert',
+        instance: view ?? { ...recorded, partial: true },
+      });
     } catch (err) {
       failed(err);
     }

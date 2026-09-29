@@ -27,14 +27,16 @@
  *     (a new head, or a closed or merged pull request, stops that). A
  *     changed outcome — new failing check names, or success and failure
  *     swapping — is another notice and updates `pr.checks`. `ci: fix`
- *     queues one follow-up for a head the worker has not yet been sent, up
- *     to `maxCiFixAttempts`, and does not queue another for that head.
+     *     queues one follow-up for a head the worker has not yet been sent, up
+     *     to `maxCiFixAttempts`, and does not queue another for that watch.
  *     The notice is the latest run of every
  *     check name. Nothing reported settles as neutral and stays watched,
  *     so a check that appears later still reports. A failure whose job
  *     logs could not all be read waits for up to LIMITS.logReads polls
- *     before it is reported with what was read. Publishing the same head
- *     again keeps its watch: no second notice or fix for that head.
+ *     before it is reported with what was read. Those retries end when a
+ *     green run is delivered or the watch is replaced. Publishing the same
+ *     pull request's same head again keeps its watch: no second notice or
+ *     fix for that head. A new pull request starts a new watch.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -793,6 +795,9 @@ export class GithubSync {
     if (!item?.pr || !repo) return;
     const s = this.syncOf(item.id);
     const pr = item.pr;
+    // The same pull request's same head published again (a body or title
+    // update) keeps its CI watch, so its result is not reported, or fixed, a second time.
+    const kept = s.prNumber === pr.number && s.ci && s.ci.sha === pr.lastPushedSha ? s.ci : null;
     if (s.prNumber !== pr.number) {
       s.prNumber = pr.number;
       s.seen = [];
@@ -800,9 +805,7 @@ export class GithubSync {
     }
     s.prState = 'open';
     s.headSha = pr.lastPushedSha;
-    // The same head published again (a body or title update) keeps its CI
-    // watch, so its result is not reported, or fixed, a second time.
-    const ci = s.ci?.sha === pr.lastPushedSha ? s.ci : this.watch(pr.lastPushedSha);
+    const ci = kept ?? this.beginWatch(item.id, pr.lastPushedSha);
     s.ci = ci;
     this.last.set(`checks:${item.id}`, this.now());
     this.save();
@@ -824,6 +827,11 @@ export class GithubSync {
     };
   }
 
+  private beginWatch(itemId: string, sha: string): CiWatch {
+    this.logTries.delete(itemId);
+    return this.watch(sha);
+  }
+
   private async pollPull(itemId: string): Promise<void> {
     const item = this.deps.backlog.get(itemId);
     const repo = item ? this.repoOf(item) : null;
@@ -831,10 +839,15 @@ export class GithubSync {
     const pr = item.pr;
     const s = this.syncOf(item.id);
     if (s.prNumber !== pr.number) {
+      const replaced = s.prNumber !== null;
       s.prNumber = pr.number;
       s.prState = null;
       s.seen = [];
       s.feedback = [];
+      if (replaced) {
+        s.ci = this.beginWatch(item.id, pr.lastPushedSha);
+        this.patchPr(item, { checks: { sha: pr.lastPushedSha, state: 'pending', failing: [] } });
+      }
     }
     const recordedSha = s.headSha;
     const { data: pull, changed } = await this.deps.api.pull(repo.github, pr.number);
@@ -847,7 +860,7 @@ export class GithubSync {
     if (!stale) {
       if (head && head !== s.headSha) {
         s.headSha = head;
-        if (s.ci?.sha !== head) s.ci = this.watch(head);
+        if (s.ci?.sha !== head) s.ci = this.beginWatch(item.id, head);
       }
       if (state !== s.prState) {
         s.prState = state;
@@ -1049,6 +1062,7 @@ export class GithubSync {
       deliver = this.logsSettled(item.id, `${ci.sha}\0${outcome}`, complete);
     }
     if (s.ci !== ci) return;
+    if (state === 'success') this.logTries.delete(item.id);
     if (deliver && state === 'success') ci.logs = [];
     ci.state = state;
     this.save();
