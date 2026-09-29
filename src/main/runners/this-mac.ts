@@ -11,14 +11,17 @@
  * `<userData>/r/<account>`, one directory per Puck account, then driven by its own scripts' entry point with its
  * own Node runtime: `config --unattended … --labels local --local-socket
  * <dir>/local.sock --app-bundle-id <Puck's>` with a registration token read
- * from a 0600 file (then revoked), and `svc install` + `svc start`. Then the
- * app kickstarts the LaunchAgent itself: launchd may hold a freshly loaded
- * job back, and an older runner release's `svc start` only loads it. That
- * kickstart unloads the recorded agent when one is loaded and bootstraps
- * its plist, so the job that runs is the plist on disk. A LaunchAgent left
- * from an older install — its program is not the puck-runner launcher, or
- * its plist names no app — is rewritten first, including one an older
- * `svc install` just wrote. The
+ * from a 0600 file (then revoked), and `svc install` + `svc start`. A runner
+ * release from before `--app-bundle-id` rejects that option, so `config`
+ * runs once more without it. `svc start` kickstarts the LaunchAgent; an
+ * older runner release's only loads it, and launchd may hold a freshly
+ * loaded job back, so when `launchctl print` does not show the job running
+ * the app kickstarts it itself. That kickstart unloads the recorded agent
+ * when one is loaded and bootstraps its plist, so the job that runs is the
+ * plist on disk. A LaunchAgent left from an older install — its program is
+ * not the puck-runner launcher, or its plist names no app — is rewritten
+ * and kickstarted instead of started, including one an older `svc install`
+ * just wrote. The
  * app's Electron binary is not used as a Node runtime: packaged builds
  * switch that off (the RunAsNode fuse), and the runner updates itself from
  * the server like any other.
@@ -42,7 +45,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LocalRunnerState } from '../../harness/bridge';
-import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdNotLoaded, launchdPlist, launchdPrintedProgram, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
+import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdNotLoaded, launchdPlist, launchdPrintedProgram, launchdPrintedRunning, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
 import type { ServerRunner } from '../../harness/server-api';
 import { ISOLATED_ENV } from '../isolation';
 import { log } from '../log';
@@ -341,6 +344,14 @@ async function kickstart(dir: string, label: string): Promise<void> {
   }
 }
 
+/** `svc start` of a runner release that only loads the job leaves it waiting; kickstart it then. */
+async function ensureRunning(dir: string, label: string): Promise<void> {
+  const name = installedService(dir, label)?.name ?? label;
+  const printed = await d().exec('/bin/launchctl', ['print', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+  if (printed.code === 0 && launchdPrintedRunning(printed.stdout)) return;
+  await kickstart(dir, label);
+}
+
 /** Rewrites a stale LaunchAgent through `svc install`. Kickstart then loads that plist. */
 async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => void): Promise<void> {
   const previous = installedService(dir, label);
@@ -363,34 +374,43 @@ async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => v
   gate();
 }
 
-async function startRecorded(dir: string, socket: string, label: string, gate: () => void): Promise<void> {
+/** Starts the LaunchAgent `svc install` just wrote. One an older runner release wrote is rewritten and kickstarted instead. */
+async function startInstalled(dir: string, label: string, gate: () => void): Promise<void> {
+  const stale = recordedAgentStale(dir, label) ? installedService(dir, label) : null;
+  if (stale) {
+    ensureAppBundleId(dir);
+    placeLaunchAgent(dir, stale);
+    gate();
+    return kickstart(dir, label);
+  }
+  await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+  gate();
+  await ensureRunning(dir, label);
+}
+
+async function startRecordedAgent(dir: string, label: string, gate: () => void): Promise<void> {
   if (recordedAgentStale(dir, label)) {
     await replaceStaleLaunchAgent(dir, label, gate);
-  } else {
-    try {
-      await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
-    } catch (err) {
+    return kickstart(dir, label);
+  }
+  try {
+    await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
+  } catch (err) {
+    gate();
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('No service is installed')) {
+      await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
       gate();
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('No service is installed')) {
-        await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
-        gate();
-        if (recordedAgentStale(dir, label)) {
-          const rec = installedService(dir, label);
-          if (rec) {
-            ensureAppBundleId(dir);
-            placeLaunchAgent(dir, rec);
-          }
-        } else {
-          await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
-        }
-      } else if (!serviceAlreadyUp(message)) {
-        throw err;
-      }
+      return startInstalled(dir, label, gate);
     }
+    if (!serviceAlreadyUp(message)) throw err;
   }
   gate();
-  await kickstart(dir, label);
+  await ensureRunning(dir, label);
+}
+
+async function startRecorded(dir: string, socket: string, label: string, gate: () => void): Promise<void> {
+  await startRecordedAgent(dir, label, gate);
   gate();
   progress('Waiting for the runner…');
   await d().waitForSocket(socket, 60_000);
@@ -415,6 +435,20 @@ async function runner(dir: string, args: string[], what: string, timeoutMs = 120
     throw new Error(`${what} failed: ${why || `exit ${r.code}`}`);
   }
   return r.stdout;
+}
+
+/** A runner release from before `--app-bundle-id` rejects it; `startInstalled` then names the app in the LaunchAgent. */
+async function configure(dir: string, args: string[], gate: () => void): Promise<void> {
+  try {
+    await runner(dir, args, 'Registering the runner');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const at = args.indexOf('--app-bundle-id');
+    if (at === -1 || !message.includes("Unknown option '--app-bundle-id'")) throw err;
+    gate();
+    log.info('this-mac.config-without-app-bundle-id');
+    await runner(dir, [...args.slice(0, at), ...args.slice(at + 2)], 'Registering the runner');
+  }
 }
 
 function readRunnerId(dir: string): string | null {
@@ -518,7 +552,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       const target = registrationTarget(existing, recordedId, d().hostname());
       const args = ['config', '--unattended', '--url', reg.serverUrl, '--token-file', tokenFile, '--name', target.name, '--labels', 'local', '--local-socket', socket, '--service-label', serviceLabelFor(id), '--app-bundle-id', APP_BUNDLE_ID];
       if (target.replace) args.push('--replace');
-      await runner(dir, args, 'Registering the runner');
+      await configure(dir, args, gate);
       gate();
       fs.rmSync(tokenFile, { force: true });
       const runnerId = readRunnerId(dir);
@@ -528,9 +562,7 @@ export function install(existing: ServerRunner[]): Promise<LocalRunnerRecord> {
       progress('Starting the LaunchAgent…');
       await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
       gate();
-      await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
-      gate();
-      await kickstart(dir, serviceLabelFor(id));
+      await startInstalled(dir, serviceLabelFor(id), gate);
       gate();
       progress('Waiting for the runner…');
       await d().waitForSocket(socket, 60_000);

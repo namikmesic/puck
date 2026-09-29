@@ -108,3 +108,8 @@ export function launchdPrintedProgram(printStdout: string): string | null {
   const base = (slash === -1 ? program : program.slice(slash + 1)).trim();
   return base || null;
 }
+
+/** True when `launchctl print` shows the job running. */
+export function launchdPrintedRunning(printStdout: string): boolean {
+  return /^\s*state = running\s*$/m.test(printStdout);
+}
