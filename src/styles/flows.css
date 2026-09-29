@@ -389,22 +389,81 @@
   margin: 0 0 4px;
 }
 
-.fr-harness {
+.fr-harnesses {
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  row-gap: 8px;
+  margin-top: 4px;
+}
+
+.fr-harness {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: 10px;
+  column-gap: 12px;
   font-size: 13px;
 }
 
 .fr-harness-name {
-  min-width: 110px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 650;
 }
 
+.fr-harness-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gray);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* The button and the state that replaces it share one cell and one shape. */
+.fr-harness .btn-primary,
 .fr-harness-state {
+  justify-self: stretch;
+  text-align: center;
+}
+
+.fr-harness-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: normal; /* a button's, so the pill matches its height */
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 17px;
+  color: var(--gray);
+}
+
+.fr-harness-state .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.fr-harness-state.on {
   color: var(--emerald);
-  font-size: 12px;
+  background: var(--emerald-tint);
+  border-color: rgba(46, 94, 78, 0.18);
+}
+
+.fr-harness-state.on .dot {
+  background: var(--emerald);
+}
+
+.fr-harness-state.busy .dot {
+  background: var(--gold);
+  animation: lifecycle-pulse 1.2s ease-in-out infinite;
 }
 
 /* ---------- Update dialog ---------- */
