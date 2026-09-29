@@ -59,6 +59,8 @@ function fakeGitHub() {
     runs: new Map<string, Json[]>(),
     jobs: new Map<number, Json[]>(),
     logs: new Map<number, string>(),
+    /** Job ids whose log read fails with HTTP 500. */
+    logsDown: new Set<number>(),
     /** login → permission (`admin`…) or an HTTP status to fail the read. */
     permissions: new Map<string, string | number>(),
     requests: [] as Req[],
@@ -168,7 +170,10 @@ function fakeGitHub() {
       const page = paged(url, gh.jobs.get(Number(m[1])) ?? []);
       return [200, { jobs: page.body }, page.link ? { link: page.link } : undefined];
     }
-    if ((m = /^\/actions\/jobs\/(\d+)\/logs$/.exec(p))) return [200, gh.logs.get(Number(m[1])) ?? ''];
+    if ((m = /^\/actions\/jobs\/(\d+)\/logs$/.exec(p))) {
+      if (gh.logsDown.has(Number(m[1]))) return [500, { message: 'Server Error' }];
+      return [200, gh.logs.get(Number(m[1])) ?? ''];
+    }
     return [404, { message: 'Not Found' }];
   };
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -1201,6 +1206,266 @@ describe('CI on the published head', () => {
     expect(log).toHaveLength(200);
     expect(log[0]).toBe('line 100');
     expect(read.logs[0].log).not.toContain('ghs_leakedtoken123');
+  });
+
+  it('reads a failed job log again on the next poll when the read fails, and reports once it is read', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA }]);
+    fake.gh.jobs.set(50, [{ id: 60, name: 'test', status: 'completed', conclusion: 'failure', html_url: null }]);
+    fake.gh.logs.set(60, 'npm test\nFAIL readme.test.js');
+    fake.gh.logsDown.add(60);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    fake.gh.logsDown.delete(60);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL readme.test.js');
+    const read = sync.ciRead(backlog.get(item.id) as ItemRecord) as { logs: Array<{ job: string; log: string }> };
+    expect(read.logs).toEqual([{ job: 'test', log: 'npm test\nFAIL readme.test.js' }]);
+  });
+
+  it(`reports a failure without the log after ${LIMITS.logReads} failed reads`, async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    fake.gh.runs.set(SHA, [{ id: 50, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: SHA }]);
+    fake.gh.jobs.set(50, [{ id: 60, name: 'test', status: 'completed', conclusion: 'failure', html_url: null }]);
+    fake.gh.logsDown.add(60);
+    for (let poll = 1; poll < LIMITS.logReads; poll++) {
+      await pollAll();
+      expect(noticesOf('pr.checks')).toEqual([]);
+    }
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+  });
+
+  const downLog = (sha: string, runId: number, jobId: number, log: string) => {
+    fake.gh.checkRuns.set(sha, [run(jobId, 'test', 'failure')]);
+    fake.gh.runs.set(sha, [{ id: runId, name: 'CI', status: 'completed', conclusion: 'failure', head_sha: sha }]);
+    fake.gh.jobs.set(runId, [{ id: jobId, name: 'test', status: 'completed', conclusion: 'failure', html_url: null }]);
+    fake.gh.logs.set(jobId, log);
+    fake.gh.logsDown.add(jobId);
+  };
+
+  it('does not settle the next failure from log reads that a pending re-run ended', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.checkRuns.set(SHA, [run(2, 'test', null, 'in_progress')]);
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    downLog(SHA, 51, 61, 'npm test\nFAIL again');
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.logsDown.delete(61);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL again');
+  });
+
+  it('does not settle the next failure from log reads that a green run already ended', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'success')]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual(['W-1 PR #7: all 1 check passed.']);
+    expect(followUps).toEqual([]);
+
+    downLog(SHA, 51, 61, 'npm test\nFAIL again');
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toEqual([]);
+
+    fake.gh.logsDown.delete(61);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL again');
+  });
+
+  it('keeps an unfinished log-read count when the same pull request is published again', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    await sync.published(item.id);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).not.toContain('FAIL readme.test.js');
+  });
+
+  it('does not carry log-read retries onto a new head', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+
+    const sha2 = 'e'.repeat(40);
+    const pull = fake.gh.pulls.get(7) as { head: { sha: string } };
+    pull.head.sha = sha2;
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(noticesOf('pr.checks')).toEqual([]);
+
+    pull.head.sha = SHA;
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.logsDown.delete(60);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL readme.test.js');
+  });
+
+  it('does not carry log-read retries onto a new pull request for the same commit', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+
+    fake.gh.pulls.set(8, {
+      number: 8,
+      state: 'open',
+      merged: false,
+      merged_at: null,
+      html_url: 'https://github.com/octo/app/pull/8',
+      head: { sha: SHA, ref: 'puck/W-1-fix-it' },
+    });
+    backlog.patch(backlog.get(item.id) as ItemRecord, {
+      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
+    });
+    await sync.published(item.id);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.logsDown.delete(60);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('pull request #8');
+    expect(followUps[0].text).toContain('FAIL readme.test.js');
+  });
+
+  it('keeps the CI watch when the same head is published again', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    await sync.published(item.id);
+    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+  });
+
+  it('starts a new CI watch when the same commit is published as a new pull request', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    clock += POLL.quietChecksMs;
+    await sync.poll();
+    const quiet = fake.gh.requests.length;
+    await sync.poll();
+    expect(fake.gh.requests.slice(quiet).some((r) => r.path.includes('/check-runs'))).toBe(false);
+
+    fake.gh.pulls.set(8, {
+      number: 8,
+      state: 'open',
+      merged: false,
+      merged_at: null,
+      html_url: 'https://github.com/octo/app/pull/8',
+      head: { sha: SHA, ref: 'puck/W-1-fix-it' },
+    });
+    backlog.patch(backlog.get(item.id) as ItemRecord, {
+      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
+    });
+    await sync.published(item.id);
+    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
+
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/PR #7: 1 check failed \(test\)/),
+      expect.stringMatching(/PR #8: 1 check failed \(test\).*attempt 2 of 2/),
+    ]);
+    expect(followUps).toHaveLength(2);
+    expect(followUps[1].text).toContain('pull request #8');
+  });
+
+  it('starts a new CI watch when a poll finds a new pull request for the same commit', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    clock += POLL.quietChecksMs;
+    await sync.poll();
+
+    fake.gh.pulls.set(8, {
+      number: 8,
+      state: 'open',
+      merged: false,
+      merged_at: null,
+      html_url: 'https://github.com/octo/app/pull/8',
+      head: { sha: SHA, ref: 'puck/W-1-fix-it' },
+    });
+    backlog.patch(backlog.get(item.id) as ItemRecord, {
+      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
+    });
+    const before = fake.gh.requests.length;
+    await pollAll();
+    expect(fake.gh.requests.slice(before).some((r) => r.path.includes(`/commits/${SHA}/check-runs`))).toBe(true);
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/PR #7: 1 check failed \(test\)/),
+      expect.stringMatching(/PR #8: 1 check failed \(test\).*attempt 2 of 2/),
+    ]);
+    expect(followUps).toHaveLength(2);
+    expect(followUps[1].text).toContain('pull request #8');
   });
 
   it('ci: fix queues the failure to the worker, up to maxCiFixAttempts', async () => {

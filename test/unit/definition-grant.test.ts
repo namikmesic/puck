@@ -59,7 +59,9 @@ describe('definition.apply governs the next mint', () => {
     root?.cleanup();
   });
 
-  async function setup(withGrant: boolean): Promise<void> {
+  const stored = () => JSON.parse(fs.readFileSync(path.join(root.paths.state, 'instance.json'), 'utf8')) as { grantUnsure?: boolean };
+
+  async function setup(withGrant: boolean, extra: { grantSyncTimeoutMs?: number } = {}): Promise<void> {
     sockets = [];
     h = await startServer();
     h.github.addUser('namik');
@@ -91,6 +93,7 @@ describe('definition.apply governs the next mint', () => {
       privileged: false,
       exit: () => undefined,
       shutdownGraceMs: 200,
+      ...extra,
       run: async (argv) => {
         if (argv[0] === 'id') return { code: 0, stdout: '10001\n', stderr: '', timedOut: false };
         if (argv[0] === 'sh' && argv[1] === '-lc' && argv[2]?.includes('echo "')) {
@@ -216,6 +219,91 @@ describe('definition.apply governs the next mint', () => {
     expect(await mint()).toMatchObject({ workflows: 'write', issues: 'write' });
   });
 
+  it('puts the previous permissions back when the server commits and then fails the reply', async () => {
+    await setup(true);
+    const before = await mint();
+    const orig = h.server.ctx.store.setPermissions.bind(h.server.ctx.store);
+    const spy = vi.spyOn(h.server.ctx.store, 'setPermissions').mockImplementationOnce(async (id, permissions, now) => {
+      await orig(id, permissions, now);
+      throw new Error('reply lost');
+    });
+    try {
+      const c = client();
+      await expect(
+        c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') }),
+      ).rejects.toThrow(/could not be updated/);
+      expect((await c.cmd<Snapshot>('snapshot.get')).instance.sha).toBe('abc1234');
+      expect(await mint()).toEqual(before);
+      expect(stored().grantUnsure).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('syncs the grant on the next apply, even one that keeps permissions, when the revert also failed', async () => {
+    await setup(true);
+    const orig = h.server.ctx.store.setPermissions.bind(h.server.ctx.store);
+    const spy = vi
+      .spyOn(h.server.ctx.store, 'setPermissions')
+      .mockImplementationOnce(async (id, permissions, now) => {
+        await orig(id, permissions, now);
+        throw new Error('reply lost');
+      })
+      .mockImplementationOnce(async () => {
+        throw new Error('still down');
+      });
+    const c = client();
+    try {
+      await expect(
+        c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') }),
+      ).rejects.toThrow(/could not be updated/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await mint()).toMatchObject({ workflows: 'write' });
+    expect(stored().grantUnsure).toBe(true);
+    expect(await c.cmd('definition.apply', { definition: definition({ reviews: 'address' }), pin: pin('bbb2222') })).toEqual({ classes: ['hot'] });
+    expect(await mint()).not.toHaveProperty('workflows');
+    expect(stored().grantUnsure).toBe(false);
+  });
+
+  it('pushes the new permissions to the app when the audit fails after the commit', async () => {
+    await setup(true);
+    const original = h.server.ctx.audit.bind(h.server.ctx);
+    h.server.ctx.audit = async (kind, fields) => {
+      if (kind === 'grant.permissions') throw new Error('audit failed');
+      return original(kind, fields);
+    };
+    const push = vi.spyOn(h.server.ctx.hub, 'push');
+    const c = client();
+    expect(await c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') })).toEqual({ classes: ['hot'] });
+    expect(push).toHaveBeenCalledWith(userId, {
+      type: 'instance.upsert',
+      instance: expect.objectContaining({ id: envId, permissions: expect.objectContaining({ workflows: 'write' }) }),
+    });
+  });
+
+  it('refuses the apply and releases it when the policies request hangs', async () => {
+    await setup(true, { grantSyncTimeoutMs: 50 });
+    const orig = h.server.ctx.store.setPermissions.bind(h.server.ctx.store);
+    let hang = true;
+    const spy = vi.spyOn(h.server.ctx.store, 'setPermissions').mockImplementation(async (id, permissions, now) => {
+      if (hang) await new Promise(() => undefined);
+      return orig(id, permissions, now);
+    });
+    try {
+      const c = client();
+      await expect(
+        c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('aaa1111') }),
+      ).rejects.toThrow(/could not be updated/);
+      hang = false;
+      expect(await c.cmd('definition.apply', { definition: definition({ allowWorkflowEdits: true }), pin: pin('bbb2222') })).toEqual({ classes: ['hot'] });
+      expect(await mint()).toMatchObject({ workflows: 'write' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('rejects a second definition.apply until the first has stored its definition', async () => {
     await setup(true);
     let release!: () => void;
@@ -305,6 +393,16 @@ describe('syncGrantPolicies', () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('network'));
     vi.stubGlobal('fetch', fetchMock);
     await expect(syncGrantPolicies(env, 'env_1', policies)).rejects.toThrow(/could not be updated/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives each attempt a deadline, so a hung request fails after two', async () => {
+    const fetchMock = vi.fn(
+      (_url: URL, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason))),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(syncGrantPolicies(env, 'env_1', policies, 20)).rejects.toThrow(/could not be updated/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

@@ -3,6 +3,9 @@
  * the applied definition (the resolved JSON the app delivered) with its pin
  * and sha, every definition applied so far, and the provisioning
  * fingerprints that let a restart skip work already done on this container.
+ * `grantUnsure` is set before a definition update changes the server's
+ * token permissions and cleared once the grant and the definition agree
+ * again, so a failed reply or a crash in between re-syncs on the next apply.
  */
 
 import * as path from 'node:path';
@@ -23,6 +26,8 @@ export interface InstanceRecord {
     /** Per-stage fingerprints; a stage whose fingerprint is unchanged is skipped. */
     stages?: Record<string, string>;
   } | null;
+  /** The server's token permissions may not match this definition. */
+  grantUnsure?: boolean;
 }
 
 function normalize(raw: unknown): InstanceRecord | null {
@@ -37,6 +42,7 @@ function normalize(raw: unknown): InstanceRecord | null {
     definition: r.definition ?? null,
     history: Array.isArray(r.history) ? r.history : [],
     provisioned: r.provisioned ?? null,
+    grantUnsure: r.grantUnsure === true,
   };
 }
 

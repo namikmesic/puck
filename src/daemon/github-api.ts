@@ -378,11 +378,6 @@ export class GitHubApi {
     return this.get<string>(repo, `${repoPath(repo)}/actions/jobs/${jobId}/logs`, { text: true });
   }
 
-  async defaultBranch(repo: string): Promise<string> {
-    const r = await this.poll<{ default_branch?: string }>(repo, repoPath(repo));
-    return r.data?.default_branch ?? '';
-  }
-
   searchIssues(repo: string, q: string): Promise<GhIssue[]> {
     return this.client(repo).paginate(`/search/issues?q=${seg(q)}&per_page=${LIST_PAGE}`, (page) => asArray<GhIssue>((page as { items?: GhIssue[] } | null)?.items), {
       maxPages: SEARCH_PAGES,

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_POLICIES, permissionsFor } from '../../src/server/instances';
 import { call, connectRunner, registerRunner, signIn, startServer, type Harness, type Socket } from './server-fakes';
 
@@ -197,6 +197,116 @@ describe('POST /v1/instances', () => {
     for (const body of bad) {
       const res = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', ...body });
       expect(res.status).toBe(400);
+    }
+  });
+});
+
+describe('PUT /v1/instances/:envId/policies', () => {
+  async function granted() {
+    const { s, r } = await setup();
+    h.github.addRepo('namik/web', { pushers: ['namik'] });
+    const inst = await create(s.accessToken, { runnerId: r.runnerId, definition: 'web', repos: ['namik/web'] });
+    return { s, envId: String(inst.body.envId) };
+  }
+
+  const put = (token: string, envId: string) =>
+    call(h, 'PUT', `/v1/instances/${envId}/policies`, {
+      token,
+      body: { policies: { github: { allowWorkflowEdits: true } } },
+    });
+
+  it('retries the instance view once and pushes it when the second read works', async () => {
+    const { s, envId } = await granted();
+    const orig = h.server.ctx.store.grantRepos.bind(h.server.ctx.store);
+    let reads = 0;
+    const spy = vi.spyOn(h.server.ctx.store, 'grantRepos').mockImplementation(async (id) => {
+      reads += 1;
+      if (reads === 1) throw new Error('repos unread');
+      return orig(id);
+    });
+    const push = vi.spyOn(h.server.ctx.hub, 'push');
+    try {
+      const res = await put(s.accessToken, envId);
+      expect(res.status).toBe(200);
+      expect(res.body.instance).toMatchObject({
+        id: envId,
+        userId: s.userId,
+        status: 'active',
+        permissions: expect.objectContaining({ workflows: 'write' }),
+        repos: [{ owner: 'namik', name: 'web', revoked: false }],
+      });
+      expect(reads).toBe(2);
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(push).toHaveBeenCalledWith(s.userId, {
+        type: 'instance.upsert',
+        instance: expect.objectContaining({ id: envId, repos: [{ owner: 'namik', name: 'web', revoked: false }] }),
+      });
+      const sent = push.mock.calls[0][1] as { instance: Record<string, unknown> };
+      expect(sent.instance).not.toHaveProperty('partial');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('pushes a partial instance when the view still cannot be built after permissions commit', async () => {
+    const { s, envId } = await granted();
+    let reads = 0;
+    const spy = vi.spyOn(h.server.ctx.store, 'grantRepos').mockImplementation(async () => {
+      reads += 1;
+      throw new Error('repos unread');
+    });
+    const push = vi.spyOn(h.server.ctx.hub, 'push');
+    try {
+      const res = await put(s.accessToken, envId);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({});
+      expect(reads).toBe(2);
+      const stored = await h.server.ctx.store.getInstance(envId);
+      expect(stored?.permissions).toMatchObject({ workflows: 'write' });
+      expect(stored?.status).toBe('active');
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(push).toHaveBeenCalledWith(s.userId, {
+        type: 'instance.upsert',
+        instance: {
+          id: envId,
+          userId: s.userId,
+          runnerId: stored?.runnerId,
+          definition: 'web',
+          status: 'active',
+          permissions: stored?.permissions,
+          createdAt: stored?.createdAt,
+          updatedAt: stored?.updatedAt,
+          partial: true,
+        },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const view = await call(h, 'GET', `/v1/instances/${envId}`, { token: s.accessToken });
+    expect(view.status).toBe(200);
+    expect(view.body.instance).toMatchObject({
+      permissions: expect.objectContaining({ workflows: 'write' }),
+      repos: [{ owner: 'namik', name: 'web', revoked: false }],
+    });
+  });
+
+  it('returns the committed permissions when the instance push throws', async () => {
+    const { s, envId } = await granted();
+    const push = vi.spyOn(h.server.ctx.hub, 'push').mockImplementation(() => {
+      throw new Error('socket closed');
+    });
+    try {
+      const res = await put(s.accessToken, envId);
+      expect(res.status).toBe(200);
+      expect(res.body.instance).toMatchObject({
+        id: envId,
+        permissions: expect.objectContaining({ workflows: 'write' }),
+        repos: [{ owner: 'namik', name: 'web', revoked: false }],
+      });
+      const stored = await h.server.ctx.store.getInstance(envId);
+      expect(stored?.permissions).toMatchObject({ workflows: 'write' });
+    } finally {
+      push.mockRestore();
     }
   });
 });
