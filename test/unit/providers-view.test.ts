@@ -46,7 +46,7 @@ const gh = (over: Partial<IntegrationProviderInfo['github']> = {}, auth: Partial
 function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
   const bridge = {
     providers: vi.fn(async () => infos),
-    providerAuthStart: vi.fn(async () => ({ url: 'https://claude.ai/oauth' })),
+    providerAuthStart: vi.fn(async () => ({ url: 'https://claude.com/cai/oauth/authorize' })),
     providerAuthCancel: vi.fn(async () => undefined),
     providerAuthLogout: vi.fn(async () => undefined),
     githubInstallations: vi.fn(async () => []),
