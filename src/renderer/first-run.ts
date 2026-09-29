@@ -18,11 +18,8 @@
 
 import type { GithubInstallation, HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from '../harness/bridge';
 import { el } from './dom';
-import { EXAMPLE_HOME_URL, initHomeSetup } from './home-setup';
+import { initHomeSetup } from './home-setup';
 import { button, errText } from './util';
-
-/** The example Puck home (kept under its old name for importers). */
-export const EXAMPLE_CONFIG_URL = EXAMPLE_HOME_URL;
 
 export type FirstRunStep = 'sign-in' | 'install' | 'config-repo' | 'claude' | 'runner' | 'start';
 

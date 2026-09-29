@@ -18,6 +18,7 @@ repo's first commit — the colors earned their keep; the bag spa did not.)
 | `--emerald-light` | `#3A7A66`              | Hover states                            |
 | `--emerald-dark`  | `#1E3E34`              | Active/emphasis text                    |
 | `--emerald-tint`  | `rgba(46,94,78,0.07)`  | Hover fills, chips                      |
+| `--emerald-edge`  | `rgba(46,94,78,0.18)`  | Signed-in harness chip border           |
 | `--gold`          | `#D4AF37`              | Live activity: thinking dots, running   |
 | `--gold-muted`    | `rgba(212,175,55,0.15)`| Gold chip fills, the waiting halo       |
 | `--charcoal`      | `#1C1C1A`              | Body text                               |
