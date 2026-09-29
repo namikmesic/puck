@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import type { EnvironmentProviderInfo, PuckBridge, RunnerRegistration, RunnersState } from '../../src/harness/bridge';
-import { commandsFor, initRunnersView, runnerMeta, statusWord } from '../../src/renderer/settings/runners';
+import { assetFor, commandsFor, initRunnersView, runnerMeta, serverAddress, statusWord } from '../../src/renderer/settings/runners';
 import { LOCAL_ID, RID, runnerRow, runnersInfo, runnersState } from './runners-fixtures';
 
 const settle = async (): Promise<void> => {
@@ -181,9 +181,6 @@ describe('Add runner', () => {
     await settle();
     expect((copy.mock.calls[0] as unknown as string[])[0]).toMatch(/^mkdir puck-runner && cd puck-runner\ncurl /);
 
-    // Linux ARM64 has no published tarball on this server.
-    btn(panel, 'Linux ARM64').click();
-    expect(card.querySelector('#rn-add-commands')?.textContent).toMatch(/publishes no runner for Linux ARM64/);
     btn(card.querySelector('#rn-add') as Element, 'macOS ARM64').click();
     expect(card.querySelector('#rn-add-commands')?.textContent).toContain('./svc.sh install && ./svc.sh start');
 
@@ -194,6 +191,89 @@ describe('Add runner', () => {
     btn(card.querySelector('#rn-add') as Element, 'Done').click();
     expect(bridge.runnerRegistrationCancel).not.toHaveBeenCalled();
     expect(card.querySelector('#rn-add')?.classList.contains('hidden')).toBe(true);
+  });
+
+  it('marks the picked platform pressed in a segmented control', async () => {
+    const { card } = mount();
+    btn(card, 'Add runner').click();
+    await settle();
+    const pressed = (): string[] => [...card.querySelectorAll('#rn-add-os .seg-btn[aria-pressed="true"]')].map((b) => b.textContent ?? '');
+    expect(card.querySelector('#rn-add-os')?.classList.contains('seg')).toBe(true);
+    expect(pressed()).toEqual(['Linux x64']);
+    btn(card.querySelector('#rn-add-os') as Element, 'This Mac').click();
+    expect(pressed()).toEqual(['This Mac']);
+    expect(btn(card, 'Add runner')).toBeUndefined();
+  });
+
+  it('a platform without a package says so, waits for nothing, and Close revokes the token', async () => {
+    const { card, bridge } = mount();
+    btn(card, 'Add runner').click();
+    await settle();
+    btn(card.querySelector('#rn-add') as Element, 'Linux ARM64').click();
+    const panel = card.querySelector('#rn-add') as HTMLElement;
+    const note = panel.querySelector('.rn-no-package')?.textContent ?? '';
+    expect(note).toMatch(/^This Puck server has no runner package for Linux ARM64\. Runner downloads come only from a Puck server in development mode\./);
+    expect(note).not.toContain('PUCK_RUNNER_DOWNLOADS');
+    expect(note).toContain('https://puck.example.com');
+    expect(panel.querySelector('.pv-code')).toBeNull();
+    expect(panel.querySelector('#rn-add-status')?.textContent).toBe('');
+    expect(btn(panel, 'Cancel')).toBeUndefined();
+    // Another platform can still use the token, so it is kept until the panel closes.
+    expect(bridge.runnerRegistrationCancel).not.toHaveBeenCalled();
+    btn(panel, 'Close').click();
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledWith('reg_01J8Z3X0000000000000000000');
+    expect(card.querySelector('#rn-add')?.classList.contains('hidden')).toBe(true);
+  });
+
+  it('a server with no packages at all has its token revoked at once', async () => {
+    const { card, bridge } = mount(runnersState(), { runnerRegistrationToken: vi.fn(async () => registration({ version: null, assets: [] })) });
+    btn(card, 'Add runner').click();
+    await settle();
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledWith('reg_01J8Z3X0000000000000000000');
+    const panel = card.querySelector('#rn-add') as HTMLElement;
+    expect(panel.querySelector('.rn-no-package')?.textContent).toMatch(/no runner package for Linux x64/);
+    expect(panel.querySelector('#rn-add-status')?.textContent).toBe('');
+    btn(panel, 'Close').click();
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the server scheme and host, and warns that a loopback server is out of reach of another machine', async () => {
+    const local = mount(runnersState(), { runnerRegistrationToken: vi.fn(async () => registration({ serverUrl: 'http://localhost:8765' })) });
+    btn(local.card, 'Add runner').click();
+    await settle();
+    let panel = local.card.querySelector('#rn-add') as HTMLElement;
+    expect(panel.textContent).toContain('outbound HTTP to localhost:8765.');
+    expect(panel.textContent).not.toContain('HTTPS');
+    const warn = panel.querySelector('#rn-add-unreachable')?.textContent ?? '';
+    expect(warn).toMatch(/^A runner on another machine can't reach this Puck server at localhost:8765: on that machine, localhost is the machine itself\./);
+    expect(warn).toContain('PUCK_SERVER_URL');
+    // The commands still show: the address may be reachable some other way.
+    expect(panel.querySelectorAll('.pv-code')).toHaveLength(3);
+    expect(panel.querySelector('#rn-add-status')?.textContent).toBe('◌ Waiting for a runner to register…');
+    btn(panel, 'This Mac').click();
+    expect(panel.querySelector('#rn-add-unreachable')).toBeNull();
+
+    const hosted = mount();
+    btn(hosted.card, 'Add runner').click();
+    await settle();
+    panel = hosted.card.querySelector('#rn-add') as HTMLElement;
+    expect(panel.textContent).toContain('outbound HTTPS to puck.example.com.');
+    expect(panel.querySelector('#rn-add-unreachable')).toBeNull();
+  });
+
+  it('reads the scheme, host and loopback from a server URL, and finds a platform package', () => {
+    expect(serverAddress('http://localhost:8765')).toEqual({ scheme: 'HTTP', host: 'localhost:8765', loopback: true });
+    expect(serverAddress('http://127.0.0.1:8080')).toEqual({ scheme: 'HTTP', host: '127.0.0.1:8080', loopback: true });
+    expect(serverAddress('http://[::1]:8765')?.loopback).toBe(true);
+    expect(serverAddress('http://puck.localhost')?.loopback).toBe(true);
+    expect(serverAddress('https://puck.example.com')).toEqual({ scheme: 'HTTPS', host: 'puck.example.com', loopback: false });
+    expect(serverAddress('http://192.168.1.20:8765')?.loopback).toBe(false);
+    expect(serverAddress('http://127.example.com')?.loopback).toBe(false);
+    expect(serverAddress('not a url')).toBeNull();
+    const assets = registration().assets;
+    expect(assetFor(assets, 'linux-x64')?.file).toBe('puck-runner-linux-x64-0.1.0.tar.gz');
+    expect(assetFor(assets, 'linux-arm64')).toBeUndefined();
   });
 
   it('Cancel revokes the token, and closing Settings leaves it valid', async () => {
