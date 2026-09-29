@@ -565,7 +565,10 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     const syncAssign = (): void => {
       assignBtn.disabled = !choices.includes(pick.value);
     };
-    pick.addEventListener('change', syncAssign);
+    pick.addEventListener('change', () => {
+      if (!choices.includes(pick.value)) pick.value = savedAgent;
+      syncAssign();
+    });
     syncAssign();
     assignBtn.addEventListener('click', async () => {
       if (!choices.includes(pick.value)) return;

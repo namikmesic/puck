@@ -482,9 +482,32 @@ describe('board', () => {
 
   it('keeps Done to the latest twenty until Show all', () => {
     const done = Array.from({ length: 23 }, (_, i) => item({ number: i + 1, status: 'done', updatedAt: i }));
-    const { ids } = setup(done);
+    const { ids, col } = setup(done);
+    const list = col('done').querySelector('.bd-list') as HTMLElement;
+    list.scrollTop = 180;
     expect(ids('done')).toHaveLength(20);
     (document.querySelector('.bd-more-row button') as HTMLButtonElement).click();
     expect(ids('done')).toHaveLength(23);
+    expect(list.scrollTop).toBe(180);
+  });
+
+  it('updates a running tool label in place and keeps column scroll across a rebuild', () => {
+    const running = Array.from({ length: 6 }, (_, i) => item({ number: i + 1, status: 'running', agent: 'implementer', sessionId: `s${i}` }));
+    const { card, col, store } = setup(running);
+    const list = col('progress').querySelector('.bd-list') as HTMLElement;
+    const node = card('itm_1');
+    list.scrollTop = 240;
+    store.applyEvent(2, { kind: 'turn.event', sessionId: 's0', turnId: 't', event: { kind: 'tool-start', toolId: 'x', tool: 'Bash', summary: 'npm test', input: '' } }, ENV);
+    expect(card('itm_1')).toBe(node);
+    expect(node.querySelector('.bd-tool')?.textContent).toBe('Bash · npm test');
+    expect(list.scrollTop).toBe(240);
+    store.applyEvent(3, { kind: 'turn.start', sessionId: 's0', turnId: 't2' }, ENV);
+    expect(list.scrollTop).toBe(240);
+    expect(card('itm_1').querySelector('.bd-tool')?.textContent).toBe('Working…');
+    const ready = col('ready').querySelector('.bd-list') as HTMLElement;
+    ready.scrollTop = 90;
+    store.applyEvent(4, { kind: 'item.upsert', item: item({ number: 7, status: 'queued', agent: 'implementer' }) }, ENV);
+    expect(ready.scrollTop).toBe(90);
+    expect(col('ready').querySelector('.bd-signal')?.textContent).toBe('Next for implementer');
   });
 });

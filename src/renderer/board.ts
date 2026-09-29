@@ -603,7 +603,7 @@ export function initBoard(ctx: BoardContext) {
         i.result?.diffStat,
         i.pr,
         column === 'ready' ? queueLine(i, all) : null,
-        column === 'progress' ? [startedAt(i), latestTool(i)] : null,
+        column === 'progress' ? startedAt(i) : null,
       ]),
     ]);
   }
@@ -629,26 +629,37 @@ export function initBoard(ctx: BoardContext) {
     if (!parts) return;
     parts.count.textContent = String(items.length);
     const k = key(column, items, all);
-    if (parts.built === k) return;
+    if (parts.built === k) {
+      if (column === 'progress') {
+        for (const item of items) {
+          if (item.status !== 'running') continue;
+          const tool = parts.list.querySelector<HTMLElement>(`.bd-card[data-item="${CSS.escape(item.id)}"] .bd-tool`);
+          if (tool) tool.textContent = latestTool(item);
+        }
+      }
+      return;
+    }
+    const scroll = parts.list.scrollTop;
     parts.built = k;
     parts.list.textContent = '';
     if (!items.length) {
       if (column === 'backlog' && !all.length) parts.list.appendChild(emptyCta());
       else parts.list.appendChild(el('li', 'bd-hint', COLUMNS.find((c) => c.id === column)?.hint ?? ''));
-      return;
+    } else {
+      const shown = column === 'done' && !doneAll ? items.slice(0, DONE_LIMIT) : items;
+      for (const item of shown) parts.list.appendChild(card(item, all));
+      if (shown.length < items.length) {
+        const li = el('li', 'bd-more-row');
+        const all2 = button('btn-ghost', `Show all ${items.length}`);
+        all2.addEventListener('click', () => {
+          doneAll = true;
+          render();
+        });
+        li.appendChild(all2);
+        parts.list.appendChild(li);
+      }
     }
-    const shown = column === 'done' && !doneAll ? items.slice(0, DONE_LIMIT) : items;
-    for (const item of shown) parts.list.appendChild(card(item, all));
-    if (shown.length < items.length) {
-      const li = el('li', 'bd-more-row');
-      const all2 = button('btn-ghost', `Show all ${items.length}`);
-      all2.addEventListener('click', () => {
-        doneAll = true;
-        render();
-      });
-      li.appendChild(all2);
-      parts.list.appendChild(li);
-    }
+    parts.list.scrollTop = scroll;
   }
 
   function renderClosedRail(items: WorkItem[]): void {

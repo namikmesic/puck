@@ -315,6 +315,12 @@ describe('work detail', () => {
     queuedPick.value = 'reviewer';
     queuedPick.dispatchEvent(new Event('change'));
     expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(false);
+    queuedPick.value = '';
+    queuedPick.dispatchEvent(new Event('change'));
+    expect(queuedPick.value).toBe('implementer');
+    expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(true);
+    wd.render();
+    expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).value).toBe('implementer');
     wd.show(held.id, 'details');
     expect(byId('details').querySelector('[data-action="unassign"]')).toBeNull();
     expect(options()).toEqual(['implementer']);
