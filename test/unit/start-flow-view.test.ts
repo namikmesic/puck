@@ -68,7 +68,7 @@ function setup(runners: RunnersState = runnersState({ runners: [runnerRow(), run
   document.body.innerHTML = '<div id="body"></div>';
   let codexConnected = false;
   const fake = fakeBridge({
-    definitionRefs: vi.fn(async () => ({ tags: [{ name: 'v1.2.0', sha: PIN.sha }, { name: 'v1.1.0', sha: 'd'.repeat(40) }], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: 'v1.2.0' })),
+    definitionRefs: vi.fn(async () => ({ defaultBranch: 'trunk', tags: [{ name: 'v1.2.0', sha: PIN.sha }, { name: 'v1.1.0', sha: 'd'.repeat(40) }], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: 'v1.2.0' })),
     definitionsAt: vi.fn(async () => listing()),
     providers: vi.fn(async () => [harness('claude-code', true), harness('codex', codexConnected)]),
     providerAuthStart: vi.fn(async () => {
@@ -117,7 +117,7 @@ describe('start flow', () => {
     expect(labels).toEqual(['Version', 'Environment definition']);
     const version = q<HTMLLabelElement>('label.sf-label-text');
     expect(version.control).toBe(q('.sf-ref'));
-    expect(q('[data-step="1"] .sf-hint').textContent).toBe('A branch, tag, or commit of the config repo.');
+    expect(q('[data-step="1"] .sf-hint').textContent).toBe('A branch, tag, or commit of the Puck home.');
     expect(q('.sf-defs').getAttribute('aria-label')).toBe('Environment definition');
   });
 
@@ -126,15 +126,16 @@ describe('start flow', () => {
     (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockResolvedValue({ ...listing(), repo: 'namikmesic/puck', pin: { kind: 'branch', name: 'main', sha: PIN.sha }, environments: [], agents: [], errors: [] });
     await flow.open();
     await flush();
-    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in namikmesic/puck at main.');
-    expect(q('.sf-empty').textContent).toContain('environments/<name>.yaml and agents/<name>.yaml at the root of the config repo');
+    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in the Puck home namikmesic/puck at main.');
+    expect(q('.sf-empty').textContent).toContain('Environments are added by committing environments/<name>.yaml to the Puck home.');
+    expect(q('.sf-empty').textContent).toContain('agents/<name>.yaml, both at the root of the Puck home');
     expect(body.querySelector('.sf-defs')).toBeNull();
     (q('.sf-example') as HTMLButtonElement).click();
     expect(bridge.openExternal).toHaveBeenCalledWith(EXAMPLE_CONFIG_URL);
     (q('.sf-change-repo') as HTMLButtonElement).click();
     expect(openProviders).toHaveBeenCalled();
-    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the config repo has an environment definition.');
-    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('Opens once the config repo has an environment definition.');
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the Puck home has an environment definition.');
+    expect(q('[data-step="3"] .sf-step-why').textContent).toBe('Opens once the Puck home has an environment definition.');
     expect(startBtn().disabled).toBe(true);
   });
 
@@ -152,6 +153,38 @@ describe('start flow', () => {
     ref.dispatchEvent(new Event('change'));
     await flush();
     expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once you pick a version.');
+  });
+
+  it('offers Edit on GitHub for each definition and its agents, on the home default branch', async () => {
+    const { flow, q, bridge } = setup();
+    await flow.open();
+    await flush();
+    const example = q('[data-definition="example"]');
+    const edit = example.querySelector('.sf-def-edit') as HTMLButtonElement;
+    expect(edit.textContent).toBe('Edit on GitHub');
+    edit.click();
+    expect(bridge.openExternal).toHaveBeenLastCalledWith('https://github.com/octo/config/blob/trunk/environments/example.yaml');
+    const agents = [...example.querySelectorAll<HTMLButtonElement>('.sf-agent-link')];
+    expect(example.querySelector('.sf-def-agents')?.textContent).toBe('orchestrator lead · implementer');
+    expect(agents.map((a) => a.title)).toEqual(['Edit agents/lead.yaml on GitHub', 'Edit agents/implementer.yaml on GitHub']);
+    agents[1].click();
+    expect(bridge.openExternal).toHaveBeenLastCalledWith('https://github.com/octo/config/blob/trunk/agents/implementer.yaml');
+    // Opening a link picks nothing.
+    expect(q('[data-definition="broken"]').classList.contains('selected')).toBe(false);
+    expect(q('[data-definition="broken"] .sf-def-edit')).not.toBeNull();
+  });
+
+  it('says environments are added by committing to the Puck home when a ref has none, and links the folder', async () => {
+    const { flow, q, bridge } = setup();
+    (bridge.definitionsAt as ReturnType<typeof vi.fn>).mockResolvedValue({ ...listing(), environments: [], errors: [] });
+    await flow.open();
+    await flush();
+    const empty = q('.sf-empty');
+    expect(empty.querySelector('.sf-empty-head')?.textContent).toBe('No environment definitions in the Puck home octo/config at v1.2.0.');
+    expect(empty.textContent).toContain('Environments are added by committing environments/<name>.yaml to the Puck home.');
+    (empty.querySelector('.sf-open-envs') as HTMLButtonElement).click();
+    expect(bridge.openExternal).toHaveBeenLastCalledWith('https://github.com/octo/config/tree/trunk/environments');
+    expect(q('[data-step="2"]').classList.contains('disabled')).toBe(true);
   });
 
   it('lists This Mac first, filters by label, and blocks runners that cannot take it', async () => {
@@ -203,7 +236,7 @@ describe('start flow', () => {
     const { flow, q, bridge } = setup();
     const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
     const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
-    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
     at.mockResolvedValue({
       ...listing(),
       repo: 'namikmesic/puck',
@@ -214,10 +247,10 @@ describe('start flow', () => {
     });
     await flow.open();
     await flush();
-    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in namikmesic/puck at main.');
+    expect(q('.sf-empty-head').textContent).toBe('No environment definitions in the Puck home namikmesic/puck at main.');
     flow.close();
 
-    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
     const fresh = listing();
     const [example] = fresh.environments;
     if (!example) throw new Error('fixture');
@@ -246,6 +279,7 @@ describe('start flow', () => {
     flow.close();
 
     (bridge.definitionRefs as ReturnType<typeof vi.fn>).mockResolvedValue({
+      defaultBranch: 'main',
       tags: [{ name: 'v9.0.0', sha: 'a'.repeat(40) }],
       branches: [{ name: 'dev', sha: 'b'.repeat(40) }],
       defaultTag: 'v9.0.0',
@@ -265,7 +299,7 @@ describe('start flow', () => {
     const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
     const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
     providers.mockResolvedValue([github('namikmesic/puck'), harness('claude-code', true), harness('codex', true)]);
-    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
     at.mockResolvedValue({
       ...listing(),
       repo: 'namikmesic/puck',
@@ -284,7 +318,7 @@ describe('start flow', () => {
     flow.close();
 
     providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
-    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: null });
     const fresh = listing();
     const [example] = fresh.environments;
     if (!example) throw new Error('fixture');
@@ -307,7 +341,7 @@ describe('start flow', () => {
     const refs = bridge.definitionRefs as ReturnType<typeof vi.fn>;
     const at = bridge.definitionsAt as ReturnType<typeof vi.fn>;
     providers.mockResolvedValue([github('namikmesic/puck'), harness('claude-code', true), harness('codex', true)]);
-    refs.mockResolvedValue({ tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [], branches: [{ name: 'main', sha: 'e'.repeat(40) }], defaultTag: null });
     at.mockResolvedValue({
       ...listing(),
       repo: 'namikmesic/puck',
@@ -331,7 +365,7 @@ describe('start flow', () => {
     flow.close();
 
     providers.mockResolvedValue([github('octo/other'), harness('claude-code', true), harness('codex', true)]);
-    refs.mockResolvedValue({ tags: [{ name: 'v9.0.0', sha: 'a'.repeat(40) }], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: 'v9.0.0' });
+    refs.mockResolvedValue({ defaultBranch: 'main', tags: [{ name: 'v9.0.0', sha: 'a'.repeat(40) }], branches: [{ name: 'main', sha: 'f'.repeat(40) }], defaultTag: 'v9.0.0' });
     const fresh = listing();
     const [example] = fresh.environments;
     if (!example) throw new Error('fixture');
@@ -450,15 +484,15 @@ describe('start flow', () => {
     expect(q('[data-step="3"] .sf-step-why').textContent).toBe('The chosen version could not be read.');
   });
 
-  it('shows only the config-repo sentence when opening with no repo, and Start stays disabled', async () => {
+  it('shows only the Puck home sentence when opening with no home, and Start stays disabled', async () => {
     const { flow, q, startBtn, bridge } = setup();
     (bridge.definitionRefs as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("Error invoking remote method 'defs:refs': Error: Choose a config repo in Settings → Providers → GitHub first."),
+      new Error("Error invoking remote method 'defs:refs': Error: Connect your Puck home in Settings → Providers → GitHub first."),
     );
     await flow.open();
     await flush();
-    expect(q('.sf-error').textContent).toBe('Choose a config repo in Settings → Providers → GitHub first.');
-    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the config repo can be read.');
+    expect(q('.sf-error').textContent).toBe('Connect your Puck home in Settings → Providers → GitHub first.');
+    expect(q('[data-step="2"] .sf-step-why').textContent).toBe('Opens once the Puck home can be read.');
     expect(startBtn().disabled).toBe(true);
   });
 

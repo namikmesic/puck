@@ -35,6 +35,10 @@ export function fakeConfigRepo(opts: {
   const handler = (req: Recorded): Scripted => {
     const path = req.url.replace(API, '');
     let m: RegExpExecArray | null;
+    if (path === '') {
+      const fullName = opts.repo ?? 'acme/config';
+      return { body: { full_name: fullName, private: true, default_branch: 'main', html_url: `https://github.com/${fullName}` } };
+    }
     if (path === '/tags?per_page=100') {
       return { body: Object.entries(tags).map(([name, sha]) => ({ name, commit: { sha } })) };
     }

@@ -8,6 +8,11 @@ export const rules: Required<ModuleOptions>['rules'] = [
     test: /daemon[/\\]puckd\.js$/,
     type: 'asset/source',
   },
+  // `?raw` imports are the file's text (the starter Puck home, src/main/home-starter.ts).
+  {
+    resourceQuery: /raw/,
+    type: 'asset/source',
+  },
   // Add support for native node modules
   {
     // We're specifying native_modules in the test because the asset relocator loader generates a

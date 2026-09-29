@@ -3,10 +3,9 @@
 # run in Puck when it reads the repo.
 name: Validate definitions
 
+# Every branch and tag, whatever the default branch is called.
 on:
   push:
-    branches: [main]
-    tags: ['*']
   pull_request:
 
 jobs:

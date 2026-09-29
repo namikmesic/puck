@@ -311,7 +311,7 @@ export function initTopbar(ctx: TopbarContext) {
         update = info ? { envId, info } : null;
         renderChips();
       } catch {
-        // Not reachable right now (GitHub, the config repo): try again later.
+        // Not reachable right now (GitHub, the Puck home): try again later.
       } finally {
         if (checking === envId) checking = null;
       }

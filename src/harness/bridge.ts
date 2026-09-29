@@ -176,13 +176,18 @@ export interface AuthStart {
 export interface GitHubStatus {
   /** The GitHub login signed in to Puck, null when signed out. */
   login: string | null;
-  /** `owner/name` of the config repo, or null until one is chosen. */
+  /** `owner/name` of the Puck home (the key keeps its old name), or null until one is connected. */
   configRepo: string | null;
   /** Where to install the GitHub App on an account; null unless the client id and slug are both set. */
   installUrl: string | null;
   /** The Puck server GitHub sign-in goes through. */
   server: string;
 }
+
+/** What connecting a Puck home answered: connected, or why the repository is not a home. */
+export type HomeConnect =
+  | { connected: true; providers: ProviderInfo[] }
+  | { connected: false; state: 'empty' | 'not-home'; message: string };
 
 /** An integration provider (GitHub): an external service Puck signs in to. */
 export interface IntegrationProviderInfo {
@@ -364,12 +369,18 @@ export interface PuckBridge {
 
   /** GitHub App installations the signed-in user can reach. */
   githubInstallations(): Promise<GithubInstallation[]>;
-  /** Repositories the GitHub sign-in can reach, for the config-repo picker. */
+  /** Repositories the GitHub sign-in can reach, for the Puck home pickers. */
   githubRepos(): Promise<GithubRepo[]>;
-  /** Choose the config repo (`owner/name`); returns the updated provider list. */
-  githubSetConfigRepo(fullName: string): Promise<ProviderInfo[]>;
+  /** Connect an existing Puck home (`owner/name`); a repository without definitions is refused with the reason. */
+  githubConnectHome(fullName: string): Promise<HomeConnect>;
+  /**
+   * Initialize a new Puck home in the empty repository `home`: one commit of
+   * the starter home with one environment working on `envRepo`, tagged
+   * v1.0.0, then connected. Refuses a repository that has content.
+   */
+  githubInitHome(home: string, envRepo: string): Promise<ProviderInfo[]>;
 
-  /** The config repo's tags and branches, and the default tag to pin. */
+  /** The Puck home's tags and branches, its default branch, and the default tag to pin. */
   definitionRefs(): Promise<DefinitionRefs>;
   /** Every definition at a pin, validated; errors carry file:line and an Open in GitHub link. */
   definitionsAt(pin: PinSpec): Promise<DefinitionListing>;

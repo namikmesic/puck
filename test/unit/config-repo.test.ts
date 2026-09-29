@@ -40,6 +40,7 @@ describe('config repo refs', () => {
     expect(refs.tags.map((t) => t.name)).toEqual(['v1.1.0-rc.1', 'v1.0.0', 'v0.9.0', 'nightly']);
     expect(refs.branches).toEqual([{ name: 'main', sha: MAIN }]);
     expect(refs.defaultTag).toBe('v1.0.0');
+    expect(refs.defaultBranch).toBe('main');
   });
 
   it('resolves tags, branches and commits without letting one shadow another', async () => {
@@ -61,9 +62,9 @@ describe('config repo refs', () => {
     expect(gh.requests.length).toBe(before);
   });
 
-  it('needs a config repo', async () => {
+  it('needs a Puck home', async () => {
     const repo = createConfigRepo({ client: () => setup().client, repo: () => null, cacheDir: () => null });
-    await expect(repo.refs()).rejects.toThrow(/Choose a config repo/);
+    await expect(repo.refs()).rejects.toThrow(/Connect your Puck home/);
   });
 });
 

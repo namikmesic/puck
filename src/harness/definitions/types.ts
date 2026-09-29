@@ -173,8 +173,10 @@ export interface RefInfo {
   sha: string;
 }
 
-/** The config repo's refs for the pin picker. */
+/** The Puck home's refs for the pin picker. */
 export interface DefinitionRefs {
+  /** The home's default branch: "Edit on GitHub" links there. */
+  defaultBranch: string;
   /** Semver tags newest first, then the other tags by name. */
   tags: RefInfo[];
   branches: RefInfo[];

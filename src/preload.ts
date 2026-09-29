@@ -46,7 +46,8 @@ const bridge: PuckBridge = {
   },
   githubInstallations: () => ipcRenderer.invoke(CHANNELS.githubInstallations),
   githubRepos: () => ipcRenderer.invoke(CHANNELS.githubRepos),
-  githubSetConfigRepo: (fullName) => ipcRenderer.invoke(CHANNELS.githubSetConfigRepo, fullName),
+  githubConnectHome: (fullName) => ipcRenderer.invoke(CHANNELS.githubConnectHome, fullName),
+  githubInitHome: (home, envRepo) => ipcRenderer.invoke(CHANNELS.githubInitHome, { home, envRepo }),
   definitionRefs: () => ipcRenderer.invoke(CHANNELS.definitionRefs),
   definitionsAt: (pin) => ipcRenderer.invoke(CHANNELS.definitionsAt, pin),
 

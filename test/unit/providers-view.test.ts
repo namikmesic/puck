@@ -51,7 +51,8 @@ function mount(infos: ProviderInfo[], bridgeOver: Partial<PuckBridge> = {}) {
     providerAuthLogout: vi.fn(async () => undefined),
     githubInstallations: vi.fn(async () => []),
     githubRepos: vi.fn(async () => []),
-    githubSetConfigRepo: vi.fn(async () => infos),
+    githubConnectHome: vi.fn(async () => ({ connected: true, providers: infos })),
+    githubInitHome: vi.fn(async () => infos),
     openExternal: vi.fn(async () => undefined),
     ...bridgeOver,
   } as unknown as PuckBridge;
@@ -132,19 +133,20 @@ describe('GitHub card', () => {
     expect(ghCard.textContent).not.toMatch(/token|code/i);
   });
 
-  it('signed in: installations with Manage, install link, config repo picker and Open repo', async () => {
+  it('signed in: installations with Manage, install link, and the Puck home with Open on GitHub and Change', async () => {
     const githubInstallations = vi.fn(async () => [
       { id: 1, account: 'me', accountType: 'User', manageUrl: 'https://github.com/settings/installations/1', repositorySelection: 'selected' },
     ]);
     const githubRepos = vi.fn(async () => [
       { fullName: 'me/cfg', private: true, defaultBranch: 'main', htmlUrl: 'https://github.com/me/cfg' },
       { fullName: 'me/other', private: false, defaultBranch: 'main', htmlUrl: 'https://github.com/me/other' },
+      { fullName: 'Me/Other', private: false, defaultBranch: 'main', htmlUrl: 'https://github.com/me/other' },
     ]);
-    const githubSetConfigRepo = vi.fn(async () => [gh({ login: 'me', configRepo: 'me/other' }, { connected: true })]);
-    const { els, view, bridge } = mount([gh({ login: 'me', configRepo: 'me/cfg' }, { connected: true })], {
+    const githubConnectHome = vi.fn(async () => ({ connected: true as const, providers: [gh({ login: 'me', configRepo: 'me/other' }, { connected: true })] }));
+    const { els, view, bridge, onProviders } = mount([gh({ login: 'me', configRepo: 'me/cfg' }, { connected: true })], {
       githubInstallations,
       githubRepos,
-      githubSetConfigRepo,
+      githubConnectHome,
     });
     await view.render();
     await settle();
@@ -155,16 +157,95 @@ describe('GitHub card', () => {
     expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/settings/installations/1');
     btn(ghCard, 'Install Puck on an account').click();
     expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/apps/puck/installations/new');
-    btn(ghCard, 'Open repo').click();
+
+    const home = ghCard.querySelector('.pv-home') as HTMLElement;
+    expect(home.querySelector('.pv-subhead')?.textContent).toBe('Puck home');
+    expect(home.querySelector('.home-current')?.textContent).toContain('me/cfg');
+    // Connected: no picker, and no repository fetch until Change.
+    expect(home.querySelector('select')).toBeNull();
+    expect(githubRepos).not.toHaveBeenCalled();
+    btn(home, 'Open on GitHub').click();
     expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/me/cfg');
 
-    const select = ghCard.querySelector('.pv-config-repo select') as HTMLSelectElement;
-    expect([...select.options].map((o) => o.value)).toEqual(['me/cfg', 'me/other']);
-    expect(select.value).toBe('me/cfg');
-    select.value = 'me/other';
-    select.dispatchEvent(new Event('change'));
+    btn(home, 'Change').click();
     await settle();
-    expect(githubSetConfigRepo).toHaveBeenCalledWith('me/other');
+    expect(githubRepos).toHaveBeenCalledTimes(1);
+    const select = home.querySelector('select[aria-label="Puck home"]') as HTMLSelectElement;
+    // Each repository once.
+    expect([...select.options].map((o) => o.value)).toEqual(['', 'me/cfg', 'me/other']);
+    expect(btn(home, 'Keep me/cfg')).toBeTruthy();
+    btn(home, 'Refresh').click();
+    await settle();
+    expect(githubRepos).toHaveBeenCalledTimes(2);
+    const again = home.querySelector('select[aria-label="Puck home"]') as HTMLSelectElement;
+    again.value = 'me/other';
+    again.dispatchEvent(new Event('change'));
+    await settle();
+    expect(githubConnectHome).toHaveBeenCalledWith('me/other');
+    expect(onProviders).toHaveBeenCalled();
+    expect(card(els.integrationCards, 'github').querySelector('.home-current')?.textContent).toContain('me/other');
+  });
+
+  it('with no Puck home yet: Connect and Initialize, and a refused repository offers Initialize', async () => {
+    const githubRepos = vi.fn(async () => [
+      { fullName: 'me/app', private: true, defaultBranch: 'main', htmlUrl: '' },
+      { fullName: 'me/puck-home', private: true, defaultBranch: 'main', htmlUrl: '' },
+    ]);
+    const githubInstallations = vi.fn(async () => [
+      { id: 1, account: 'me', accountType: 'User', manageUrl: 'https://github.com/settings/installations/1', repositorySelection: 'selected' },
+    ]);
+    const githubConnectHome = vi.fn(async () => ({ connected: false as const, state: 'empty' as const, message: 'me/puck-home is empty, so it has no definitions yet. Initialize it as a new Puck home instead.' }));
+    const githubInitHome = vi.fn(async () => [gh({ login: 'me', configRepo: 'me/puck-home' }, { connected: true })]);
+    const { els, view, bridge } = mount([gh({ login: 'me', configRepo: null }, { connected: true })], { githubRepos, githubConnectHome, githubInitHome, githubInstallations });
+    await view.render();
+    await settle();
+    const home = card(els.integrationCards, 'github').querySelector('.pv-home') as HTMLElement;
+    expect(githubRepos).toHaveBeenCalledTimes(1);
+    const connect = home.querySelector('select[aria-label="Puck home"]') as HTMLSelectElement;
+    connect.value = 'me/puck-home';
+    connect.dispatchEvent(new Event('change'));
+    await settle();
+    expect(home.querySelector('.home-refusal')?.textContent).toMatch(/is empty/);
+    btn(home, 'Initialize a new home instead').click();
+    await settle();
+    expect(home.querySelector('.home-initialize')).not.toBeNull();
+    btn(home, 'Create a repository on GitHub').click();
+    expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/new?name=puck-home&visibility=private');
+    btn(home, 'Manage me').click();
+    expect(bridge.openExternal).toHaveBeenCalledWith('https://github.com/settings/installations/1');
+    const target = home.querySelector('select[aria-label="Empty repository for the home"]') as HTMLSelectElement;
+    expect(target.value).toBe('me/puck-home');
+    const run = home.querySelector('.home-init') as HTMLButtonElement;
+    expect(run.disabled).toBe(true);
+    const env = home.querySelector('select[aria-label="Repository your first environment works on"]') as HTMLSelectElement;
+    env.value = 'me/app';
+    env.dispatchEvent(new Event('change'));
+    (home.querySelector('.home-init') as HTMLButtonElement).click();
+    await settle();
+    expect(githubInitHome).toHaveBeenCalledWith('me/puck-home', 'me/app');
+    expect(card(els.integrationCards, 'github').querySelector('.home-current')?.textContent).toContain('me/puck-home');
+  });
+
+  it('shows why Initialize refused a repository', async () => {
+    const githubRepos = vi.fn(async () => [{ fullName: 'me/app', private: true, defaultBranch: 'main', htmlUrl: '' }]);
+    const githubInitHome = vi.fn(async () => {
+      throw new Error("Error invoking remote method 'github:init-home': Error: me/app already has files. Puck initializes only an empty repository, so it never overwrites files.");
+    });
+    const { els, view } = mount([gh({ login: 'me', configRepo: null }, { connected: true })], { githubRepos, githubInitHome });
+    await view.render();
+    await settle();
+    const home = card(els.integrationCards, 'github').querySelector('.pv-home') as HTMLElement;
+    btn(home, 'Initialize a new home').click();
+    await settle();
+    for (const label of ['Empty repository for the home', 'Repository your first environment works on']) {
+      const s = home.querySelector(`select[aria-label="${label}"]`) as HTMLSelectElement;
+      s.value = 'me/app';
+      s.dispatchEvent(new Event('change'));
+    }
+    (home.querySelector('.home-init') as HTMLButtonElement).click();
+    await settle();
+    expect(home.querySelector('.home-error')?.textContent).toBe('me/app already has files. Puck initializes only an empty repository, so it never overwrites files.');
+    expect(home.querySelector('.home-current')).toBeNull();
   });
 
   it('offers no install link while the app slug is unconfigured', async () => {

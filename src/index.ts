@@ -8,6 +8,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import * as configRepo from './main/config-repo';
+import * as home from './main/home';
 import * as providerRegistry from './main/providers';
 import * as github from './main/providers/github';
 import * as instances from './main/instances';
@@ -219,8 +220,14 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   },
   [CHANNELS.githubInstallations]: () => github.installations(),
   [CHANNELS.githubRepos]: () => github.repositories(),
-  [CHANNELS.githubSetConfigRepo]: async (_event, fullName) => {
-    await github.setConfigRepo(repoNameFrom(fullName));
+  [CHANNELS.githubConnectHome]: async (_event, fullName) => {
+    const result = await home.connectHome(repoNameFrom(fullName));
+    if (!result.connected) return { connected: false, state: result.state, message: result.message };
+    return { connected: true, providers: await providerRegistry.providerInfos() };
+  },
+  [CHANNELS.githubInitHome]: async (_event, args) => {
+    const a = objArgs(args);
+    await home.initializeHome(repoNameFrom(a.home), repoNameFrom(a.envRepo));
     return providerRegistry.providerInfos();
   },
 

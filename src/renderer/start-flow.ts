@@ -1,14 +1,16 @@
 /**
  * The start flow (a modal): start an environment from a definition in the
- * config repo on one of the user's runners.
+ * Puck home on one of the user's runners.
  *
- * 1. Definition: the config repo version (tags newest first with the
- *    highest semver tag preselected, branches, or a pasted commit SHA) and
- *    the environment definitions at that version, each with its
- *    description, agents and validation state. Invalid ones list their
- *    errors with file:line and "Open in GitHub", and cannot be picked. A
- *    version without definitions says where they must live and offers the
- *    example config repo and the config repo setting.
+ * 1. Definition: the Puck home version (tags newest first with the highest
+ *    semver tag preselected, branches, or a pasted commit SHA) and the
+ *    environment definitions at that version, each with its description,
+ *    agents and validation state. Invalid ones list their errors with
+ *    file:line and "Open in GitHub", and cannot be picked. Every definition
+ *    and agent offers "Edit on GitHub" on the home's default branch: Git is
+ *    the only way to change a definition. A version without definitions says
+ *    where they must live, links that folder and the example Puck home, and
+ *    offers a different home.
  * 2. Where: the runners, This Mac first, with status, Docker version,
  *    capacity and labels; labels filter the list. Offline runners, full
  *    ones, and ones too small for the definition cannot be picked.
@@ -38,7 +40,7 @@ import type {
 import type { EnvironmentSummary, ListedError } from '../harness/definitions/types';
 import { placement } from '../harness/placement';
 import { el } from './dom';
-import { EXAMPLE_CONFIG_URL } from './first-run';
+import { EXAMPLE_HOME_URL, homeFileUrl, homeFolderUrl } from './home-setup';
 import type { InstanceStore } from './instance-store';
 import { progressLine, statusWord, toneOf } from './instance-progress';
 import { platformText, runnerMeta } from './settings/runners';
@@ -55,7 +57,7 @@ export interface StartFlowContext {
   close(): void;
   /** Settings → Runners (no runner to pick yet). */
   openRunners(): void;
-  /** Settings → Providers (choose a different config repo). */
+  /** Settings → Providers (choose a different Puck home). */
   openProviders(): void;
   /** Poll cadence while a harness sign-in is pending (tests shorten it). */
   pollMs?: number;
@@ -236,25 +238,32 @@ export function initStartFlow(ctx: StartFlowContext) {
     return l.pin.kind === 'commit' ? l.pin.name.slice(0, 7) : l.pin.name;
   }
 
-  /** No environment definitions at this version: where they go, and two ways on. */
+  /** Where "Edit on GitHub" points: the home's default branch (GitHub's HEAD until the refs are in). */
+  function homeBranch(): string {
+    return refs?.defaultBranch ?? 'HEAD';
+  }
+
+  /** No environment definitions at this version: where they go, and how Git adds them. */
   function renderEmpty(box: HTMLElement, l: DefinitionListing): void {
     const empty = el('div', 'sf-empty');
     const head = el('p', 'sf-empty-head');
-    head.append('No environment definitions in ', el('code', '', l.repo), ' at ', el('code', '', versionText(l)), '.');
+    head.append('No environment definitions in the Puck home ', el('code', '', l.repo), ' at ', el('code', '', versionText(l)), '.');
     const where = el('p', 'sf-note');
     where.append(
-      'An environment definition names the image, repositories and agents of an environment; an agent definition names a harness, model and instructions. Puck reads them from ',
+      'An environment definition names the image, repositories and agents of an environment; an agent definition names a harness, model and instructions. Environments are added by committing ',
       el('code', '', 'environments/<name>.yaml'),
-      ' and ',
+      ' to the Puck home. Agents are added by committing ',
       el('code', '', 'agents/<name>.yaml'),
-      ' at the root of the config repo.',
+      ', both at the root of the Puck home. Tag a release once it is in, or pick the branch above.',
     );
     const actions = el('div', 'sf-empty-actions');
-    const example = button('btn-ghost sf-example', 'Open the example config repo');
-    example.addEventListener('click', () => void bridge.openExternal(EXAMPLE_CONFIG_URL));
-    const repo = button('btn-ghost sf-change-repo', 'Choose a different config repo');
+    const folder = button('btn-ghost sf-open-envs', 'Open environments/ on GitHub');
+    folder.addEventListener('click', () => void bridge.openExternal(homeFolderUrl(l.repo, homeBranch(), 'environments')));
+    const example = button('btn-ghost sf-example', 'Open the example Puck home');
+    example.addEventListener('click', () => void bridge.openExternal(EXAMPLE_HOME_URL));
+    const repo = button('btn-ghost sf-change-repo', 'Choose a different Puck home');
     repo.addEventListener('click', () => ctx.openProviders());
-    actions.append(example, repo);
+    actions.append(folder, example, repo);
     empty.append(head, where, actions);
     box.appendChild(empty);
   }
@@ -265,7 +274,7 @@ export function initStartFlow(ctx: StartFlowContext) {
     const field = el('div', 'sf-field');
     const label = el('label', 'sf-label-text', 'Version');
     label.htmlFor = 'sf-ref';
-    field.append(label, el('span', 'sf-hint', 'A branch, tag, or commit of the config repo.'));
+    field.append(label, el('span', 'sf-hint', 'A branch, tag, or commit of the Puck home.'));
     box.appendChild(field);
     const row = el('div', 'sf-row');
     const select = el('select', 'sf-ref');
@@ -312,6 +321,8 @@ export function initStartFlow(ctx: StartFlowContext) {
     if (loading) box.appendChild(el('p', 'sf-note', 'Reading definitions…'));
     if (listingError) box.appendChild(el('p', 'sf-error', listingError));
     if (listing) {
+      const repo = listing.repo;
+      const branch = homeBranch();
       if (!listing.environments.length) {
         renderEmpty(box, listing);
         host.appendChild(box);
@@ -340,8 +351,34 @@ export function initStartFlow(ctx: StartFlowContext) {
         const text = el('div', 'sf-def-text');
         text.appendChild(el('span', 'sf-def-name', e.name));
         if (e.description) text.appendChild(el('span', 'sf-def-desc', e.description));
-        const agents = [e.orchestrator ? `orchestrator ${e.orchestrator}` : '', ...e.agents.filter((a) => a !== e.orchestrator)].filter(Boolean).join(' · ');
-        if (agents) text.appendChild(el('span', 'sf-def-agents', agents));
+        const names = [...(e.orchestrator ? [e.orchestrator] : []), ...e.agents.filter((a) => a !== e.orchestrator)];
+        if (names.length) {
+          const agents = el('span', 'sf-def-agents');
+          names.forEach((name, i) => {
+            if (i) agents.append(' · ');
+            if (name === e.orchestrator) agents.append('orchestrator ');
+            const file = listing?.agents.find((a) => a.name === name)?.path;
+            if (!file) {
+              agents.append(name);
+              return;
+            }
+            const link = button('sf-agent-link', name);
+            link.title = `Edit ${file} on GitHub`;
+            link.addEventListener('click', (ev) => {
+              ev.preventDefault();
+              void bridge.openExternal(homeFileUrl(repo, branch, file));
+            });
+            agents.appendChild(link);
+          });
+          text.appendChild(agents);
+        }
+        const edit = button('btn-ghost sf-def-edit', 'Edit on GitHub');
+        edit.title = `Edit ${e.path} on GitHub`;
+        edit.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          void bridge.openExternal(homeFileUrl(repo, branch, e.path));
+        });
+        text.appendChild(edit);
         const errors = errorsFor(e, listing);
         if (!e.startable) {
           const ul = el('ul', 'sf-def-errors');
@@ -370,11 +407,11 @@ export function initStartFlow(ctx: StartFlowContext) {
 
   /** Why the steps after Definition are still closed. */
   function waitingForDefinition(): string {
-    if (refsError) return 'Opens once the config repo can be read.';
+    if (refsError) return 'Opens once the Puck home can be read.';
     if (listingError) return 'The chosen version could not be read.';
     if (refs && !selectedPin()) return 'Opens once you pick a version.';
     if (!listing) return 'Opens once the definitions are read.';
-    if (!listing.environments.length) return 'Opens once the config repo has an environment definition.';
+    if (!listing.environments.length) return 'Opens once the Puck home has an environment definition.';
     if (!listing.environments.some((x) => x.startable)) return 'Opens once a definition is valid.';
     return 'Opens once you pick an environment definition.';
   }

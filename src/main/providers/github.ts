@@ -1,6 +1,6 @@
 /**
  * The GitHub integration provider: signing in to Puck with GitHub, and the
- * app's own GitHub API access (config repo, installations, repositories).
+ * app's own GitHub API access (the Puck home, installations, repositories).
  *
  *  - Sign-in is the Puck server's GitHub web flow (server/session.ts): the
  *    server holds the GitHub App's client secret and the user's token pair.
@@ -10,8 +10,8 @@
  *    minutes before it expires, in memory only.
  *  - The GitHub App's install link comes from the server too (`GET
  *    /v1/me`), once per session: the app holds no App identity of its own.
- *  - Tokens never leave the main process: Settings sees the login, config
- *    repo and installations only.
+ *  - Tokens never leave the main process: Settings sees the login, Puck
+ *    home and installations only.
  */
 
 import type {
@@ -22,7 +22,6 @@ import type {
 } from '../../harness/bridge';
 import {
   createGitHubClient,
-  GitHubApiError,
   type GhRepo,
   type GitHubClient,
   type GitHubDeps,
@@ -32,7 +31,7 @@ import * as serverApi from '../server/api';
 import { ServerApiError, serverUrl } from '../server/http';
 import { account, cancelSignIn, current, onSessionChange, signInPending, signOut, startSignIn } from '../server/session';
 import { signInStatus } from './oauth';
-import { githubSettings, updateGithubSettings } from './providers-store';
+import { githubSettings } from './providers-store';
 import type { IntegrationProvider } from './types';
 
 /** Ask the server again this long before the cached access token expires. */
@@ -182,20 +181,4 @@ export async function repositories(): Promise<GithubRepo[]> {
   for (const inst of await client.installations()) repos.push(...(await client.installationRepos(inst.id)));
   const byName = new Map(repos.map((r) => [r.full_name.toLowerCase(), r]));
   return [...byName.values()].map(toRepo).sort((a, b) => a.fullName.localeCompare(b.fullName));
-}
-
-/** Choose the config repo; it must be reachable with the current sign-in. */
-export async function setConfigRepo(fullName: string): Promise<void> {
-  const [owner, name] = fullName.split('/');
-  let repo: GhRepo;
-  try {
-    repo = await githubClient().repo(owner, name);
-  } catch (err) {
-    if (err instanceof GitHubApiError && err.status === 404) {
-      throw new Error(`${fullName} is not reachable with this GitHub sign-in. Install the app on its owner, or pick another repo.`);
-    }
-    throw err;
-  }
-  updateGithubSettings({ configRepo: repo.full_name });
-  log.info('github.config-repo', { repo: repo.full_name });
 }

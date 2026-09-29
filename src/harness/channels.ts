@@ -18,7 +18,8 @@ export const CHANNELS = {
   providerAuthLogout: 'provider:auth-logout',
   githubInstallations: 'github:installations',
   githubRepos: 'github:repos',
-  githubSetConfigRepo: 'github:set-config-repo',
+  githubConnectHome: 'github:connect-home',
+  githubInitHome: 'github:init-home',
 
   runners: 'runner:list',
   runnerRegistrationToken: 'runner:registration-token',

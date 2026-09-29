@@ -5,8 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { githubProvider, installations, loadInstallLink, repositories, setConfigRepo, useGitHubDeps } from '../../src/main/providers/github';
-import { githubSettings, updateGithubSettings } from '../../src/main/providers/providers-store';
+import { githubProvider, installations, loadInstallLink, repositories, useGitHubDeps } from '../../src/main/providers/github';
+import { updateGithubSettings } from '../../src/main/providers/providers-store';
 import * as api from '../../src/main/server/api';
 import { useServerDeps } from '../../src/main/server/http';
 import { account, current, signInPending } from '../../src/main/server/session';
@@ -180,20 +180,6 @@ describe('repositories and the config repo', () => {
       { id: 1, account: 'me', accountType: 'User', manageUrl: 'https://github.com/settings/installations/1', repositorySelection: 'selected' },
       { id: 2, account: 'org', accountType: 'Organization', manageUrl: 'https://github.com/organizations/org/settings/installations/2', repositorySelection: 'all' },
     ]);
-  });
-
-  it('stores the canonical name of a reachable config repo and explains an unreachable one', async () => {
-    const gh = github((req): Scripted | undefined => {
-      if (req.url === 'https://api.github.com/repos/Me/Cfg') return { body: repo('me/cfg') };
-      if (req.url === 'https://api.github.com/repos/me/private') return { status: 404, body: { message: 'Not Found' } };
-      return undefined;
-    });
-    await signIn('me');
-    useGitHubDeps(gh.deps);
-    await setConfigRepo('Me/Cfg');
-    expect(githubSettings().configRepo).toBe('me/cfg');
-    await expect(setConfigRepo('me/private')).rejects.toThrow(/not reachable with this GitHub sign-in/);
-    expect(githubSettings().configRepo).toBe('me/cfg');
   });
 
   it('refuses to list without a sign-in', async () => {

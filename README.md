@@ -7,9 +7,10 @@ Environments run in Docker on your runners: this Mac, or any machine you registe
 ## How it works
 
 - **Definitions live in Git.**
-  Agents (`kind: Agent`) and environments (`kind: Environment`) are YAML files in one GitHub config repo.
+  Agents (`kind: Agent`) and environments (`kind: Environment`) are YAML files in your Puck home: one GitHub repository that holds all your definitions.
+  Git is the only way to change them: you commit to the Puck home, and the app never edits a definition; wherever it shows one, **Edit on GitHub** opens its file.
   You start an environment from a definition pinned to a tag, a branch, or a commit, and Puck offers an update when the pin moves.
-  `docs/examples/config-repo/` is a working example, with the JSON Schema that validates it.
+  `docs/examples/config-repo/` is the starter Puck home, with the JSON Schema that validates it.
 - **One orchestrator per environment.**
   Each environment has a single long-lived orchestrator session (Claude Code).
   You tell it what you want; it creates backlog items, assigns them to the environment's agents, answers their questions or passes them to you, and reacts when their work lands.
@@ -37,7 +38,7 @@ Turns stream live: text renders as markdown, tool calls collapse into a per-turn
 
 - A Mac with Apple silicon, running macOS 12 (Monterey) or later.
 - A Puck account through GitHub, and a runner:
-  - a GitHub account, with the Puck GitHub App installed on the accounts that own your repositories, and a config repo holding your definitions;
+  - a GitHub account, with the Puck GitHub App installed on the accounts that own your repositories, and a Puck home holding your definitions (Puck can initialize one for you);
   - a Puck server to sign in to, which for now you run locally (**Run the Puck server locally**);
   - a runner: this Mac with [Docker](https://docs.docker.com/) running (Docker Desktop or colima), or a Linux x64 or ARM64 machine with Docker Engine 24 or newer.
 - A Claude account for the orchestrator; a ChatGPT account too if your agents use Codex.
@@ -81,8 +82,9 @@ Then Puck walks you through six steps, each also reachable later from Settings:
 1. **Sign in with GitHub.**
    The sign-in opens in your default browser and goes through the Puck server; the app keeps only its Puck session.
 2. **Install Puck on an account**: the GitHub App, on the accounts that own the repositories your environments use.
-3. **Pick the config repo.**
-   A repository without definitions points you at the example config repo.
+3. **Connect your Puck home.**
+   Connect a repository that already holds your definitions, or initialize a new home: create an empty repository on GitHub (Puck opens GitHub's page with `puck-home` and private visibility filled in), pick it and the repository your first environment works on, and Puck commits the starter home into it as one commit tagged `v1.0.0`.
+   Puck refuses to connect a repository without `agents/` or `environments/` at its root, and to initialize one that already has files.
 4. **Connect Claude Code.**
    The orchestrator needs it; connect ChatGPT as well in **Settings → Providers** if your agents use Codex.
 5. **Set up a runner**: **This Mac** in one click, or **Add runner** for another machine.
@@ -116,12 +118,12 @@ Everything the app stores on your Mac is in one folder: `~/Library/Application S
 
 | Path | Holds |
 | --- | --- |
-| `puck-providers.json` | Provider settings: the GitHub config repo |
+| `puck-providers.json` | Provider settings: the Puck home (stored as `configRepo`) |
 | `puck-session.bin` | Your Puck session (signed in with GitHub), encrypted through the macOS Keychain |
 | `puck-instances.json` | Per environment: the last event seen (for replay), its definition pin, and the environment on screen |
 | `puck-runners.json` | Runner key fingerprints first seen, and the This Mac runner's location |
 | `r/<eight hex digits>/` | The This Mac runner for one Puck account: its release, registration, key, local socket and logs |
-| `puck-defs-cache/<commit>.json` | Cached config-repo files for one commit; safe to delete |
+| `puck-defs-cache/<commit>.json` | Cached Puck home files for one commit; safe to delete |
 | `claude-oauth.bin`, `codex-oauth.bin` | Harness tokens, encrypted through the macOS Keychain |
 | `logs/puck.log`, `logs/puck.log.1`, `logs/puck.log.2` | The diagnostic log: three files of at most 1 MiB each |
 | `Cache`, `Local Storage`, and similar folders | Electron's own browser data, including composer drafts |
