@@ -180,18 +180,36 @@ function fakeGitHub() {
       return [200, { jobs: page.body }, page.link ? { link: page.link } : undefined];
     }
     if ((m = /^\/actions\/runs\/(\d+)\/rerun-failed-jobs$/.exec(p)) && method === 'POST') {
-      // Like GitHub: each failed job gets a new job id and a new check run
-      // (queued, not started yet), and the run is queued again.
+      // Like GitHub: each failed job, and each skipped job that needs one,
+      // gets a new job id and a new check run (queued, not started yet),
+      // and the run is queued again. The previous check runs stay listed.
       const id = Number(m[1]);
       if (gh.rerunDown.has(id)) return [500, { message: 'Server Error' }];
       const found = [...gh.runs.values()].flat().find((r) => r.id === id);
       if (!found) return [404, { message: 'Not Found' }];
       gh.reruns.push(id);
       const sha = String(found.head_sha);
+      const current = gh.jobs.get(id) ?? [];
+      const restart = new Set<string>();
+      for (const j of current) {
+        if (['failure', 'cancelled', 'timed_out'].includes(String(j.conclusion))) restart.add(String(j.name));
+      }
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const j of current) {
+          const jobName = String(j.name);
+          if (restart.has(jobName) || String(j.conclusion) !== 'skipped') continue;
+          const needs = Array.isArray(j.needs) ? j.needs.map(String) : [];
+          if (!needs.some((n) => restart.has(n))) continue;
+          restart.add(jobName);
+          grew = true;
+        }
+      }
       gh.jobs.set(
         id,
-        (gh.jobs.get(id) ?? []).map((j) => {
-          if (!['failure', 'cancelled', 'timed_out'].includes(String(j.conclusion))) return j;
+        current.map((j) => {
+          if (!restart.has(String(j.name))) return j;
           const fresh = gh.nextId++;
           const check = { id: fresh, name: j.name, status: 'queued', conclusion: null, html_url: `https://github.com/octo/app/runs/${fresh}` };
           gh.checkRuns.set(sha, [...(gh.checkRuns.get(sha) ?? []), check]);
@@ -1633,14 +1651,14 @@ describe('CI on the published head', () => {
 
 describe('ci_rerun', () => {
   const SHA2 = 'f'.repeat(40);
-  const check = (id: number, name: string, conclusion: string | null, status = 'completed') => ({
+  const check = (id: number, name: string, conclusion: string | null, status = 'completed', startedAt = iso(T0)) => ({
     id,
     name,
     status,
     conclusion,
     html_url: `https://github.com/octo/app/runs/${id}`,
     output: { title: `${name} ${conclusion ?? status}` },
-    started_at: iso(T0),
+    started_at: startedAt,
   });
   const job = (id: number, name: string, conclusion: string | null, status = 'completed') => ({ id, name, status, conclusion, html_url: null });
   const findRun = (id: number): Json => [...fake.gh.runs.values()].flat().find((r) => r.id === id) as Json;
@@ -1651,6 +1669,17 @@ describe('ci_rerun', () => {
     fake.gh.jobs.set(50, [job(60, 'test', 'failure'), job(61, 'lint', 'success')]);
     fake.gh.checkRuns.set(sha, [check(60, 'test', 'failure'), check(61, 'lint', 'success')]);
     fake.gh.logs.set(60, 'npm test\nFAIL old.test.js');
+  }
+
+  /** One queued job of the re-run finishes; the others stay as they are. */
+  function completeQueued(runId: number, name: string, conclusion: string): void {
+    const run = findRun(runId);
+    const j = (fake.gh.jobs.get(runId) ?? []).find((x) => x.name === name && x.status === 'queued');
+    if (!j) throw new Error(`no queued job ${name}`);
+    Object.assign(j, { status: 'completed', conclusion });
+    const c = (fake.gh.checkRuns.get(String(run.head_sha)) ?? []).find((x) => x.id === j.id);
+    if (!c) throw new Error(`no check run for ${name}`);
+    Object.assign(c, { status: 'completed', conclusion, started_at: iso(clock), output: { title: `${name} ${conclusion}` } });
   }
 
   /** The re-run's jobs of run `runId` start and finish with `conclusion`. */
@@ -1694,12 +1723,52 @@ describe('ci_rerun', () => {
   }
 
   it.each([
-    { name: 'passes', conclusion: 'success', state: 'success', notice: 'W-1 PR #7: all 2 checks passed.' },
-    { name: 'fails again the same way', conclusion: 'failure', state: 'failure', notice: 'W-1 PR #7: 1 check failed (test). Read them with ci_read.' },
+    {
+      name: 'passes',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 2 checks passed.',
+      jobs: ['test'],
+      setup: () => undefined,
+      beforePending: () => undefined,
+    },
+    {
+      name: 'fails again the same way',
+      conclusion: 'failure',
+      state: 'failure',
+      notice: 'W-1 PR #7: 1 check failed (test). Read them with ci_read.',
+      jobs: ['test'],
+      setup: () => undefined,
+      beforePending: () => undefined,
+    },
+    {
+      name: 'passes beside an older passing run of the same check',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 2 checks passed.',
+      jobs: ['test'],
+      setup: () => {
+        fake.gh.checkRuns.set(SHA, [check(40, 'test', 'success', 'completed', iso(T0 - 60_000)), ...(fake.gh.checkRuns.get(SHA) ?? [])]);
+      },
+      beforePending: () => undefined,
+    },
+    {
+      name: 'passes after a skipped job that depends on the failed job',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test', 'deploy'],
+      setup: () => {
+        fake.gh.jobs.set(50, [job(60, 'test', 'failure'), job(61, 'lint', 'success'), { ...job(62, 'deploy', 'skipped'), needs: ['test'] }]);
+        fake.gh.checkRuns.set(SHA, [check(60, 'test', 'failure'), check(61, 'lint', 'success'), check(62, 'deploy', 'skipped')]);
+      },
+      // The failed job's new run has passed; the dependent's new run has not started.
+      beforePending: () => completeQueued(50, 'test', 'success'),
+    },
   ])('reports the re-run result when it $name, never the result it replaced', async (c) => {
-    const item = await reported();
+    const item = await reported(c.setup);
     const res = await sync.ciRerun(current(item));
-    expect(res).toMatchObject({ item: 'W-1', sha: SHA, rerun: [{ run: 'CI', jobs: ['test'] }] });
+    expect(res).toMatchObject({ item: 'W-1', sha: SHA, rerun: [{ run: 'CI', jobs: c.jobs }] });
     expect(fake.gh.reruns).toEqual([50]);
     // The failed jobs were read before GitHub was asked to re-run them.
     const jobsRead = fake.gh.requests.findIndex((r) => r.method === 'GET' && r.path.startsWith('/repos/octo/app/actions/runs/50/jobs'));
@@ -1707,12 +1776,15 @@ describe('ci_rerun', () => {
     expect(jobsRead).toBeLessThan(fake.gh.requests.indexOf(rerunPosts()[0]));
     expect(current(item).pr?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
 
-    // The old failed check run is still listed, and its replacement has not started.
+    // The checks the re-run replaced are still listed, and their replacements have not all started.
+    c.beforePending();
     await pollAll();
     await pollAll();
     expect(texts()).toHaveLength(1);
     expect(current(item).pr?.checks?.state).toBe('pending');
-    expect(sync.ciRead(current(item))).toMatchObject({ state: 'pending', rerun: ['test'] });
+    const read = sync.ciRead(current(item));
+    expect(read).toMatchObject({ state: 'pending' });
+    expect(read).not.toHaveProperty('rerun');
 
     finishRerun(50, c.conclusion, 'npm test\nFAIL new.test.js');
     await pollAll();
@@ -1848,6 +1920,19 @@ describe('ci_rerun', () => {
     if (c.name === 'the environment does not allow it') expect(fake.gh.requests.length).toBe(before);
     await pollAll();
     expect(texts()).toHaveLength(1);
+  });
+
+  it('re-runs every failed workflow run on the head', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => 50 + i);
+    const item = await reported(() => {
+      fake.gh.runs.set(
+        SHA,
+        ids.map((id, i) => ({ id, name: `CI-${i}`, status: 'completed', conclusion: 'failure', head_sha: SHA })),
+      );
+      for (const [i, id] of ids.entries()) fake.gh.jobs.set(id, [job(600 + i, `job-${i}`, 'failure')]);
+    });
+    await sync.ciRerun(current(item));
+    expect(fake.gh.reruns).toEqual(ids);
   });
 
   it('refuses a second re-run while the first is starting', async () => {

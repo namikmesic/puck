@@ -62,7 +62,7 @@ export interface CiWatch {
    * They no longer count, so a re-run never reports the result it replaced.
    */
   superseded: number[];
-  /** Check names a re-run replaced: pending until a check run not in `superseded` carries the name. */
+  /** Check names a re-run replaced: pending until a kept run of that name is strictly newer than every superseded run of that name. */
   awaiting: string[];
 }
 
