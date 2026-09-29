@@ -74,6 +74,7 @@ export function initWorkPane(ctx: WorkPaneContext) {
   const { els, store } = ctx;
   const now = ctx.now ?? Date.now;
   let openMenu: HTMLElement | null = null;
+  const builtRows = { needs: '', running: '', review: '' };
 
   function closeMenu(): boolean {
     if (!openMenu) return false;
@@ -172,15 +173,48 @@ export function initWorkPane(ctx: WorkPaneContext) {
     return li;
   }
 
+  function rowsKey(items: WorkItem[], kind: 'needs' | 'running' | 'review'): string {
+    return JSON.stringify(
+      items.map((item) => ({
+        id: item.id,
+        n: item.number,
+        title: item.title,
+        status: item.status,
+        agent: item.agent,
+        sessionId: item.sessionId,
+        actions: actionsFor(item),
+        ask: kind === 'needs' ? (item.pendingAsk?.routedTo ?? null) : undefined,
+        since: kind === 'running' ? startedAt(item) : undefined,
+        diff: kind === 'review' ? (item.result?.diffStat ?? null) : undefined,
+        pr: kind === 'review' ? (item.pr ?? null) : undefined,
+        at: kind === 'review' ? item.updatedAt : undefined,
+      })),
+    );
+  }
+
+  function patchTools(list: HTMLElement, items: WorkItem[]): void {
+    for (const item of items) {
+      const tool = list.querySelector(`[data-item="${CSS.escape(item.id)}"] .wp-tool`);
+      if (!tool) continue;
+      const text = (item.sessionId ? store.lastTool(item.sessionId) : null) ?? `${item.agent ?? ''} working…`.trim();
+      tool.textContent = text;
+    }
+  }
+
   function fill(list: HTMLElement, items: WorkItem[], kind: 'needs' | 'running' | 'review'): void {
-    list.textContent = '';
-    for (const item of items) list.appendChild(row(item, kind));
     const section = list.closest<HTMLElement>('[data-section]');
     section?.classList.toggle('hidden', items.length === 0);
+    const key = rowsKey(items, kind);
+    if (builtRows[kind] === key) {
+      if (kind === 'running') patchTools(list, items);
+      return;
+    }
+    builtRows[kind] = key;
+    list.textContent = '';
+    for (const item of items) list.appendChild(row(item, kind));
   }
 
   function render(): void {
-    closeMenu();
     const items = store.items();
     const needs = items.filter((i) => i.status === 'needs-input');
     const running = items.filter((i) => i.status === 'running').sort((a, b) => startedAt(a) - startedAt(b));
@@ -188,6 +222,7 @@ export function initWorkPane(ctx: WorkPaneContext) {
     fill(els.needs, needs, 'needs');
     fill(els.running, running, 'running');
     fill(els.review, review, 'review');
+    if (openMenu && !openMenu.isConnected) openMenu = null;
     const ready = store.hasSnapshot();
     els.empty.classList.toggle('hidden', !ready || needs.length + running.length + review.length > 0);
     const cap = store.capacity();

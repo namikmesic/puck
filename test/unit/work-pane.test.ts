@@ -119,4 +119,22 @@ describe('work pane', () => {
     expect(daemon).toHaveBeenCalledWith('item.publish', { itemId: 'itm_2' });
     expect(openItem).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps an open row menu across a render that only advances the running tool line', async () => {
+    const { store, pane, byId, daemon } = setup([item({ number: 1, status: 'running', sessionId: 'ses_1', agent: 'implementer' })]);
+    const running = byId('running').querySelector('.wp-row') as HTMLElement;
+    (running.querySelector('.wp-more') as HTMLButtonElement).click();
+    const cancel = running.querySelector('[data-action="cancel"]') as HTMLButtonElement;
+    cancel.click();
+    expect(cancel.textContent).toBe('Confirm?');
+    store.applyEvent(2, { kind: 'turn.event', sessionId: 'ses_1', turnId: 't', event: { kind: 'tool-start', toolId: 'a', tool: 'Bash', summary: 'npm test', input: '' } }, ENV);
+    pane.render();
+    const still = byId('running').querySelector('[data-action="cancel"]') as HTMLButtonElement;
+    expect(still).toBe(cancel);
+    expect(still.textContent).toBe('Confirm?');
+    expect(byId('running').querySelector('.wp-tool')?.textContent).toBe('Bash · npm test');
+    still.click();
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.cancel', { itemId: 'itm_1' });
+  });
 });

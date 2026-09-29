@@ -149,6 +149,21 @@ describe('top bar', () => {
     expect(bridge.instanceStop).toHaveBeenCalledWith(ENV);
   });
 
+  it('keeps an armed Delete when a render does not change the environment list', async () => {
+    const { tb, byId, bridge } = setup([instance(), instance({ id: ENV2, name: 'docs', current: false, attach: null })]);
+    (byId('env') as HTMLButtonElement).click();
+    const del = byId('menu').querySelector('[data-op="delete"]') as HTMLButtonElement;
+    del.click();
+    expect(del.textContent).toBe('Confirm?');
+    tb.render();
+    const still = byId('menu').querySelector('[data-op="delete"]') as HTMLButtonElement;
+    expect(still).toBe(del);
+    expect(still.textContent).toBe('Confirm?');
+    still.click();
+    await flush();
+    expect(bridge.instanceDelete).toHaveBeenCalledWith(ENV);
+  });
+
   it('offers the operations an environment allows', () => {
     expect(instanceOps(instance())).toEqual(['stop', 'start', 'rebuild', 'delete']);
     expect(instanceOps(instance({ status: 'lost' }))).toEqual(['forget']);

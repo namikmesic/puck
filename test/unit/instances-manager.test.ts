@@ -13,8 +13,23 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonEventPayload } from '../../src/harness/bridge';
+import { resolveEnvironment } from '../../src/harness/definitions/resolve';
+import { validateSnapshot } from '../../src/harness/definitions/validate';
 import type { RunnerInfo } from '../../src/harness/runner-protocol';
 import { normalizeInstances } from '../../src/main/instances/store';
+import { exampleFiles, snapshotOf } from './definitions-fixtures';
+
+const resolveOverride = vi.hoisted(() => ({
+  fn: null as null | ((spec: { kind: string; name: string }, name: string) => Promise<unknown>),
+}));
+
+vi.mock('../../src/main/config-repo', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/main/config-repo')>();
+  return {
+    ...actual,
+    resolveDefinition: (spec: { kind: string; name: string }, name: string) => (resolveOverride.fn ? resolveOverride.fn(spec, name) : actual.resolveDefinition(spec, name)),
+  };
+});
 import { BundleCache } from '../../src/puck-runner/bundles';
 import { Control } from '../../src/puck-runner/control';
 import type { DockerResult } from '../../src/puck-runner/docker/client';
@@ -30,6 +45,7 @@ const FAKE_DAEMON = path.resolve(__dirname, '../fixtures/fake-daemon.mjs');
 let dir: string;
 let listener: LocalListener | null = null;
 afterEach(async () => {
+  resolveOverride.fn = null;
   await listener?.stop();
   listener = null;
   vi.resetModules();
@@ -144,6 +160,44 @@ describe('environment manager', { timeout: 30_000 }, () => {
     expect(Math.min(...seqs)).toBe(lastSeen + 1);
     expect(reopened.events.find((e) => 'ev' in e && e.ev.kind === 'turn.user')).toMatchObject({ ev: { entry: { text: 'while away' } } });
     reopened.instances.shutdown();
+  });
+
+  it('resyncs from a snapshot after a rebuild so the repository list can refresh', async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-mgr-'));
+    const socket = path.join(dir, 's.sock');
+    await thisMacRunner(socket);
+    const pin = { kind: 'tag' as const, name: 'v1.0.0', sha: 'a'.repeat(40) };
+    const snap = snapshotOf(exampleFiles(), pin.sha);
+    resolveOverride.fn = async () => resolveEnvironment(validateSnapshot(snap), snap, 'example', { repo: 'acme/config', pin });
+
+    const app = await launch();
+    app.store.setLocalRunner({ runnerId: RUNNER, dir, socket });
+    app.runners.onPush({
+      type: 'instance.upsert',
+      instance: { id: ENV, runnerId: RUNNER, definition: 'example', status: 'active', createdAt: 1, updatedAt: 1, repos: [{ owner: 'octo', name: 'app', revoked: false }] },
+    });
+    await app.instances.open(ENV);
+    await until('attached', () => app.instances.list()[0]?.attach === 'attached');
+    await app.instances.daemon(ENV, 'chat.send', { text: 'first' });
+    await until('the answer', () => app.events.some((e) => 'ev' in e && e.ev.kind === 'turn.end'));
+
+    const repos = [
+      { github: 'octo/app', dir: 'app' },
+      { github: 'octo/api', dir: 'api' },
+    ];
+    const logPath = path.join(dir, 'daemon.json');
+    const log = JSON.parse(fs.readFileSync(logPath, 'utf8')) as { repos?: unknown };
+    log.repos = repos;
+    fs.writeFileSync(logPath, JSON.stringify(log));
+    const cursors = await import('../../src/main/instances/store');
+    cursors.updateCursor(ENV, { pin });
+
+    const before = app.events.length;
+    await app.instances.rebuild(ENV);
+    await until('snapshot after rebuild', () => app.events.slice(before).some((e) => 'snapshot' in e));
+    const pushed = app.events.slice(before).find((e) => 'snapshot' in e);
+    expect(pushed && 'snapshot' in pushed ? pushed.snapshot.repos : null).toEqual(repos);
+    app.instances.shutdown();
   });
 
   it('records a signed-out harness before the live delete and clears it only after success', async () => {

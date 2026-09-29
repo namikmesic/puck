@@ -61,6 +61,7 @@ export function initTopbar(ctx: TopbarContext) {
   let update: { envId: string; info: InstanceUpdate } | null = null;
   let checking: string | null = null;
   let menuOpen = false;
+  let builtMenu = '';
 
   function current() {
     const id = store.envId();
@@ -70,25 +71,34 @@ export function initTopbar(ctx: TopbarContext) {
   function closeMenu(): boolean {
     if (!menuOpen) return false;
     menuOpen = false;
+    builtMenu = '';
     els.menu.classList.add('hidden');
     els.env.setAttribute('aria-expanded', 'false');
     return true;
   }
 
-  function openMenu(): void {
+  function paintMenu(focusFirst: boolean): void {
     menuOpen = true;
-    renderInstanceMenu(els.menu, {
-      bridge,
-      instances: store.instances(),
-      currentId: store.envId(),
-      open: ctx.open,
-      start: ctx.startFlow,
-      say: ctx.say,
-      close: closeMenu,
-    });
+    const key = JSON.stringify(store.instances());
+    if (builtMenu !== key) {
+      builtMenu = key;
+      renderInstanceMenu(els.menu, {
+        bridge,
+        instances: store.instances(),
+        currentId: store.envId(),
+        open: ctx.open,
+        start: ctx.startFlow,
+        say: ctx.say,
+        close: closeMenu,
+      });
+    }
     els.menu.classList.remove('hidden');
     els.env.setAttribute('aria-expanded', 'true');
-    els.menu.querySelector<HTMLButtonElement>('button')?.focus();
+    if (focusFirst) els.menu.querySelector<HTMLButtonElement>('button')?.focus();
+  }
+
+  function openMenu(): void {
+    paintMenu(true);
   }
 
   els.env.addEventListener('click', (ev) => {
@@ -282,7 +292,7 @@ export function initTopbar(ctx: TopbarContext) {
     renderStatus();
     renderChips();
     renderBanner();
-    if (menuOpen) openMenu();
+    if (menuOpen) paintMenu(false);
   }
 
   return {

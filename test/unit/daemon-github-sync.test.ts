@@ -543,6 +543,24 @@ describe('manual import', () => {
     expect(again.source?.number).toBe(5);
   });
 
+  it('links a search hit only to an open item, the same one import would reject', async () => {
+    const open = linkedItem(3, 'review');
+    const older = linkedItem(4, 'review');
+    clock += 1;
+    linkedItem(4, 'done');
+    linkedItem(5, 'done');
+    linkedItem(6, 'cancelled');
+    fake.gh.searchTotal = 6;
+    const found = await sync.searchIssues('bug');
+    const hit = (n: number) => found.issues.find((h) => h.number === n);
+    expect(hit(3)?.item).toBe(`W-${open.number} (review)`);
+    expect(hit(4)?.item).toBe(`W-${older.number} (review)`);
+    expect(hit(5)?.item).toBeNull();
+    expect(hit(6)?.item).toBeNull();
+    await expect(sync.importIssue('octo/app', 4, {}, 'user')).rejects.toThrow(`Issue octo/app#4 is already W-${older.number} (review).`);
+    await expect(sync.importIssue('octo/app', 5, {}, 'user')).resolves.toMatchObject({ source: { number: 5 } });
+  });
+
   it('returns the first 1000 search hits when more match', async () => {
     fake.gh.searchTotal = 1500;
     const found = await sync.searchIssues('bug');

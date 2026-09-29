@@ -576,7 +576,7 @@ export class GithubSync {
     const repo = def.repos.find((r) => r.github.toLowerCase() === key || r.dir === repoRef);
     if (!repo) throw new WorkError('invalid-args', `${repoRef} is not a repository of this environment (${def.repos.map((r) => r.github).join(', ')}).`);
     const ref = issueRef(repo.github, number);
-    const open = this.deps.backlog.byIssue(repo.github, number).find((i) => !CLOSED.has(i.status));
+    const open = this.openIssueItem(repo.github, number);
     if (open) throw new WorkError('invalid-state', `Issue ${ref} is already ${itemLabel(open)} (${open.status}).`);
     let issue: GhIssue;
     try {
@@ -617,7 +617,7 @@ export class GithubSync {
       }
       for (const issue of found) {
         const repo = /\/repos\/([^/]+\/[^/]+)$/.exec((issue as { repository_url?: string }).repository_url ?? '')?.[1] ?? group[0].github;
-        const linked = this.deps.backlog.byIssue(repo, issue.number).pop();
+        const linked = this.openIssueItem(repo, issue.number);
         out.push({
           repo,
           number: issue.number,
@@ -630,6 +630,10 @@ export class GithubSync {
       }
     }
     return { issues: out };
+  }
+
+  private openIssueItem(repo: string, number: number): ItemRecord | undefined {
+    return this.deps.backlog.byIssue(repo, number).find((i) => !CLOSED.has(i.status));
   }
 
   /** The worker prompt's issue section, fetched fresh at first dispatch. */

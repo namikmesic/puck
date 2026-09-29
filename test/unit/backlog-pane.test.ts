@@ -85,6 +85,17 @@ describe('backlog pane', () => {
     expect(daemon).toHaveBeenCalledTimes(1); // already first
   });
 
+  it('keeps row focus and an in-progress drag when a render is not a backlog change', () => {
+    const { store, rowOf } = setup([item({ number: 1 }), item({ number: 2 })]);
+    const row = rowOf('itm_1');
+    row.focus();
+    row.classList.add('dragging');
+    store.applyEvent(2, { kind: 'turn.event', sessionId: 'ses_x', turnId: 't', event: { kind: 'text-delta', text: 'hi' } }, ENV);
+    expect(rowOf('itm_1')).toBe(row);
+    expect(document.activeElement).toBe(row);
+    expect(row.classList.contains('dragging')).toBe(true);
+  });
+
   it('drops a dragged row before or after the target', () => {
     const { ids, rowOf, daemon } = setup([item({ number: 1 }), item({ number: 2 }), item({ number: 3 })]);
     rowOf('itm_1').dispatchEvent(new Event('dragstart'));

@@ -417,7 +417,7 @@ function rebuildFrom(envId: string, given?: ResolvedEnvironment): Promise<void> 
         },
       },
     );
-    store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def) });
+    store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def), lastSeq: null });
     if (store.currentId() === envId) attach(envId);
   });
 }

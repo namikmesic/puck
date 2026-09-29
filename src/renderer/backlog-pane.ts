@@ -88,6 +88,7 @@ export function initBacklogPane(ctx: BacklogContext) {
   let creating: HTMLInputElement | null = null;
   let importPanel: HTMLElement | null = null;
   let focusAfterRender: string | null = null;
+  let builtRows = '';
 
   function visible(): WorkItem[] {
     return store.items().filter((i) => PANE_STATUSES.has(i.status) || (showFinished && FINISHED.has(i.status)));
@@ -185,25 +186,38 @@ export function initBacklogPane(ctx: BacklogContext) {
     return box.height > 0 && ev.clientY > box.top + box.height / 2;
   }
 
+  function rowsKey(rows: WorkItem[], all: WorkItem[]): string {
+    return JSON.stringify(rows.map((item) => [item.id, item.number, item.title, item.status, item.agent, item.createdBy, item.source?.repo, item.source?.number, item.lastError, statusLine(item, all)]));
+  }
+
   function render(): void {
     const all = store.items();
     const rows = visible();
-    els.list.textContent = '';
     els.finished.textContent = showFinished ? 'Hide finished' : 'Show finished';
     els.finished.setAttribute('aria-pressed', String(showFinished));
     const ready = store.hasSnapshot();
     els.add.disabled = !ready;
     els.importBtn.disabled = !ready;
-    if (!ready) return;
+    if (!ready) {
+      els.list.textContent = '';
+      builtRows = '';
+      return;
+    }
+    const key = rowsKey(rows, all);
+    const active = document.activeElement;
+    const focusedId = active instanceof HTMLElement && els.list.contains(active) ? (active.dataset.item ?? null) : null;
+    if (builtRows === key && !focusAfterRender) return;
+    builtRows = key;
+    els.list.textContent = '';
     if (!rows.length) {
       els.list.appendChild(el('li', 'bl-empty', 'Nothing in the backlog. Add an item, or ask the orchestrator.'));
+      focusAfterRender = null;
       return;
     }
     for (const item of rows) els.list.appendChild(row(item, all));
-    if (focusAfterRender) {
-      els.list.querySelector<HTMLElement>(`[data-item="${CSS.escape(focusAfterRender)}"]`)?.focus();
-      focusAfterRender = null;
-    }
+    const restore = focusAfterRender ?? focusedId;
+    focusAfterRender = null;
+    if (restore) els.list.querySelector<HTMLElement>(`[data-item="${CSS.escape(restore)}"]`)?.focus();
   }
 
   function closeTray(): void {

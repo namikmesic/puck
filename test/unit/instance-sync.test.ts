@@ -76,6 +76,18 @@ describe('instance sync', () => {
     expect(store.envId()).toBe(ENV2);
   });
 
+  it('replaces repositories when a later snapshot arrives', async () => {
+    const { sync, store, daemonSnapshot } = setup(async () => snap({ head: 1, repos: [{ github: 'octo/web', dir: 'web' }] }));
+    store.setInstances([instance()]);
+    await sync.open(ENV);
+    expect(store.state()?.repos).toEqual([{ github: 'octo/web', dir: 'web' }]);
+    daemonSnapshot(snap({ head: 4, repos: [{ github: 'octo/web', dir: 'web' }, { github: 'octo/api', dir: 'api' }] }));
+    expect(store.state()?.repos).toEqual([
+      { github: 'octo/web', dir: 'web' },
+      { github: 'octo/api', dir: 'api' },
+    ]);
+  });
+
   it('applies pushed events and snapshots for the environment on screen only', async () => {
     const { sync, store, daemonEvent, daemonSnapshot } = setup(async () => snap({ head: 1 }));
     store.setInstances([instance()]);

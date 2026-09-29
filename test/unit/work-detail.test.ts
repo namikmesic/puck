@@ -165,6 +165,31 @@ describe('work detail', () => {
     expect(back).toHaveBeenCalled();
   });
 
+  it('keeps an armed cancel or delete across a render while a turn streams', async () => {
+    const running = item({ number: 1, status: 'running', sessionId: WORKER });
+    const failed = item({ number: 2, status: 'failed' });
+    const { wd, action, daemon, store } = setup([running, failed]);
+    wd.show(running.id, 'conversation');
+    action('cancel').click();
+    expect(action('cancel').textContent).toBe('Confirm?');
+    store.applyEvent(2, { kind: 'turn.event', sessionId: WORKER, turnId: 't', event: { kind: 'text-delta', text: 'hi' } }, ENV);
+    wd.render();
+    expect(action('cancel').textContent).toBe('Confirm?');
+    expect(action('cancel').classList.contains('armed')).toBe(true);
+    action('cancel').click();
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.cancel', { itemId: running.id });
+
+    wd.show(failed.id, 'conversation');
+    action('delete').click();
+    expect(action('delete').textContent).toBe('Confirm?');
+    wd.render();
+    expect(action('delete').textContent).toBe('Confirm?');
+    action('delete').click();
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.delete', { itemId: failed.id });
+  });
+
   it('mounts the worker thread in Conversation, or says it has not started', async () => {
     const started = item({ number: 1, status: 'running', sessionId: WORKER });
     const { wd, byId, history, composer } = setup([started, item({ number: 2 })]);

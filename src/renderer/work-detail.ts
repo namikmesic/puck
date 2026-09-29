@@ -127,7 +127,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   let pull: { itemId: string; key: string; view: PullView | null; error: string | null; loading: boolean } | null = null;
   let answering = false;
   /** What each part was last built from: an unrelated event does not rebuild it (and lose typing or a selection). */
-  const built = { banner: '', changes: '', details: '' };
+  const built = { actions: '', banner: '', changes: '', details: '' };
 
   els.back.addEventListener('click', () => ctx.back());
   for (const b of els.tabs.querySelectorAll<HTMLButtonElement>('[data-tab]')) {
@@ -195,6 +195,9 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       pr.addEventListener('click', () => ctx.openExternal(url));
       els.meta.appendChild(pr);
     }
+    const actionsKey = JSON.stringify([it.id, it.status, it.sessionId]);
+    if (built.actions === actionsKey) return;
+    built.actions = actionsKey;
     els.actions.textContent = '';
     for (const action of ITEM_ACTIONS[it.status]) {
       const b = button(action === 'accept' || action === 'publish' ? 'btn-primary' : action === 'delete' || action === 'cancel' ? 'btn-ghost danger' : 'btn-ghost', ACTION_LABEL[action]);
@@ -549,6 +552,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     if (!it) {
       els.crumbTitle.textContent = itemId ? 'This item was deleted' : '';
       els.actions.textContent = '';
+      built.actions = '';
       els.meta.textContent = '';
       els.banner.classList.add('hidden');
       return;
@@ -573,7 +577,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       if (next !== itemId) {
         answering = false;
         els.details.dataset.dirty = '0';
-        built.banner = built.changes = built.details = '';
+        built.actions = built.banner = built.changes = built.details = '';
       }
       itemId = next;
       tab = nextTab;
