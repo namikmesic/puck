@@ -577,8 +577,10 @@ body.puck .hidden {
 }
 
 .tb-where {
+  flex: none;
   font-weight: 600;
   color: var(--charcoal);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 140px;

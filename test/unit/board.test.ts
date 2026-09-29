@@ -45,6 +45,7 @@ function setup(items: WorkItem[], opts: Options = {}) {
   });
   const openItem = vi.fn();
   const toChat = vi.fn();
+  const openExternal = vi.fn();
   const say = vi.fn();
   const prefs = new Map<string, string>();
   let selected: string | null = null;
@@ -55,6 +56,7 @@ function setup(items: WorkItem[], opts: Options = {}) {
     openItem,
     selected: () => selected,
     toChat,
+    openExternal,
     say,
     resync,
     prefs: { getItem: (k) => prefs.get(k) ?? null, setItem: (k, v) => void prefs.set(k, v) },
@@ -69,7 +71,7 @@ function setup(items: WorkItem[], opts: Options = {}) {
   const select = (id: string | null): void => {
     selected = id;
   };
-  return { store, board, daemon, openItem, toChat, say, resync, prefs, byId, col, ids, card, select };
+  return { store, board, daemon, openItem, toChat, openExternal, say, resync, prefs, byId, col, ids, card, select };
 }
 
 /** A synthetic drag event (jsdom has no DragEvent) at a pointer height. */
@@ -112,9 +114,10 @@ describe('board', () => {
     // Closed is a rail with its counts until expanded; a cancelled item is counted there.
     expect(col('closed').classList.contains('collapsed')).toBe(true);
     const rail = col('closed').querySelector('.bd-rail') as HTMLButtonElement;
-    expect(rail.textContent).toContain('Closed');
-    expect(rail.textContent).toContain('2');
-    expect(rail.textContent).toContain('1 failed');
+    expect(rail.querySelector('.bd-rail-title')?.textContent).toBe('Closed');
+    expect(rail.querySelector('.bd-rail-count')?.textContent).toBe('2');
+    expect(rail.querySelector('.bd-rail-failed')?.textContent).toBe('1');
+    expect(rail.getAttribute('aria-label')).toBe('Show closed items: 1 failed, 1 cancelled');
   });
 
   it('expands Closed, remembers it, and folds it again', () => {
@@ -160,6 +163,13 @@ describe('board', () => {
     store.applyEvent(2, { kind: 'turn.start', sessionId: 's3', turnId: 't' }, ENV);
     store.applyEvent(3, { kind: 'turn.event', sessionId: 's3', turnId: 't', event: { kind: 'tool-start', toolId: 'x', tool: 'Bash', summary: 'npm test', input: '' } }, ENV);
     expect(card('itm_3').querySelector('.bd-tool')?.textContent).toBe('Bash · npm test');
+  });
+
+  it('opens a card’s pull request without opening the item', () => {
+    const { card, openItem, openExternal } = setup([item({ number: 6, status: 'review', pr: { number: 45, url: 'https://github.com/octo/web/pull/45', draft: false, lastPushedSha: 'x' } })]);
+    (card('itm_6').querySelector('.bd-chip.pr') as HTMLButtonElement).click();
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/octo/web/pull/45');
+    expect(openItem).not.toHaveBeenCalled();
   });
 
   it('hides the repository with a single one, and highlights the open item', () => {

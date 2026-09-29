@@ -71,6 +71,8 @@ export interface BoardContext {
   selected(): string | null;
   /** Switch to the Chat view (the empty board's "Ask the orchestrator"). */
   toChat(): void;
+  /** A card's pull request link. */
+  openExternal(url: string): void;
   say(text: string): void;
   /** An optimistic reorder could not be saved: re-read the environment. */
   resync(): void;
@@ -379,10 +381,17 @@ export function initBoard(ctx: BoardContext) {
     const diff = diffText(item);
     if (diff && (item.status === 'review' || item.status === 'done')) meta.appendChild(chip('diff', diff, `${item.result?.diffStat.files ?? 0} files changed`));
     if (item.pr) {
+      const { url, number, checks } = item.pr;
       const state = item.pr.state === 'merged' ? 'merged' : item.pr.state === 'closed' ? 'closed' : item.pr.draft ? 'draft' : 'open';
-      const pr = chip(`pr ${state}`, `#${item.pr.number}`, `Pull request #${item.pr.number} (${state})${item.pr.checks ? ` · checks ${item.pr.checks.state}` : ''}`);
+      const pr = button(`bd-chip pr ${state}`, `#${number}`);
+      pr.tabIndex = -1;
+      pr.title = `Open pull request #${number} on GitHub (${state}${checks ? `, checks ${checks.state}` : ''})`;
       pr.prepend(statusIcon('pr'));
-      if (item.pr.checks) pr.appendChild(el('span', `bd-ci ${item.pr.checks.state}`));
+      if (checks) pr.appendChild(el('span', `bd-ci ${checks.state}`));
+      pr.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ctx.openExternal(url);
+      });
       meta.appendChild(pr);
     }
     li.appendChild(meta);
@@ -414,8 +423,7 @@ export function initBoard(ctx: BoardContext) {
     for (const node of els.columns.querySelectorAll<HTMLElement>('.bd-card')) {
       const on = node.dataset.item === itemId;
       node.tabIndex = on ? 0 : -1;
-      const more = node.querySelector<HTMLElement>('.bd-more');
-      if (more) more.tabIndex = on ? 0 : -1;
+      for (const inner of node.querySelectorAll<HTMLElement>('button')) inner.tabIndex = on ? 0 : -1;
     }
   }
 
@@ -639,11 +647,12 @@ export function initBoard(ctx: BoardContext) {
     if (rail.dataset.key === railKey) return;
     rail.dataset.key = railKey;
     rail.textContent = '';
-    const icon = el('span', 'bd-col-icon col-closed');
-    icon.innerHTML = COLUMN_ICON.closed;
-    rail.append(icon, el('span', 'bd-rail-title', 'Closed'), el('span', 'bd-col-count', String(items.length)));
-    if (failed) rail.appendChild(el('span', 'bd-rail-failed', `${failed} failed`));
-    rail.title = `${failed} failed, ${cancelled} cancelled. Show them.`;
+    const open = el('span', 'bd-rail-open');
+    open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>';
+    rail.append(open, el('span', 'bd-rail-title', 'Closed'), el('span', 'bd-rail-count', String(items.length)));
+    if (failed) rail.appendChild(el('span', 'bd-rail-failed', String(failed)));
+    rail.title = `Closed: ${failed} failed, ${cancelled} cancelled. Show them.`;
+    rail.setAttribute('aria-label', `Show closed items: ${failed} failed, ${cancelled} cancelled`);
   }
 
   function renderHeader(): void {
@@ -665,7 +674,10 @@ export function initBoard(ctx: BoardContext) {
           c.appendChild(el('span', 'bd-cap-num', `${slot.running}/${slot.max}`));
           els.capacity.appendChild(c);
         }
+        // The environment-wide limit across agents, set apart from the per-agent chips.
+        els.capacity.appendChild(el('span', 'bd-cap-sep'));
         const total = el('span', 'bd-cap total');
+        total.title = `${cap.workers.running} of ${cap.workers.max} workers busy across all agents`;
         total.append(el('span', 'bd-cap-name', 'Workers'), el('span', 'bd-cap-num', `${cap.workers.running}/${cap.workers.max}`));
         els.capacity.appendChild(total);
         els.capacity.title = capacityText(cap);

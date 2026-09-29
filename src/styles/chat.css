@@ -337,7 +337,8 @@
   list-style: none;
   margin-top: 0;
   margin-bottom: 0;
-  padding-top: var(--space-2);
+  /* Clear of the top fade when scrolled to the start. */
+  padding-top: var(--space-4);
   padding-bottom: var(--space-6);
   display: flex;
   flex-direction: column;
@@ -1187,17 +1188,24 @@
   opacity: 0.35;
 }
 
+/* Stop: the same round control as Send, in the quiet outline of a secondary action. */
 .send.stop {
-  background: var(--charcoal);
+  background: var(--white);
+  color: var(--emerald-dark);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 .send.stop svg {
+  width: 14px;
+  height: 14px;
   fill: currentColor;
   stroke: none;
 }
 
 .send.stop:hover {
-  background: var(--red);
+  background: var(--red-tint);
+  color: var(--red);
+  box-shadow: inset 0 0 0 1px var(--red-edge);
 }
 
 .send.stopping {

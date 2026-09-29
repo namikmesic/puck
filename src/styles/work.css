@@ -45,8 +45,12 @@
   white-space: nowrap;
 }
 
-.bd-cap.total {
-  border-style: dashed;
+.bd-cap-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--line-strong);
 }
 
 .bd-cap-num {
@@ -474,6 +478,11 @@
 .bd-chip.pr {
   background: var(--emerald-tint);
   color: var(--emerald-dark);
+  transition: box-shadow var(--fast) ease;
+}
+
+.bd-chip.pr:hover {
+  box-shadow: inset 0 0 0 1px var(--emerald-hover);
 }
 
 .bd-chip.pr.merged {
@@ -639,16 +648,44 @@
   background: var(--emerald-tint);
 }
 
-.bd-rail-title,
-.bd-rail-failed {
+.bd-rail-open {
+  display: inline-flex;
+  color: var(--gray);
+}
+
+.bd-rail-open svg {
+  width: 14px;
+  height: 14px;
+}
+
+.bd-rail:hover .bd-rail-open {
+  color: var(--charcoal);
+}
+
+.bd-rail-title {
   writing-mode: vertical-rl;
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--charcoal);
 }
 
+.bd-rail-count,
 .bd-rail-failed {
-  font-size: var(--text-xs);
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--gray-tint);
+  color: var(--gray);
+  font-size: var(--text-2xs);
+  font-weight: 650;
+  line-height: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.bd-rail-failed {
+  background: var(--red-tint);
   color: var(--red);
 }
 

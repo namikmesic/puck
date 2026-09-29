@@ -199,6 +199,7 @@ function boot(bridge: PuckBridge): void {
     openItem: (itemId, tab) => openItem(itemId, tab),
     selected: () => nav.itemId,
     toChat: () => pickView('chat'),
+    openExternal: (url) => void bridge.openExternal(url),
     say,
     resync: () => {
       const id = store.envId();

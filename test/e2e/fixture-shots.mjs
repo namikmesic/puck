@@ -259,6 +259,7 @@ const SHOTS = {
         await sleep(300);
       },
     ],
+    ['switcher', (page) => page.click('#tb-env')],
     [
       'palette',
       async (page) => {
