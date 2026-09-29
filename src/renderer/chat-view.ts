@@ -615,7 +615,7 @@ export function initChatView(ctx: ChatViewContext) {
     for (const notice of notices) {
       const line = el('div', 'notice-line');
       line.dataset.kind = notice.kind;
-      line.appendChild(el('span', `notice-dot ${noticeTone(notice.kind)}`));
+      line.appendChild(el('span', `notice-dot tone-${noticeTone(notice.kind)}`));
       const text = el('span', 'notice-text');
       for (const run of refRuns(notice.text)) {
         if (!run.ref || !ctx.openRef) {

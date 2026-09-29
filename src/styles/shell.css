@@ -857,6 +857,18 @@ body.v2 .hidden {
   flex-direction: column;
 }
 
+/* First run is a full-window sequence: the side panes step aside. */
+/* The id outranks the collapsed and narrow layouts: the center is the only cell left. */
+#panes.first-run {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.panes.first-run > .bl,
+.panes.first-run > .wp,
+.panes.first-run > .pane-resize {
+  display: none;
+}
+
 /* The full-turn overlay takes the center. */
 .center.turn-full-open > :not(.turn-full) {
   display: none !important;

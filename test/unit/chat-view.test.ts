@@ -234,7 +234,7 @@ describe('environment additions', () => {
     expect(row.querySelector('.row-author')?.textContent).toBe('Puck');
     expect(row.querySelector('.row-avatar')).toBeNull();
     const lines = [...row.querySelectorAll('.notice-line')];
-    expect(lines.map((l) => l.querySelector('.notice-dot')?.className)).toEqual(['notice-dot ok', 'notice-dot bad']);
+    expect(lines.map((l) => l.querySelector('.notice-dot')?.className)).toEqual(['notice-dot tone-ok', 'notice-dot tone-bad']);
     // Without an openRef hook the references stay text.
     expect(row.querySelector('.notice-ref')).toBeNull();
     expect(lines[0]?.textContent).toBe('W-12 is ready for review · +120 −30');

@@ -417,6 +417,7 @@ function boot(bridge: PuckBridge): void {
     byId('oc').classList.toggle('hidden', center !== 'orchestrator');
     byId('wd').classList.toggle('hidden', center !== 'work');
     byId('fr').classList.toggle('hidden', center !== 'first-run');
+    byId('panes').classList.toggle('first-run', center === 'first-run');
     byId('oc-child-back').classList.toggle('hidden', !(childOpen && center === 'orchestrator'));
     if (center === 'orchestrator') renderOrchestrator();
     if (center === 'work' && nav.itemId) {
@@ -461,7 +462,7 @@ function boot(bridge: PuckBridge): void {
   function applyProviders(infos: ProviderInfo[]): void {
     harnesses = infos.filter((p): p is HarnessProviderInfo => p.kind === 'harness');
     const github = infos.find((p): p is IntegrationProviderInfo => p.kind === 'integration' && p.id === 'github');
-    login = github?.github.login ?? runners?.login ?? null;
+    login = github?.github.login ?? (runners?.signedIn ? runners.login : null);
     renderUser();
   }
 
@@ -508,7 +509,7 @@ function boot(bridge: PuckBridge): void {
     if (runners) {
       settings.runnersChanged(runners);
       if (nav.center === 'first-run') firstRun.runnersChanged(runners);
-      if (!login && runners.login) {
+      if (!login && runners.signedIn && runners.login) {
         login = runners.login;
         renderUser();
       }
