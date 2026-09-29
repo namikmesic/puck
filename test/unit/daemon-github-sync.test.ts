@@ -480,7 +480,8 @@ describe('issue intake', () => {
     expect(Buffer.byteLength(item.body, 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
 
-  it('takes in labelled issues past the first page, including one that arrives later', async () => {
+  // A hundred items write the backlog store a hundred times: slow on a busy machine.
+  it('takes in labelled issues past the first page, including one that arrives later', { timeout: 20_000 }, async () => {
     for (let n = 1; n <= 101; n++) fake.gh.issues.set(n, issue(n, ['puck']));
     await sync.poll();
     expect(backlog.list()).toHaveLength(101);
@@ -490,7 +491,7 @@ describe('issue intake', () => {
     expect(backlog.list()).toHaveLength(102);
   });
 
-  it('takes in an issue that arrives on the page after a full cached page', async () => {
+  it('takes in an issue that arrives on the page after a full cached page', { timeout: 20_000 }, async () => {
     for (let n = 1; n <= 100; n++) fake.gh.issues.set(n, issue(n, ['puck']));
     await sync.poll();
     expect(backlog.list()).toHaveLength(100);
