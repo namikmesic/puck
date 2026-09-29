@@ -251,8 +251,11 @@ export class Work {
     } else {
       this.checkAgent(def, agent);
       this.checkRepo(def, item.repo, agent);
-      if (item.sessionId && item.agent !== agent) {
-        throw new WorkError('invalid-state', `${itemLabel(item)} already has a ${item.agent ?? 'worker'} session; it keeps that agent.`);
+      if (item.sessionId) {
+        const owner = item.agent ?? this.deps.turns.get(item.sessionId)?.agent ?? null;
+        if (agent !== owner) {
+          throw new WorkError('invalid-state', `${itemLabel(item)} already has a ${owner ?? 'worker'} session; it keeps that agent.`);
+        }
       }
       this.guard(() => this.deps.backlog.transition(item, 'assign', { agent }));
     }

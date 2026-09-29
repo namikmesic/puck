@@ -273,7 +273,8 @@ describe('work detail', () => {
     );
     wd.render();
     const repo = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
-    expect([...repo.options].map((o) => o.value)).toEqual(['web', 'api']);
+    expect([...repo.options].map((o) => o.value)).toEqual(['', 'web', 'api']);
+    expect(repo.value).toBe('');
   });
 
   it('keeps the worker thread when the orchestrator is already mounted', async () => {
@@ -316,6 +317,62 @@ describe('work detail', () => {
     wd.show(stranded.id, 'details');
     expect(options()).toEqual(['implementer']);
     expect((byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('shows no repository until one is saved, and restores both selects when a change is rejected', async () => {
+    const open = item({ number: 7, status: 'backlog' });
+    const held = item({ number: 8, status: 'queued', agent: 'implementer', repo: 'api', worktree: '/wt', sessionId: WORKER });
+    const queued = item({ number: 9, status: 'queued', agent: 'implementer', repo: 'web' });
+    const repos = [
+      { github: 'octo/web', dir: 'web' },
+      { github: 'octo/api', dir: 'api' },
+    ];
+    const { wd, byId, daemon, say } = setup([open, held, queued], { repos });
+    wd.show(open.id, 'details');
+    const repo = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
+    expect(repo.value).toBe('');
+    expect(repo.options[0]?.textContent).toBe('Choose a repository');
+    expect(repo.disabled).toBe(false);
+    repo.value = 'web';
+    daemon.mockRejectedValueOnce(new Error('already has a worktree'));
+    repo.dispatchEvent(new Event('change'));
+    await flush();
+    wd.render();
+    expect((byId('details').querySelector('.wd-repo-select') as HTMLSelectElement).value).toBe('');
+    expect(say).toHaveBeenCalledWith('already has a worktree');
+
+    const agent = byId('details').querySelector('.wd-agent-select') as HTMLSelectElement;
+    agent.value = 'reviewer';
+    daemon.mockRejectedValueOnce(new Error('not that agent'));
+    (byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).click();
+    await flush();
+    wd.render();
+    expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).value).toBe('');
+    expect(say).toHaveBeenCalledWith('not that agent');
+
+    wd.show(queued.id, 'details');
+    const keptRepo = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
+    expect(keptRepo.value).toBe('web');
+    expect(keptRepo.disabled).toBe(false);
+    keptRepo.value = 'api';
+    daemon.mockRejectedValueOnce(new Error('already has a worktree'));
+    keptRepo.dispatchEvent(new Event('change'));
+    await flush();
+    wd.render();
+    expect((byId('details').querySelector('.wd-repo-select') as HTMLSelectElement).value).toBe('web');
+    const keptAgent = byId('details').querySelector('.wd-agent-select') as HTMLSelectElement;
+    keptAgent.value = 'reviewer';
+    daemon.mockRejectedValueOnce(new Error('not that agent'));
+    (byId('details').querySelector('[data-action="assign"]') as HTMLButtonElement).click();
+    await flush();
+    wd.render();
+    expect((byId('details').querySelector('.wd-agent-select') as HTMLSelectElement).value).toBe('implementer');
+
+    wd.show(held.id, 'details');
+    const locked = byId('details').querySelector('.wd-repo-select') as HTMLSelectElement;
+    expect(locked.value).toBe('api');
+    expect(locked.disabled).toBe(true);
+    expect([...locked.options].map((o) => o.value)).toEqual(['web', 'api']);
   });
 
   it('edits details when not running, and assigns from the definition agents', async () => {

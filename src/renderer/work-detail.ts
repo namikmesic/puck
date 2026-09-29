@@ -12,8 +12,10 @@
  *   Changes (summary, commits, diff stat, uncommitted files, the pull
  *   request with its CI checks and review feedback, "Compare on GitHub"),
  *   Details (editable title and body when not running, the agent and repo
- *   pickers, timestamps, creator, last error). Once an item has a session,
- *   the agent picker offers only that agent, and Unassign is not offered.
+ *   pickers, timestamps, creator, last error). The repo picker shows no
+ *   repository until one is saved, and is disabled once a worktree exists.
+ *   Once an item has a session, the agent picker offers only that agent,
+ *   and Unassign is not offered.
  * - A pending question shows a banner: "Waiting on the orchestrator" with
  *   "Answer myself", or the question card when it is routed to the user.
  *   On the Conversation tab, where the thread already shows the card, the
@@ -552,6 +554,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
       pick.value = it.agent ?? '';
     }
+    const savedAgent = it.sessionId ? (knownAgent ?? '') : (it.agent ?? '');
     const canAssign = it.sessionId ? choices.includes(pick.value) : it.status === 'backlog' || it.status === 'queued';
     pick.disabled = !canAssign;
     const row = el('div', 'wd-row');
@@ -564,6 +567,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       try {
         await ctx.daemon('item.assign', { itemId: it.id, agent: pick.value });
       } catch (err) {
+        pick.value = savedAgent;
         ctx.say(errText(err));
       }
     });
@@ -586,17 +590,28 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       assign.appendChild(el('label', 'wd-label', 'Repository'));
       const repo = el('select', 'wd-repo-select');
       repo.setAttribute('aria-label', 'Repository');
+      const savedRepo = it.repo ?? '';
+      if (!it.repo) {
+        const none = el('option', '', 'Choose a repository');
+        none.value = '';
+        repo.appendChild(none);
+      }
       for (const r of repos) {
         const o = el('option', '', `${r.dir} (${r.github})`);
         o.value = r.dir;
         repo.appendChild(o);
       }
-      repo.value = it.repo ?? repos[0]?.dir ?? '';
-      repo.disabled = !(it.status === 'backlog' || it.status === 'queued');
+      repo.value = savedRepo;
+      repo.disabled = !!it.worktree || (it.status !== 'backlog' && it.status !== 'queued');
       repo.addEventListener('change', async () => {
+        if (!repo.value) {
+          repo.value = savedRepo;
+          return;
+        }
         try {
           await ctx.daemon('item.update', { itemId: it.id, repo: repo.value });
         } catch (err) {
+          repo.value = savedRepo;
           ctx.say(errText(err));
         }
       });
