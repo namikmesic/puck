@@ -5,13 +5,13 @@
  * Every provider package is PINNED (`PinnedPackage`): the install scripts
  * install exact versions, and `verifyScript` + `verifyPins` check what is
  * actually on disk afterwards, so a container never silently runs an SDK the
- * runner or the environment daemon was not written against. The pins are
- * also what a prepared base image (a follow-up) would bake in.
+ * environment daemon was not written against. The pins are also what a
+ * prepared base image (a follow-up) would bake in.
  */
 
 import type { HarnessDescriptor, PinnedPackage } from './providers';
 
-/** Where the runner's SDKs live inside the container (`npm --prefix`). */
+/** Where the daemon's SDKs live inside the container (`npm --prefix`). */
 export const SDK_PREFIX = '/opt/puck';
 
 export function pinnedSpec(pkg: PinnedPackage): string {
@@ -106,42 +106,26 @@ export function parseInstalledVersions(stdout: string): Map<string, string | nul
 }
 
 export interface PinReport {
-  /** Mismatches that must fail setup. */
+  /** Mismatches that fail setup. */
   errors: string[];
-  /** Differences worth showing but not fatal (user-managed images). */
-  notes: string[];
 }
 
 /**
- * Compare the pins with what is installed. `managed` (auto-install on) means
- * Puck installed these and any drift is a setup failure; otherwise the user
- * provisions the image themselves and only a MISSING SDK is fatal — the
- * runner cannot work without it — while CLI absence and version differences
- * become notes.
+ * Compare the pins with what is installed. Puck installed these, so any
+ * drift or absence is a setup failure.
  */
-export function verifyPins(
-  expected: readonly ExpectedPackage[],
-  installed: ReadonlyMap<string, string | null>,
-  managed: boolean,
-): PinReport {
+export function verifyPins(expected: readonly ExpectedPackage[], installed: ReadonlyMap<string, string | null>): PinReport {
   const errors: string[] = [];
-  const notes: string[] = [];
   for (const p of expected) {
     const actual = installed.has(p.name) ? installed.get(p.name) ?? null : null;
     if (actual === p.version) continue;
     const where = p.kind === 'sdk' ? `under ${SDK_PREFIX}` : 'globally';
     const found = actual === null ? 'is not installed' : `is ${actual}`;
-    const msg = `${p.name} ${found} ${where}, expected ${p.version}`;
-    if (managed) errors.push(msg);
-    else if (p.kind === 'sdk' && actual === null) errors.push(msg);
-    else notes.push(msg);
+    errors.push(`${p.name} ${found} ${where}, expected ${p.version}`);
   }
-  return { errors, notes };
+  return { errors };
 }
 
-export function describePinFailure(report: PinReport, managed: boolean): string {
-  const hint = managed
-    ? 'The install step did not produce the pinned versions.'
-    : 'Auto-install is off for this environment; install the packages in your Dockerfile or enable auto-install.';
-  return `Provider package verification failed: ${report.errors.join('; ')}. ${hint}`;
+export function describePinFailure(report: PinReport): string {
+  return `Provider package verification failed: ${report.errors.join('; ')}. The install step did not produce the pinned versions.`;
 }

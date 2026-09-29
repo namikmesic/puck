@@ -233,8 +233,8 @@ export async function provision(deps: ProvisionDeps): Promise<Record<string, str
   await stage('verifying-packages', [pinKey, deps.skipPackages], async () => {
     if (deps.skipPackages) return 'skipped';
     const r = await run(['sh', '-lc', verifyScript(pins)], { env: rootEnv, timeoutMs: TIMEOUTS.quick });
-    const report = verifyPins(pins, parseInstalledVersions(r.stdout), true);
-    if (report.errors.length) throw new ProvisionError('verifying-packages', describePinFailure(report, true));
+    const report = verifyPins(pins, parseInstalledVersions(r.stdout));
+    if (report.errors.length) throw new ProvisionError('verifying-packages', describePinFailure(report));
   });
 
   // Installation tokens act as the Puck GitHub App, not as a user, so there
