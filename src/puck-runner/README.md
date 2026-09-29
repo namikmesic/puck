@@ -81,7 +81,7 @@ A runner removed from Settings while its machine was offline stops with exit sta
 - **Encrypted channels.** The app reaches the runner through channels the server relays.
   Each channel's key exchange is signed with the runner's key, so the server forwards bytes it cannot read.
   A control channel carries commands (create, start, stop, rebuild, delete, list, logs); an attach channel pipes the app to one environment's daemon through `docker exec`.
-- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket` and `--app-bundle-id` (so the LaunchAgent names Puck as its app), and installs and starts the LaunchAgent.
+- **This Mac.** Puck can set up the Mac it runs on as a runner in one click (Settings → Runners): it downloads this same tarball from the server, runs `./config.sh` with `--local-socket` (and `--app-bundle-id` when that release accepts it), and installs and starts a LaunchAgent that names Puck as its app.
   An isolated launch (`npm run start:isolated`) refuses: the LaunchAgent would outlive its temporary data folder.
   With `--local-socket <path>` the runner also listens on that unix socket (0600), and the app on the same machine opens its channels there, unencrypted and without the server; file permissions are the authentication.
 - **Docker, by label.** Environments are containers labelled `puck=instance`, with two named volumes each.

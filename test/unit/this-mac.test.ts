@@ -2,9 +2,11 @@
  * The This Mac runner install and uninstall, against the real Puck server
  * (fake GitHub) serving a runner release, with the runner's own commands
  * recorded instead of run: download and sha256 check, unpack, register
- * with a token read from a 0600 file (then revoked), LaunchAgent install,
- * start and kickstart; uninstall keeps the environments and removes the
- * directory. An isolated launch refuses the install.
+ * with a token read from a 0600 file (then revoked), LaunchAgent install
+ * and start, and a kickstart only when launchd is not already running the
+ * plist's program; a runner release from before `--app-bundle-id` registers
+ * without it and has its LaunchAgent rewritten. Uninstall keeps the
+ * environments and removes the directory. An isolated launch refuses the install.
  */
 
 import { createHash } from 'node:crypto';
@@ -27,6 +29,11 @@ let downloads: string;
 let login = 'octo';
 const RUNNER_ID = 'rnr_01J8Z3X0000000000000000002';
 const TARBALL = 'puck-runner-macos-arm64-0.1.0.tar.gz';
+/** What an older runner's `config` prints for the option it does not know (node:util parseArgs, strict). */
+const UNKNOWN_APP_BUNDLE_ID = `Unknown option '--app-bundle-id'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--app-bundle-id"\n`;
+function runningJob(program: string): string {
+  return `gui/501/x = {\n\tstate = running\n\tpid = 4242\n\tprogram = ${program}\n}\n`;
+}
 
 interface Call {
   file: string;
@@ -37,6 +44,8 @@ function fakeExec(
   calls: Call[],
   opts: {
     failConfig?: string;
+    /** A runner release from before `--app-bundle-id`: strict option parsing rejects it. */
+    rejectAppBundleId?: boolean;
     pauseTar?: () => Promise<void>;
     svc?: (sub: string, nth: number) => { code: number; stderr: string } | null;
     onSvc?: (sub: string) => void;
@@ -74,6 +83,7 @@ function fakeExec(
     }
     if (command === 'config' && rest[0] !== 'remove') {
       if (opts.failConfig) return { code: 1, stdout: '', stderr: opts.failConfig };
+      if (opts.rejectAppBundleId && rest.includes('--app-bundle-id')) return { code: 1, stdout: '', stderr: UNKNOWN_APP_BUNDLE_ID };
       const tokenFile = rest[rest.indexOf('--token-file') + 1];
       expect(fs.readFileSync(tokenFile, 'utf8')).toMatch(/^PRT_/);
       expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
@@ -94,6 +104,10 @@ function steps(calls: Call[]): string[][] {
 
 function kickstartOf(accountId: string): string[] {
   return ['launchctl', 'kickstart', `gui/501/${thisMac.serviceLabelFor(accountId)}`];
+}
+
+function printOf(name: string): string[] {
+  return ['launchctl', 'print', `gui/501/${name}`];
 }
 
 function bootoutOf(name: string): string[] {
@@ -162,7 +176,8 @@ describe('This Mac runner', () => {
     expect(config.args).toEqual(expect.arrayContaining(['--app-bundle-id', 'com.namikmesic.puck']));
     expect(config.args).not.toContain('--replace');
     expect(config.args.join(' ')).not.toMatch(/PRT_/); // the token travels in a file, never argv
-    expect(steps(calls.slice(2))).toEqual([['svc', 'install'], ['svc', 'start'], kickstartOf(current()?.user.id ?? '')]);
+    const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls.slice(2))).toEqual([['svc', 'install'], ['svc', 'start'], printOf(label), kickstartOf(current()?.user.id ?? '')]);
     // Nothing secret or temporary is left behind, and the token is revoked.
     expect(fs.existsSync(path.join(dir, '.registration-token'))).toBe(false);
     expect(fs.existsSync(path.join(dir, TARBALL))).toBe(false);
@@ -231,7 +246,8 @@ describe('This Mac runner', () => {
     const record = await thisMac.install([]);
     expect(record.runnerId).toBe(RUNNER_ID);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
-    expect(steps(calls)).toEqual([['svc', 'start'], ['svc', 'install'], ['svc', 'start'], kickstartOf(current()?.user.id ?? '')]);
+    const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([['svc', 'start'], ['svc', 'install'], ['svc', 'start'], printOf(label), kickstartOf(current()?.user.id ?? '')]);
     expect(waited).toBe(1);
     expect(thisMac.localState()).toMatchObject({ installed: true, error: null });
   });
@@ -359,6 +375,7 @@ describe('This Mac runner', () => {
     const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
     expect(steps(calls)).toEqual([
       ['svc', 'start'],
+      printOf(OLD_LABEL),
       bootoutOf(OLD_LABEL),
       bootoutOf(accountLabel),
       ['launchctl', 'bootstrap', `gui/501`, file],
@@ -392,6 +409,139 @@ describe('This Mac runner', () => {
       ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
     ]);
     expectRewritten(dir, file);
+  });
+
+  it('does not start the runner again when svc start left it running', async () => {
+    const calls: Call[] = [];
+    let waited = 0;
+    const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    const dir = macDir();
+    deps(
+      fakeExec(calls, {
+        print: { stdout: runningJob(launcherPath(dir)) },
+        onSvc: (sub) => {
+          if (sub !== 'install') return;
+          const file = path.join(dir, 'LaunchAgents', `${label}.plist`);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, launchdPlist({ label, root: dir, appBundleId: 'com.namikmesic.puck' }));
+          fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: label, file, launcher: launcherPath(dir) }));
+        },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
+    expect(steps(calls.slice(2))).toEqual([['svc', 'install'], ['svc', 'start'], printOf(label)]);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('starts a recorded LaunchAgent once when svc start runs it', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { print: { stdout: runningJob(launcherPath(dir)) } }), 'mbp');
+    await thisMac.install([]);
+    expect(steps(calls)).toEqual([['svc', 'start'], printOf(OLD_LABEL)]);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('kickstarts a running LaunchAgent whose loaded program is not the plist on disk', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub) => (sub === 'start' ? { code: 1, stderr: 'launchctl bootstrap failed: Bootstrap failed: 5: Input/output error' } : null),
+        print: { stdout: runningJob(path.join(dir, 'run.sh')) },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'start'],
+      printOf(OLD_LABEL),
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', 'gui/501', file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('kickstarts a recorded LaunchAgent that svc start only loaded', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { print: { stdout: 'gui/501/x = {\n\tstate = not running\n}\n' } }), 'mbp');
+    await thisMac.install([]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'start'],
+      printOf(OLD_LABEL),
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', 'gui/501', file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+  });
+
+  it('registers a runner release from before --app-bundle-id without it, then rewrites its LaunchAgent', async () => {
+    const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    const calls: Call[] = [];
+    let waited = 0;
+    let file = '';
+    deps(
+      fakeExec(calls, {
+        rejectAppBundleId: true,
+        onSvc: (sub) => {
+          if (sub !== 'install') return;
+          const dir = macDir();
+          file = path.join(dir, 'LaunchAgents', `${label}.plist`);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(
+            file,
+            `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${path.join(dir, 'run.sh')}</string>\n  </array>\n</dict></plist>\n`,
+          );
+          fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: label, file }));
+        },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    const record = await thisMac.install([]);
+    const dir = macDir();
+    expect(record.runnerId).toBe(RUNNER_ID);
+    const [first, second] = [calls[1], calls[2]];
+    expect(first.args).toEqual(expect.arrayContaining(['config', '--app-bundle-id', 'com.namikmesic.puck']));
+    expect(second.args).toEqual(first.args.filter((a) => a !== '--app-bundle-id' && a !== 'com.namikmesic.puck'));
+    expect(steps(calls.slice(3))).toEqual([['svc', 'install'], bootoutOf(label), ['launchctl', 'bootstrap', 'gui/501', file], ['launchctl', 'kickstart', `gui/501/${label}`]]);
+    expectRewritten(dir, file);
+    expect(fs.existsSync(path.join(dir, '.registration-token'))).toBe(false);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
   });
 
   it('names the rewritten login item when kickstart fails', async () => {
@@ -531,6 +681,7 @@ describe('This Mac runner', () => {
     const calls: Call[] = [];
     thisMac.useThisMacDeps({ exec: fakeExec(calls, { failConfig: 'Docker is not running on this machine.' }), platform: 'darwin', arch: 'arm64', uid: 501, isolated: false, hostname: () => 'mbp', dataDir: () => data, waitForSocket: async () => undefined });
     await expect(thisMac.install([])).rejects.toThrow(/Registering the runner failed: Docker is not running/);
+    expect(calls.filter((c) => c.args.includes('config'))).toHaveLength(1);
     expect(fs.existsSync(macDir())).toBe(false);
     expect(localRunner()).toBeNull();
   });
