@@ -487,13 +487,29 @@ function boot(bridge: PuckBridge): void {
     });
   }
 
+  /**
+   * Which view shows. It depends on whether an environment is open as well
+   * as on the nav, so every render applies it: an environment opened on a
+   * remembered Board, or the last one removed, lands in the right view.
+   */
+  function showViews(): void {
+    const env = nav.center === 'env';
+    const hasEnv = !!store.envId();
+    const chat = env && (nav.view === 'chat' || !hasEnv);
+    byId('oc').classList.toggle('hidden', !chat);
+    byId('board').classList.toggle('hidden', !(env && hasEnv && nav.view === 'board'));
+    if (chat) {
+      unread = false;
+      renderOrchestrator();
+    } else if (env) board.render();
+    renderSwitch();
+  }
+
   let frame = 0;
   function renderAll(): void {
     frame = 0;
     topbar.render();
-    renderSwitch();
-    if (nav.view === 'chat') renderOrchestrator();
-    else board.render();
+    showViews();
     if (nav.itemId) {
       workDetail.render();
       wdComposer.refresh();
@@ -522,16 +538,9 @@ function boot(bridge: PuckBridge): void {
     shown = { center: where, view, itemId };
     const env = where === 'env';
     const hasEnv = !!store.envId();
-    const chat = env && (view === 'chat' || !hasEnv);
-    byId('oc').classList.toggle('hidden', !chat);
-    byId('board').classList.toggle('hidden', !(env && hasEnv && view === 'board'));
     byId('fr').classList.toggle('hidden', where !== 'first-run');
     center.classList.toggle('first-run', where === 'first-run');
-    if (chat) {
-      unread = false;
-      renderOrchestrator();
-    } else if (env) board.render();
-    renderSwitch();
+    showViews();
 
     const sheet = byId('wd');
     const open = env && hasEnv && !!itemId;
@@ -553,7 +562,6 @@ function boot(bridge: PuckBridge): void {
       if (back) back.focus();
       else if (env && view === 'board') board.focusCard(before.itemId);
     }
-    if (env && view === 'board') board.render();
 
     if (where === 'first-run') {
       if (before?.center !== 'first-run') void firstRun.show();

@@ -37,11 +37,15 @@ describe('fmtDuration', () => {
 });
 
 describe('clock times', () => {
-  it('have no leading zero on the hour', () => {
+  it('have no leading zero on the hour where the locale keeps a 12-hour clock', () => {
     const at = new Date(2026, 8, 29, 8, 42, 5).getTime();
-    expect(fmtTime(at)).not.toMatch(/^0/);
-    expect(fmtTime(at)).toMatch(/^8:42/);
-    expect(fmtClock(at)).toMatch(/^8:42:05/);
+    const twelve = /^h1[12]$/.test(new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle ?? '');
+    expect(fmtTime(at)).toContain('42');
+    expect(fmtClock(at)).toContain('42');
+    if (twelve) {
+      expect(fmtTime(at)).toMatch(/^8:42/);
+      expect(fmtClock(at)).toMatch(/^8:42:05/);
+    }
   });
 });
 

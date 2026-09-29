@@ -27,10 +27,13 @@ if (!OUT) {
   process.exit(2);
 }
 fs.mkdirSync(OUT, { recursive: true });
-const SIZES = [
-  [1440, 900],
-  [1024, 768],
-];
+// FIXTURE_SIZES=1024x700,1920x1080 overrides the sizes.
+const SIZES = process.env.FIXTURE_SIZES
+  ? process.env.FIXTURE_SIZES.split(',').map((s) => s.split('x').map(Number))
+  : [
+      [1440, 900],
+      [1024, 768],
+    ];
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -106,6 +109,7 @@ async function withApp(scenario, fn) {
 
 /** Back to a known state: popups, sheet and modals closed, Closed folded, Chat showing. */
 async function reset(page) {
+  await page.evaluate(() => localStorage.removeItem('puck.view.env_01K6FIXTURE000000000000000'));
   for (let i = 0; i < 4; i++) await page.keyboard.press('Escape');
   await page.evaluate(() => {
     const closed = document.querySelector('.bd-col.col-closed');
@@ -260,6 +264,17 @@ const SHOTS = {
       },
     ],
     ['switcher', (page) => page.click('#tb-env')],
+    ['settings', (page) => page.keyboard.press('Meta+,')],
+    [
+      // Relaunching on an environment whose remembered view is the Board.
+      'boot-board',
+      async (page) => {
+        await page.evaluate(() => localStorage.setItem('puck.view.env_01K6FIXTURE000000000000000', 'board'));
+        await page.reload();
+        await page.waitForSelector('.bd-card', { timeout: 30_000 });
+        await sleep(800);
+      },
+    ],
     [
       'palette',
       async (page) => {
