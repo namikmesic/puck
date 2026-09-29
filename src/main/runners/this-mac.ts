@@ -15,8 +15,9 @@
  * release from before `--app-bundle-id` rejects that option, so `config`
  * runs once more without it. `svc start` kickstarts the LaunchAgent; an
  * older runner release's only loads it, and launchd may hold a freshly
- * loaded job back, so when `launchctl print` does not show the job running
- * the app kickstarts it itself. That kickstart unloads the recorded agent
+ * loaded job back or keep a previously loaded program, so when
+ * `launchctl print` does not show the plist's program running the app
+ * kickstarts it itself. That kickstart unloads the recorded agent
  * when one is loaded and bootstraps its plist, so the job that runs is the
  * plist on disk. A LaunchAgent left from an older install — its program is
  * not the puck-runner launcher, or its plist names no app — is rewritten
@@ -344,11 +345,22 @@ async function kickstart(dir: string, label: string): Promise<void> {
   }
 }
 
-/** `svc start` of a runner release that only loads the job leaves it waiting; kickstart it then. */
+/** Basename of the program the recorded plist names, or null when that plist cannot be read. */
+function recordedProgramName(rec: InstalledService | null): string | null {
+  if (!rec) return null;
+  try {
+    return loginItemName(fs.readFileSync(rec.file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** Kickstarts unless launchd is already running the program named by the plist on disk. */
 async function ensureRunning(dir: string, label: string): Promise<void> {
-  const name = installedService(dir, label)?.name ?? label;
-  const printed = await d().exec('/bin/launchctl', ['print', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
-  if (printed.code === 0 && launchdPrintedRunning(printed.stdout)) return;
+  const rec = installedService(dir, label);
+  const printed = await d().exec('/bin/launchctl', ['print', `gui/${d().uid}/${rec?.name ?? label}`], { timeoutMs: 30_000 });
+  const onDisk = recordedProgramName(rec);
+  if (printed.code === 0 && launchdPrintedRunning(printed.stdout) && onDisk !== null && launchdPrintedProgram(printed.stdout) === onDisk) return;
   await kickstart(dir, label);
 }
 

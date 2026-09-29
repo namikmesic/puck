@@ -3,10 +3,10 @@
  * (fake GitHub) serving a runner release, with the runner's own commands
  * recorded instead of run: download and sha256 check, unpack, register
  * with a token read from a 0600 file (then revoked), LaunchAgent install
- * and start, and a kickstart only when the job is not running; a runner
- * release from before `--app-bundle-id` registers without it and has its
- * LaunchAgent rewritten. Uninstall keeps the environments and removes the
- * directory. An isolated launch refuses the install.
+ * and start, and a kickstart only when launchd is not already running the
+ * plist's program; a runner release from before `--app-bundle-id` registers
+ * without it and has its LaunchAgent rewritten. Uninstall keeps the
+ * environments and removes the directory. An isolated launch refuses the install.
  */
 
 import { createHash } from 'node:crypto';
@@ -31,7 +31,9 @@ const RUNNER_ID = 'rnr_01J8Z3X0000000000000000002';
 const TARBALL = 'puck-runner-macos-arm64-0.1.0.tar.gz';
 /** What an older runner's `config` prints for the option it does not know (node:util parseArgs, strict). */
 const UNKNOWN_APP_BUNDLE_ID = `Unknown option '--app-bundle-id'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--app-bundle-id"\n`;
-const RUNNING = 'gui/501/x = {\n\tstate = running\n\tpid = 4242\n}\n';
+function runningJob(program: string): string {
+  return `gui/501/x = {\n\tstate = running\n\tpid = 4242\n\tprogram = ${program}\n}\n`;
+}
 
 interface Call {
   file: string;
@@ -412,11 +414,25 @@ describe('This Mac runner', () => {
   it('does not start the runner again when svc start left it running', async () => {
     const calls: Call[] = [];
     let waited = 0;
-    deps(fakeExec(calls, { print: { stdout: RUNNING } }), 'mbp', async () => {
-      waited += 1;
-    });
-    await thisMac.install([]);
     const label = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    const dir = macDir();
+    deps(
+      fakeExec(calls, {
+        print: { stdout: runningJob(launcherPath(dir)) },
+        onSvc: (sub) => {
+          if (sub !== 'install') return;
+          const file = path.join(dir, 'LaunchAgents', `${label}.plist`);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, launchdPlist({ label, root: dir, appBundleId: 'com.namikmesic.puck' }));
+          fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: label, file, launcher: launcherPath(dir) }));
+        },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
     expect(steps(calls.slice(2))).toEqual([['svc', 'install'], ['svc', 'start'], printOf(label)]);
     expect(waited).toBe(1);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
@@ -430,9 +446,42 @@ describe('This Mac runner', () => {
     fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
     fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
     const calls: Call[] = [];
-    deps(fakeExec(calls, { print: { stdout: RUNNING } }), 'mbp');
+    deps(fakeExec(calls, { print: { stdout: runningJob(launcherPath(dir)) } }), 'mbp');
     await thisMac.install([]);
     expect(steps(calls)).toEqual([['svc', 'start'], printOf(OLD_LABEL)]);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('kickstarts a running LaunchAgent whose loaded program is not the plist on disk', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(
+      fakeExec(calls, {
+        svc: (sub) => (sub === 'start' ? { code: 1, stderr: 'launchctl bootstrap failed: Bootstrap failed: 5: Input/output error' } : null),
+        print: { stdout: runningJob(path.join(dir, 'run.sh')) },
+      }),
+      'mbp',
+      async () => {
+        waited += 1;
+      },
+    );
+    await thisMac.install([]);
+    const accountLabel = thisMac.serviceLabelFor(current()?.user.id ?? '');
+    expect(steps(calls)).toEqual([
+      ['svc', 'start'],
+      printOf(OLD_LABEL),
+      bootoutOf(OLD_LABEL),
+      bootoutOf(accountLabel),
+      ['launchctl', 'bootstrap', 'gui/501', file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expect(waited).toBe(1);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
   });
 
