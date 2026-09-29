@@ -209,6 +209,14 @@ function sameDay(a: number, b: number): boolean {
   );
 }
 
+/** Relabel the day dividers under `root` for `now` ("Today" becomes "Yesterday" after midnight). */
+export function refreshDayLabels(root: ParentNode, now = Date.now()): void {
+  for (const divider of root.querySelectorAll<HTMLElement>('.day-divider[data-ts]')) {
+    const chip = divider.querySelector('.day-chip');
+    if (chip) chip.textContent = dayLabel(Number(divider.dataset.ts), now);
+  }
+}
+
 /**
  * Route one harness event to the turn that renders it — shared by the live
  * turn loop and history replay. Replay renders answered questions read-only
@@ -285,13 +293,15 @@ export function initChatView(ctx: ChatViewContext) {
   }
 
   /** Slack-style day separator, inserted when the calendar day changes. The
-   *  last day lives in a dataset attribute — no DOM scan per message. */
+   *  last day lives in a dataset attribute — no DOM scan per message. The
+   *  divider keeps its timestamp so `refreshDayLabels` can relabel it. */
   function maybeDayDivider(container: HTMLElement, ts = Date.now()): void {
     const day = dayKey(ts);
     if (container.dataset.day === day) return;
     container.dataset.day = day;
     const divider = el('li', 'day-divider');
     divider.setAttribute('role', 'separator');
+    divider.dataset.ts = String(ts);
     divider.appendChild(el('span', 'day-chip', dayLabel(ts)));
     container.appendChild(divider);
   }

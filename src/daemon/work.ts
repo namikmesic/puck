@@ -4,8 +4,9 @@
  * follow up, delete), dispatch into a worktree and worker session, result
  * capture at every worker turn end, and worker questions.
  *
- * Every status change goes through the state machine in items.ts. The
- * scheduler picks what to dispatch; this module does the dispatching.
+ * Every status change goes through the backlog in items.ts, which applies
+ * the state machine in `src/harness/item-transitions.ts`. The scheduler
+ * picks what to dispatch; this module does the dispatching.
  *
  * Attempts. `attempts` counts the dispatches of the current request: the
  * first dispatch and each dispatch after an error add one, and an error

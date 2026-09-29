@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { nextStatus, TRANSITIONS, type ItemTrigger } from '../../src/daemon/items';
+import { nextStatus, TRANSITIONS, type ItemTrigger } from '../../src/harness/item-transitions';
 import type { ItemStatus, PullView, WorkItem } from '../../src/harness/daemon-protocol';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { initSessionView } from '../../src/renderer/session-view';

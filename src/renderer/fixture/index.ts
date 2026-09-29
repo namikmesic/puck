@@ -9,17 +9,17 @@
  * contains it. Scenarios (`data.ts`): full (an item in every state, a
  * multi-day chat), empty, provisioning and unreachable.
  *
- * Item commands move the seeded items the way the daemon's state machine
- * does for user commands and stream the same events back (`item.upsert`,
- * `item.removed`, `backlog.order`), so the board, menus and drag and drop
- * can be exercised. `chat.send` echoes a short orchestrator turn. Anything
- * a fixture cannot do rejects with a sentence saying so.
+ * Item commands move the seeded items through the shared state machine
+ * (`src/harness/item-transitions.ts`) and stream the same events back
+ * (`item.upsert`, `item.removed`, `backlog.order`), so the board, menus
+ * and drag and drop can be exercised. `chat.send` echoes a short
+ * orchestrator turn. Anything a fixture cannot do rejects with a sentence
+ * saying so.
  */
 
-// eslint-disable-next-line no-restricted-imports
-import { nextStatus, type ItemTrigger } from '../../daemon/items';
 import type { DaemonEventPayload, InstanceEvent, ProviderInfo, PuckBridge, RunnerEvent, RunnersState } from '../../harness/bridge';
 import type { DaemonEvent, ItemPosition, OpArgs, OpResult, RendererOp, WorkItem } from '../../harness/daemon-protocol';
+import { nextStatus, type ItemTrigger } from '../../harness/item-transitions';
 import { buildWorld, ENV_ID, ORCH, SCENARIOS, type Scenario } from './data';
 
 const PAGE = 14;

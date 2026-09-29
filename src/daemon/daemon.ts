@@ -12,12 +12,13 @@
  * session exists → resume those turns → ready → start the scheduler,
  * the orchestrator's wake loop, and the GitHub poll.
  *
- * Orchestration lives in its own modules: items.ts (state machine and
- * backlog), scheduler.ts, work.ts (dispatch, worktrees, results, worker
- * questions), publish.ts, orchestrator.ts (notices and wake), tools.ts
- * (the orchestrator's in-process tools) and github-sync.ts (issues, pull
- * requests, CI and reviews on GitHub). This class wires them to the turn
- * loop and to the protocol's commands.
+ * Orchestration lives in its own modules: items.ts (the backlog; the state
+ * machine is `src/harness/item-transitions.ts`), scheduler.ts, work.ts
+ * (dispatch, worktrees, results, worker questions), publish.ts,
+ * orchestrator.ts (notices and wake), tools.ts (the orchestrator's
+ * in-process tools) and github-sync.ts (issues, pull requests, CI and
+ * reviews on GitHub). This class wires them to the turn loop and to the
+ * protocol's commands.
  */
 
 import * as fs from 'node:fs';
