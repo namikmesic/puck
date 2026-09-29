@@ -9,11 +9,12 @@
  * contains it. Scenarios (`data.ts`): full (an item in every state, a
  * multi-day chat), empty, provisioning and unreachable.
  *
- * Item commands move the seeded items through the daemon's own state
- * machine (`src/harness/item-transitions.ts`) and stream the same events
- * back (`item.upsert`, `item.removed`, `backlog.order`), so the board,
- * menus and drag and drop can be exercised. `chat.send` echoes a short orchestrator turn. Anything
- * a fixture cannot do rejects with a sentence saying so.
+ * Item commands move the seeded items through the shared state machine
+ * (`src/harness/item-transitions.ts`) and stream the same events back
+ * (`item.upsert`, `item.removed`, `backlog.order`), so the board, menus
+ * and drag and drop can be exercised. `chat.send` echoes a short
+ * orchestrator turn. Anything a fixture cannot do rejects with a sentence
+ * saying so.
  */
 
 import type { DaemonEventPayload, InstanceEvent, ProviderInfo, PuckBridge, RunnerEvent, RunnersState } from '../../harness/bridge';
