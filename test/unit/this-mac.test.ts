@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import forgeConfig from '../../forge.config';
+import { launchdPlist, launcherPath } from '../../src/harness/launch-agent';
 import * as thisMac from '../../src/main/runners/this-mac';
 import { localRunner, setLocalRunner } from '../../src/main/runners/store';
 import { useServerDeps } from '../../src/main/server/http';
@@ -39,13 +40,18 @@ function fakeExec(
     pauseTar?: () => Promise<void>;
     svc?: (sub: string, nth: number) => { code: number; stderr: string } | null;
     kickstart?: { code: number; stderr: string };
+    bootstrap?: { code: number; stderr: string };
   } = {},
 ): thisMac.Exec {
   const svcCount = new Map<string, number>();
   return async (file, args) => {
     if (file === '/usr/bin/tar' && opts.pauseTar) await opts.pauseTar();
     calls.push({ file, args });
-    if (file === '/bin/launchctl') return opts.kickstart ? { code: opts.kickstart.code, stdout: '', stderr: opts.kickstart.stderr } : { code: 0, stdout: '', stderr: '' };
+    if (file === '/bin/launchctl') {
+      if (args[0] === 'kickstart' && opts.kickstart) return { code: opts.kickstart.code, stdout: '', stderr: opts.kickstart.stderr };
+      if (args[0] === 'bootstrap' && opts.bootstrap) return { code: opts.bootstrap.code, stdout: '', stderr: opts.bootstrap.stderr };
+      return { code: 0, stdout: '', stderr: '' };
+    }
     const socketAt = args.indexOf('--local-socket');
     const dir = file === '/usr/bin/tar' ? args[args.indexOf('-C') + 1] : socketAt === -1 ? '' : path.dirname(args[socketAt + 1]);
     if (file === '/usr/bin/tar') {
@@ -220,12 +226,73 @@ describe('This Mac runner', () => {
     expect(thisMac.localState()).toMatchObject({ installed: true, error: null });
   });
 
-  it('starts an already-loaded LaunchAgent that an older runner only bootstrapped', async () => {
+  const OLD_LABEL = 'com.puck.runner.0ld0ld0l';
+
+  function writeAgent(dir: string, program: string): string {
+    const file = path.join(dir, 'LaunchAgents', `${OLD_LABEL}.plist`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n  </array>\n</dict></plist>\n`,
+    );
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
+    return file;
+  }
+
+  function expectRewritten(dir: string, file: string): void {
+    const plist = fs.readFileSync(file, 'utf8');
+    expect(plist).toContain(`<string>${launcherPath(dir)}</string>`);
+    expect(plist).toContain('<key>AssociatedBundleIdentifiers</key>');
+    expect(plist).toContain('<string>com.namikmesic.puck</string>');
+    expect(plist).not.toContain('run.sh');
+    expect(fs.readFileSync(launcherPath(dir), 'utf8')).toContain('run.sh');
+    expect(fs.statSync(launcherPath(dir)).mode & 0o777).toBe(0o755);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, '.service'), 'utf8'))).toMatchObject({ launcher: launcherPath(dir) });
+    expect(JSON.parse(fs.readFileSync(path.join(dir, '.runner'), 'utf8')).appBundleId).toBe('com.namikmesic.puck');
+  }
+
+  it('rewrites an older LaunchAgent that still runs run.sh, then bootstraps and kickstarts it', async () => {
     const dir = macDir();
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID }));
-    // The label comes from the runner's own service record when there is one.
-    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: 'com.puck.runner.0ld0ld0l', file: '/x.plist' }));
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    let waited = 0;
+    deps(fakeExec(calls), 'mbp', async () => {
+      waited += 1;
+    });
+    await thisMac.install([]);
+    expect(steps(calls)).toEqual([
+      ['svc', 'install'],
+      ['launchctl', 'bootout', `gui/501/${OLD_LABEL}`],
+      ['launchctl', 'bootstrap', `gui/501`, file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expectRewritten(dir, file);
+    expect(waited).toBe(1);
+    expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('rewrites a LaunchAgent whose plist names no app', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, launcherPath(dir));
+    const calls: Call[] = [];
+    deps(fakeExec(calls), 'mbp');
+    await thisMac.install([]);
+    expect(steps(calls)[0]).toEqual(['svc', 'install']);
+    expect(steps(calls).map((s) => s[1] ?? s[0])).toEqual(['install', 'bootout', 'bootstrap', 'kickstart']);
+    expectRewritten(dir, file);
+  });
+
+  it('kickstarts an already-current LaunchAgent without reinstalling it', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'agent.plist');
+    fs.writeFileSync(file, launchdPlist({ label: OLD_LABEL, root: dir, appBundleId: 'com.namikmesic.puck' }));
+    fs.writeFileSync(path.join(dir, '.service'), JSON.stringify({ kind: 'launchd', name: OLD_LABEL, file, launcher: launcherPath(dir) }));
+    fs.writeFileSync(path.join(dir, '.runner'), JSON.stringify({ runnerId: RUNNER_ID, appBundleId: 'com.namikmesic.puck' }));
+    const before = fs.readFileSync(file, 'utf8');
     const calls: Call[] = [];
     let waited = 0;
     deps(
@@ -238,9 +305,57 @@ describe('This Mac runner', () => {
       },
     );
     await thisMac.install([]);
-    expect(steps(calls)).toEqual([['svc', 'start'], ['launchctl', 'kickstart', 'gui/501/com.puck.runner.0ld0ld0l']]);
+    expect(steps(calls)).toEqual([['svc', 'start'], ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`]]);
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
     expect(waited).toBe(1);
     expect(localRunner()?.runnerId).toBe(RUNNER_ID);
+  });
+
+  it('reinstalls when the runner refuses to rewrite an existing LaunchAgent', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(
+      fakeExec(calls, {
+        svc: (sub, n) => (sub === 'install' && n === 1 ? { code: 1, stderr: 'A service is already installed. Uninstall it first: ./svc.sh uninstall' } : null),
+      }),
+      'mbp',
+    );
+    await thisMac.install([]);
+    expect(steps(calls)).toEqual([
+      ['svc', 'install'],
+      ['svc', 'uninstall'],
+      ['svc', 'install'],
+      ['launchctl', 'bootout', `gui/501/${OLD_LABEL}`],
+      ['launchctl', 'bootstrap', `gui/501`, file],
+      ['launchctl', 'kickstart', `gui/501/${OLD_LABEL}`],
+    ]);
+    expectRewritten(dir, file);
+  });
+
+  it('names the rewritten login item when kickstart fails', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { kickstart: { code: 1, stderr: 'Operation not permitted' } }), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/Check that puck-runner is allowed in System Settings → General → Login Items & Extensions/);
+    expect(steps(calls).map((s) => (s[0] === 'launchctl' ? s[1] : s[0]))).toEqual(['svc', 'bootout', 'bootstrap', 'kickstart']);
+    expectRewritten(dir, file);
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+  });
+
+  it('does not mark This Mac installed when the rewritten LaunchAgent does not load', async () => {
+    const dir = macDir();
+    fs.mkdirSync(dir, { recursive: true });
+    writeAgent(dir, path.join(dir, 'run.sh'));
+    const calls: Call[] = [];
+    deps(fakeExec(calls, { bootstrap: { code: 5, stderr: 'Bootstrap failed: 5: Input/output error' } }), 'mbp');
+    await expect(thisMac.install([])).rejects.toThrow(/launchctl bootstrap failed: Bootstrap failed: 5/);
+    expect(steps(calls).flat()).not.toContain('kickstart');
+    expect(localRunner()?.runnerId ?? null).toBeNull();
+    expect(thisMac.localState().installed).toBe(false);
   });
 
   it('surfaces a LaunchAgent start failure and does not mark This Mac installed', async () => {

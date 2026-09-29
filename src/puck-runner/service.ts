@@ -13,7 +13,8 @@
  * the `puck-runner` launcher install writes next to run.sh, because macOS
  * names the background item after the executable; the plist names the
  * app's bundle id in AssociatedBundleIdentifiers when the runner was
- * configured with one (This Mac). `start` bootstraps the agent and then
+ * configured with one (This Mac). Installing again rewrites that agent
+ * in place. `start` bootstraps the agent and then
  * kickstarts it: launchd may hold a freshly loaded RunAtLoad job back
  * ("pended nondemand spawn"), so loading alone does not start the runner.
  *
@@ -26,8 +27,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { LAUNCHER, launcherPath, launcherScript, launchdPlist, loginItemName } from '../harness/launch-agent';
 import { writeFileAtomic, type RunnerConfig, type RunnerPaths } from './files';
 import type { Exec } from './update';
+
+export { LAUNCHER, launcherScript, launchdPlist };
 
 /** The runner's "removed from Puck, do not restart me" exit status. */
 export const REMOVED_EXIT = 78;
@@ -74,8 +78,6 @@ export function launchdLabel(name: string, serviceLabel: string | null | undefin
   return serviceLabel && SERVICE_LABEL_RE.test(serviceLabel) ? serviceLabel : `com.puck.runner.${serviceSlug(name)}`;
 }
 
-const xml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
 export function systemdUnit(opts: { name: string; root: string; user: string }): string {
   const q = (s: string): string => (/[\s"\\]/.test(s) ? `"${s.replace(/(["\\])/g, '\\$1')}"` : s);
   return [
@@ -101,63 +103,16 @@ export function systemdUnit(opts: { name: string; root: string; user: string }):
   ].join('\n');
 }
 
-/** The LaunchAgent's program. macOS shows its file name as the background item's name. */
-export const LAUNCHER = 'puck-runner';
-
-export function launcherScript(): string {
-  return [
-    '#!/bin/sh',
-    '# The LaunchAgent\'s program: macOS names the background item after this file.',
-    '# Written by ./svc.sh install and removed by ./svc.sh uninstall; it runs ./run.sh.',
-    'DIR=$(cd "$(dirname "$0")" && pwd)',
-    'exec "$DIR/run.sh" "$@"',
-    '',
-  ].join('\n');
-}
-
-export function launchdPlist(opts: { label: string; root: string; appBundleId?: string | null }): string {
-  const associated = opts.appBundleId
-    ? ['  <key>AssociatedBundleIdentifiers</key>', '  <array>', `    <string>${xml(opts.appBundleId)}</string>`, '  </array>']
-    : [];
-  return [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-    '<plist version="1.0">',
-    '<dict>',
-    '  <key>Label</key>',
-    `  <string>${xml(opts.label)}</string>`,
-    '  <key>ProgramArguments</key>',
-    '  <array>',
-    `    <string>${xml(path.join(opts.root, LAUNCHER))}</string>`,
-    '  </array>',
-    ...associated,
-    '  <key>WorkingDirectory</key>',
-    `  <string>${xml(opts.root)}</string>`,
-    '  <key>EnvironmentVariables</key>',
-    '  <dict>',
-    '    <key>PUCK_RUNNER_SERVICE</key>',
-    '    <string>launchd</string>',
-    '  </dict>',
-    '  <key>RunAtLoad</key>',
-    '  <true/>',
-    '  <key>KeepAlive</key>',
-    '  <dict>',
-    '    <key>SuccessfulExit</key>',
-    '    <false/>',
-    '  </dict>',
-    '  <key>ThrottleInterval</key>',
-    '  <integer>10</integer>',
-    '  <key>StandardOutPath</key>',
-    `  <string>${xml(path.join(opts.root, '_diag', 'service.log'))}</string>`,
-    '  <key>StandardErrorPath</key>',
-    `  <string>${xml(path.join(opts.root, '_diag', 'service.log'))}</string>`,
-    '</dict>',
-    '</plist>',
-    '',
-  ].join('\n');
-}
-
 const why = (r: { stdout: string; stderr: string; code: number | null }): string => (r.stderr || r.stdout).trim().slice(-400) || `exit ${r.code}`;
+
+/** The file name Login Items shows for this agent's plist. */
+function backgroundItemName(plistFile: string): string {
+  try {
+    return loginItemName(fs.readFileSync(plistFile, 'utf8')) ?? LAUNCHER;
+  } catch {
+    return LAUNCHER;
+  }
+}
 
 export function readServiceRecord(paths: RunnerPaths): ServiceRecord | null {
   try {
@@ -202,7 +157,7 @@ export class Service {
     if (kick.code !== 0) {
       throw new ServiceError(
         `launchd did not start ${r.name} (launchctl kickstart: ${why(kick)}). ` +
-          `Check that its background item is allowed in System Settings → General → Login Items & Extensions, and see ${path.join(this.deps.paths.root, '_diag', 'service.log')}.`,
+          `Check that ${backgroundItemName(r.file)} is allowed in System Settings → General → Login Items & Extensions, and see ${path.join(this.deps.paths.root, '_diag', 'service.log')}.`,
       );
     }
   }
@@ -219,7 +174,10 @@ export class Service {
 
   async install(user?: string): Promise<void> {
     this.requireRoot('install');
-    if (readServiceRecord(this.deps.paths)) throw new ServiceError('A service is already installed. Uninstall it first: ./svc.sh uninstall');
+    const existing = readServiceRecord(this.deps.paths);
+    if (existing && !(existing.kind === 'launchd' && this.kind === 'launchd')) {
+      throw new ServiceError('A service is already installed. Uninstall it first: ./svc.sh uninstall');
+    }
     const slug = serviceSlug(this.deps.config.name);
     let record: ServiceRecord;
     if (this.kind === 'systemd') {
@@ -240,7 +198,8 @@ export class Service {
     } else {
       const label = launchdLabel(this.deps.config.name, this.deps.config.serviceLabel);
       const file = path.join(this.deps.homedir, 'Library', 'LaunchAgents', `${label}.plist`);
-      const launcher = path.join(this.deps.paths.root, LAUNCHER);
+      const launcher = launcherPath(this.deps.paths.root);
+      if (existing?.kind === 'launchd' && existing.file !== file) fs.rmSync(existing.file, { force: true });
       fs.mkdirSync(path.join(this.deps.paths.root, '_diag'), { recursive: true, mode: 0o700 });
       writeFileAtomic(launcher, launcherScript(), 0o755);
       writeFileAtomic(file, launchdPlist({ label, root: this.deps.paths.root, appBundleId: this.deps.config.appBundleId }), 0o644);

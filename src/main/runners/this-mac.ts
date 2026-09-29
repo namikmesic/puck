@@ -13,7 +13,10 @@
  * <dir>/local.sock --app-bundle-id <Puck's>` with a registration token read
  * from a 0600 file (then revoked), and `svc install` + `svc start`. Then the
  * app kickstarts the LaunchAgent itself: launchd may hold a freshly loaded
- * job back, and an older runner release's `svc start` only loads it. The
+ * job back, and an older runner release's `svc start` only loads it. A
+ * LaunchAgent left from that older install — its program is not the
+ * puck-runner launcher, or its plist names no app — is rewritten with
+ * `svc install`, then bootout, bootstrap and kickstart. The
  * app's Electron binary is not used as a Node runtime: packaged builds
  * switch that off (the RunAsNode fuse), and the runner updates itself from
  * the server like any other.
@@ -37,6 +40,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LocalRunnerState } from '../../harness/bridge';
+import { LAUNCHER, launchAgentNamesApp, launchAgentProgram, launchdPlist, launcherPath, launcherScript, loginItemName } from '../../harness/launch-agent';
 import type { ServerRunner } from '../../harness/server-api';
 import { ISOLATED_ENV } from '../isolation';
 import { log } from '../log';
@@ -225,37 +229,138 @@ function serviceAlreadyUp(message: string): boolean {
   return /already (bootstrapped|loaded|running)/i.test(message) || /Bootstrap failed: (5|17|37)\b/.test(message);
 }
 
-/** The installed LaunchAgent's label, from the runner's `.service` record. */
-function installedLabel(dir: string, fallback: string): string {
+interface InstalledService {
+  name: string;
+  file: string;
+}
+
+/** The installed LaunchAgent, from the runner's `.service` record. */
+function installedService(dir: string, fallback: string): InstalledService | null {
   try {
-    const r = JSON.parse(fs.readFileSync(path.join(dir, '.service'), 'utf8')) as { name?: unknown };
-    return typeof r.name === 'string' && /^com\.puck\.runner\.[a-z0-9-]{1,48}$/.test(r.name) ? r.name : fallback;
+    const r = JSON.parse(fs.readFileSync(path.join(dir, '.service'), 'utf8')) as { kind?: unknown; name?: unknown; file?: unknown };
+    if (r.kind !== 'launchd' || typeof r.file !== 'string' || r.file === '') return null;
+    const name = typeof r.name === 'string' && /^com\.puck\.runner\.[a-z0-9-]{1,48}$/.test(r.name) ? r.name : fallback;
+    return { name, file: r.file };
   } catch {
-    return fallback;
+    return null;
+  }
+}
+
+/** The file name Login Items shows for the recorded agent. */
+function recordedItemName(dir: string, label: string): string {
+  const rec = installedService(dir, label);
+  if (!rec) return LAUNCHER;
+  try {
+    return loginItemName(fs.readFileSync(rec.file, 'utf8')) ?? LAUNCHER;
+  } catch {
+    return LAUNCHER;
+  }
+}
+
+/** An older LaunchAgent still runs run.sh, or its plist names no app. */
+function recordedAgentStale(dir: string, label: string): boolean {
+  const rec = installedService(dir, label);
+  if (!rec) return false;
+  let text: string;
+  try {
+    text = fs.readFileSync(rec.file, 'utf8');
+  } catch {
+    return true;
+  }
+  return launchAgentProgram(text) !== launcherPath(dir) || !launchAgentNamesApp(text, APP_BUNDLE_ID);
+}
+
+function ensureAppBundleId(dir: string): void {
+  const file = path.join(dir, '.runner');
+  let c: Record<string, unknown>;
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+    c = v as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (c.appBundleId === APP_BUNDLE_ID) return;
+  c.appBundleId = APP_BUNDLE_ID;
+  fs.writeFileSync(file, JSON.stringify(c, null, 2) + '\n');
+}
+
+/** Writes the launcher and plist `svc install` writes, over an older agent. */
+function placeLaunchAgent(dir: string, rec: InstalledService): void {
+  const launcher = launcherPath(dir);
+  fs.mkdirSync(path.join(dir, '_diag'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(launcher, launcherScript(), { mode: 0o755 });
+  fs.chmodSync(launcher, 0o755);
+  fs.mkdirSync(path.dirname(rec.file), { recursive: true });
+  fs.writeFileSync(rec.file, launchdPlist({ label: rec.name, root: dir, appBundleId: APP_BUNDLE_ID }), { mode: 0o644 });
+  try {
+    const serviceFile = path.join(dir, '.service');
+    const r = JSON.parse(fs.readFileSync(serviceFile, 'utf8')) as Record<string, unknown>;
+    r.launcher = launcher;
+    fs.writeFileSync(serviceFile, JSON.stringify(r, null, 2) + '\n');
+  } catch {
+    // `.service` is the runner's record; the plist is already rewritten.
   }
 }
 
 /** Starts the loaded LaunchAgent; a no-op when it already runs. */
 async function kickstart(dir: string, label: string): Promise<void> {
-  const r = await d().exec('/bin/launchctl', ['kickstart', `gui/${d().uid}/${installedLabel(dir, label)}`], { timeoutMs: 30_000 });
+  const name = installedService(dir, label)?.name ?? label;
+  const r = await d().exec('/bin/launchctl', ['kickstart', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
   if (r.code !== 0) {
     const why = (r.stderr || r.stdout).trim().slice(-300) || `exit ${r.code}`;
-    throw new Error(`launchd did not start the runner (${why}). Check that puck-runner is allowed in System Settings → General → Login Items & Extensions.`);
+    throw new Error(`launchd did not start the runner (${why}). Check that ${recordedItemName(dir, label)} is allowed in System Settings → General → Login Items & Extensions.`);
+  }
+}
+
+async function bootout(name: string): Promise<void> {
+  await d().exec('/bin/launchctl', ['bootout', `gui/${d().uid}/${name}`], { timeoutMs: 30_000 });
+}
+
+/** Rewrites a stale LaunchAgent through `svc install`, then loads that plist. */
+async function replaceStaleLaunchAgent(dir: string, label: string, gate: () => void): Promise<void> {
+  const previous = installedService(dir, label);
+  if (!previous) throw new Error('No LaunchAgent is installed.');
+  ensureAppBundleId(dir);
+  try {
+    await runner(dir, ['svc', 'install'], 'Updating the LaunchAgent', 60_000);
+  } catch (err) {
+    gate();
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/already installed/i.test(message)) throw err;
+    await runner(dir, ['svc', 'uninstall'], 'Updating the LaunchAgent', 60_000);
+    gate();
+    await runner(dir, ['svc', 'install'], 'Updating the LaunchAgent', 60_000);
+  }
+  gate();
+  const next = installedService(dir, label) ?? previous;
+  placeLaunchAgent(dir, next);
+  await bootout(previous.name);
+  if (next.name !== previous.name) await bootout(next.name);
+  gate();
+  const boot = await d().exec('/bin/launchctl', ['bootstrap', `gui/${d().uid}`, next.file], { timeoutMs: 30_000 });
+  if (boot.code !== 0) {
+    const why = (boot.stderr || boot.stdout).trim().slice(-300) || `exit ${boot.code}`;
+    throw new Error(`launchctl bootstrap failed: ${why}`);
   }
 }
 
 async function startRecorded(dir: string, socket: string, label: string, gate: () => void): Promise<void> {
-  try {
-    await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
-  } catch (err) {
-    gate();
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('No service is installed')) {
-      await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+  if (recordedAgentStale(dir, label)) {
+    await replaceStaleLaunchAgent(dir, label, gate);
+  } else {
+    try {
+      await runner(dir, ['svc', 'start'], 'Starting the runner', 60_000);
+    } catch (err) {
       gate();
-      await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
-    } else if (!serviceAlreadyUp(message)) {
-      throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('No service is installed')) {
+        await runner(dir, ['svc', 'install'], 'Installing the LaunchAgent', 60_000);
+        gate();
+        await runner(dir, ['svc', 'start'], 'Starting the LaunchAgent', 60_000);
+      } else if (!serviceAlreadyUp(message)) {
+        throw err;
+      }
     }
   }
   gate();

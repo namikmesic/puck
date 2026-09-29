@@ -200,6 +200,38 @@ describe('runner service', () => {
     expect(calls.some((c) => c.includes('kickstart'))).toBe(false);
   });
 
+  it('rewrites an installed LaunchAgent that still runs run.sh', async () => {
+    const { d, calls } = deps('darwin', 501);
+    const svc = new Service({ ...d, config: { ...config, appBundleId: 'com.namikmesic.puck' } });
+    await svc.install();
+    const file = readServiceRecord(d.paths)?.file as string;
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\/puck-runner</, '/run.sh<'));
+    calls.length = 0;
+    await svc.install();
+    const text = fs.readFileSync(file, 'utf8');
+    expect(text).toContain(`<string>${path.join(d.paths.root, 'puck-runner')}</string>`);
+    expect(text).toContain('<key>AssociatedBundleIdentifiers</key>');
+    expect(text).toContain('<string>com.namikmesic.puck</string>');
+    expect(text).not.toContain('run.sh');
+    expect(calls).toEqual([]);
+  });
+
+  it('still refuses a second systemd install', async () => {
+    const { d } = deps('linux', 0, { SUDO_USER: 'puck' });
+    const svc = new Service(d);
+    await svc.install();
+    await expect(svc.install()).rejects.toThrow(/already installed/);
+  });
+
+  it('names the login item from the plist when kickstart fails', async () => {
+    const { d } = deps('darwin', 501, {}, '', (call) => (call.startsWith('launchctl kickstart') ? { code: 1, stderr: 'Operation not permitted' } : null));
+    const svc = new Service(d);
+    await svc.install();
+    const file = readServiceRecord(d.paths)?.file as string;
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\/puck-runner</, '/run.sh<'));
+    await expect(svc.start()).rejects.toThrow(/Check that run\.sh is allowed in System Settings → General → Login Items & Extensions/);
+  });
+
   it('fails the start when launchd does not start the LaunchAgent', async () => {
     const { d, lines } = deps('darwin', 501, {}, '', (call) => (call.startsWith('launchctl kickstart') ? { code: 1, stderr: 'Operation not permitted' } : null));
     const svc = new Service(d);
