@@ -306,7 +306,7 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
         const warn = el(
           'div',
           'pv-health-msg rn-unreachable',
-          `A runner on another machine can't reach this Puck server at ${server.host}: on that machine, ${server.host.replace(/:\d+$/, '')} is the machine itself. It needs the server at an address it can reach, set as the server's public URL (PUCK_SERVER_URL). A runner on this Mac reaches it as it is.`,
+          `A runner on another machine can't reach this Puck server at ${server.host}: on that machine, ${server.host.replace(/:\d+$/, '')} is the machine itself. It needs the server at an address it can reach, set as the server's public URL (PUCK_SERVER_URL). This Mac still works as a runner.`,
         );
         warn.id = 'rn-add-unreachable';
         addPanel.appendChild(warn);

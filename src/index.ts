@@ -155,8 +155,10 @@ const ipcHandlers: Record<(typeof CHANNELS)[keyof typeof CHANNELS], IpcHandler> 
   [CHANNELS.providerAuthLogout]: (_event, id) => signInProvider(requireId(id, 'provider')).auth.logout(),
   [CHANNELS.runners]: () => runners.state(),
   [CHANNELS.runnerRegistrationToken]: async () => {
+    // Releases first: a failed read surfaces as an error instead of reading as
+    // "no packages", and leaves no token behind.
+    const releases = await serverApi.releases();
     const token = await serverApi.registrationToken();
-    const releases = await serverApi.releases().catch(() => ({ latest: null, assets: [] }));
     return {
       id: token.id,
       token: token.token,
