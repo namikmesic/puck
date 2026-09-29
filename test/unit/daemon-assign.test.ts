@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readDefinition } from '../../src/harness/env-definition';
 import { Backlog } from '../../src/daemon/items';
-import type { Logger } from '../../src/daemon/log';
+import { nullLogger } from '../../src/daemon/log';
 import { itemsStore } from '../../src/daemon/store/items';
 import type { SessionRecord } from '../../src/daemon/store/sessions';
 import { Work, type WorkDeps } from '../../src/daemon/work';
@@ -16,7 +16,7 @@ import { exampleDefinition } from './daemon-fakes';
  * refused; an item with no session assigns as before.
  */
 
-const log: Logger = { info() {}, warn() {}, error() {}, files: () => [] };
+const log = nullLogger;
 
 function worker(id: string, agent: string): SessionRecord {
   return {

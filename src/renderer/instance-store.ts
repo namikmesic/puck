@@ -11,8 +11,8 @@
  *   buffered events after the head then apply on top.
  * - Kept: items, backlog order, sessions, capacity, instance status, GitHub
  *   state, open questions, and live turn buffers (the recorded dialect of
- *   every turn still running, so a thread opened mid-turn and the work pane's
- *   "latest tool" line need no history read).
+ *   every turn still running, so a thread opened mid-turn and the board's
+ *   running-tool line need no history read).
  * - Transcripts are not kept here: session-view pages them.
  *
  * No DOM; listeners hear what changed.

@@ -1,7 +1,8 @@
 /**
  * The instance store applies daemon events once and in seq order, resyncs
- * from snapshots, and keeps what the panes read: items in backlog order,
- * sessions, capacity, open questions and live turn buffers.
+ * from snapshots, and keeps what Chat, the Board, and the item sheet
+ * read: items in backlog order, sessions, capacity, open questions and
+ * live turn buffers.
  */
 
 import { describe, expect, it, vi } from 'vitest';

@@ -1,6 +1,6 @@
 /**
  * Shared vocabulary for environment lifecycle presentation: the compact
- * elapsed time the status line and the work pane both show.
+ * elapsed time the status line and the board both show.
  * Pure: no node, no electron, no DOM.
  */
 

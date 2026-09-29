@@ -13,7 +13,7 @@
  *   by how they apply), a GitHub warning when the environment's GitHub
  *   access is not ok, a reconnecting spinner, "Daemon update" when this
  *   Puck carries a newer daemon, and "Daemon updating" while that runs.
- * - The banner above the chat says when the environment cannot be reached
+ * - The banner over the content says when the environment cannot be reached
  *   ("Can't reach build-box. Work continues there; Puck keeps trying."),
  *   is incompatible, or is not connected, with Reconnect where it helps.
  *
