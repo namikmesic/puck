@@ -280,7 +280,11 @@ export class Turns {
    * fsynced before the session record changes, and a session an earlier
    * boot already marked interrupted gets the same close if its entry is
    * still open. A session still `running` whose transcript already finished
-   * is marked idle and is not resumed. A session an orderly shutdown left
+   * is marked idle and is not resumed. Its turn count, last-turn tokens, and
+   * last-active time come from the transcript header, and that turn's cost
+   * is added only when the session's last-active time does not already match
+   * the header, so a queue write that already stored the end snapshot is not
+   * counted twice. A session an orderly shutdown left
    * `interrupted` stays interrupted so the next boot resumes it. Every turn
    * the event log started without ending gets a `turn.end`. Returns the
    * sessions that became interrupted.
