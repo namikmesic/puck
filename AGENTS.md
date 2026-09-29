@@ -154,12 +154,13 @@ CI runs these plus `node --check src/main/runner/runner.js`, the definitions sch
 - `src/main/environments.ts` - Puck lifecycle state, Docker lifecycle, bootstrap, credential and secret injection, credential purge on logout (all registry-driven, no provider names).
 - `src/main/runner.ts` - docker-exec stdio bridge (handshake, watchdog, stderr diagnostics, `WIRE` contract).
 - `src/main/shutdown.ts` - the quit drain (`installQuitDrain`) and the renderer flush request (`flushRenderers`).
-- `src/renderer.ts` - the wiring layer: DOM lookups, nav applier and settings modal, composer/turn loop, settings card grids, shortcuts, boot.
+- `src/renderer.ts` - the legacy window: DOM lookups, nav applier and settings modal, composer/turn loop, settings card grids, shortcuts, boot.
   `nav()` is the single entry point for navigation.
   Element ids follow prefixes: `a-*` agent editor, `d-*` environment editor, `sec-*` settings sections, `aed-*` agent-editor cards, `sm-*` settings modal.
   Settings sections are `agents`, `providers`, `envs`, and `support` (`SettingsSection` in `nav.ts`).
-- `src/styles/` - one stylesheet per surface (`shell`, `settings`, `editors`, `chat`, `overlays`).
-  The import order in `renderer.ts` preserves the cascade.
+- `src/renderer-v2.ts` - the environment window (`PUCK_UI=v2`); the legacy window stays the default until cutover. Each module's header under `src/renderer/` is its contract.
+- `src/styles/` - one stylesheet per surface (`shell`, `settings`, `editors`, `chat`, `work`, `flows`, `overlays`).
+  The import order in `renderer.ts` and `renderer-v2.ts` preserves the cascade.
 - `src/renderer/` - extracted, unit-tested modules.
   The house style (proven by `options.ts`): context/elements in, controller out, no `getElementById` inside, jsdom tests.
   - `session-store.ts` - the Session model: conversations, sub-agent children, spawn/teardown, rename sync, debounced persistence, the quit flush.

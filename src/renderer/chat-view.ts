@@ -1,7 +1,8 @@
 /**
  * The chat rendering layer: Slack-style message rows, streaming assistant
- * turns (markdown committer, tool cards, sub-agent links, ask cards), replay
- * of persisted logs, and the full-screen turn overlay.
+ * turns (markdown committer, tool cards, sub-agent links, ask cards), Puck
+ * notice rows (`W-n` opens the item), replay of persisted logs, and the
+ * full-screen turn overlay.
  *
  * Pure presentation over a Session's live thread node. Everything stateful
  * it needs from the app — persistence, roster refresh, answer delivery,

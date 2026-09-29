@@ -193,7 +193,7 @@ export interface IssueHit {
   state: string;
   labels: string[];
   url: string;
-  /** "W-3 (review)" when a work item already works on it. */
+  /** "W-3 (review)" when an open work item is already on it. Done and cancelled items are omitted. */
   item: string | null;
 }
 

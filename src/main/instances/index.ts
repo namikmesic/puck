@@ -417,6 +417,9 @@ function rebuildFrom(envId: string, given?: ResolvedEnvironment): Promise<void> 
         },
       },
     );
+    // The event log lives on the volume, so keeping lastSeq would replay a
+    // tail and leave the window on the previous repository list. A null
+    // cursor makes the next attach resync from a snapshot.
     store.updateCursor(envId, { pin: def.source.pin, harnesses: harnessesOf(def), lastSeq: null });
     if (store.currentId() === envId) attach(envId);
   });
