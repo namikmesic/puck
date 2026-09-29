@@ -1032,6 +1032,7 @@ export class GithubSync {
     if (s.ci !== ci) return;
     const checks = latestCheckRuns(polled.data ?? []);
     const result = evaluateChecks(checks, status.data ?? null, polled.incomplete === true || status.incomplete === true);
+    if (result.state !== 'failure') this.logTries.delete(item.id);
     if (result.state === 'none') {
       if (ci.observed != null) return;
       const state: CiWatch['state'] = this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending';
@@ -1062,7 +1063,6 @@ export class GithubSync {
       deliver = this.logsSettled(item.id, `${ci.sha}\0${outcome}`, complete);
     }
     if (s.ci !== ci) return;
-    if (state === 'success') this.logTries.delete(item.id);
     if (deliver && state === 'success') ci.logs = [];
     ci.state = state;
     this.save();

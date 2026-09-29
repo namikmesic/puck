@@ -1258,6 +1258,33 @@ describe('CI on the published head', () => {
     fake.gh.logsDown.add(jobId);
   };
 
+  it('does not settle the next failure from log reads that a pending re-run ended', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    downLog(SHA, 50, 60, 'npm test\nFAIL readme.test.js');
+    await pollAll();
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.checkRuns.set(SHA, [run(2, 'test', null, 'in_progress')]);
+    await pollAll();
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    downLog(SHA, 51, 61, 'npm test\nFAIL again');
+    await pollAll();
+    expect(noticesOf('pr.checks')).toEqual([]);
+    expect(followUps).toEqual([]);
+
+    fake.gh.logsDown.delete(61);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('FAIL again');
+  });
+
   it('does not settle the next failure from log reads that a green run already ended', async () => {
     policies = { intake: 'off', ci: 'fix' };
     const item = publishedItem();
