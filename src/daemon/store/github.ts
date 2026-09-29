@@ -35,13 +35,33 @@ export interface Feedback {
 export interface CiWatch {
   sha: string;
   state: ChecksState;
-  /** When watching this sha began (nothing reported for long enough settles as neutral). */
+  /**
+   * When watching this sha began, until a check or status is reported;
+   * then when those results last changed. A reported head is polled until
+   * this is `quietChecksMs` ago.
+   */
   since: number;
   failing: PullChecks['failing'];
   /** Redacted log tails of failed jobs. */
   logs: { name: string; text: string }[];
-  /** The sha whose success or failure was reported. Neutral is not reported, so a later check still is. */
+  /**
+   * The sha whose success or failure was reported. Neutral leaves this
+   * unset, so a check that appears later still reports. A reported sha
+   * stays polled until the quiet window after `since`.
+   */
   notified: string | null;
+  /** Outcome last delivered: `success`, or `failure:` plus the sorted check names. */
+  reported: string | null;
+  /** Last raw result (`pending|success|failure:` + sorted failing names). Null while nothing has reported. */
+  observed: string | null;
+  /** A `ci: fix` follow-up was already queued for this sha. */
+  fixSent: boolean;
+}
+
+/** Identity of a delivered outcome. The same failing names in any order are one result. */
+export function ciOutcome(state: 'success' | 'failure', failing: { name: string }[]): string {
+  if (state === 'success') return 'success';
+  return `failure:${[...failing.map((f) => f.name)].sort().join('\0')}`;
 }
 
 export interface ItemSync {
@@ -86,13 +106,20 @@ export function emptySync(): ItemSync {
 const nums = (v: unknown): number[] => (Array.isArray(v) ? v.filter((n): n is number => typeof n === 'number') : []);
 
 function normalizeCi(raw: CiWatch): CiWatch {
+  const failing = raw.failing ?? [];
+  const notified = raw.notified ?? null;
+  const delivered = raw.state === 'success' || raw.state === 'failure';
+  const legacy = raw.reported == null && notified === raw.sha && delivered;
   return {
     sha: raw.sha,
     state: raw.state,
     since: raw.since,
-    failing: raw.failing ?? [],
+    failing,
     logs: raw.logs ?? [],
-    notified: raw.notified ?? null,
+    notified,
+    reported: typeof raw.reported === 'string' ? raw.reported : legacy && (raw.state === 'success' || raw.state === 'failure') ? ciOutcome(raw.state, failing) : null,
+    observed: typeof raw.observed === 'string' ? raw.observed : null,
+    fixSent: raw.fixSent === true || (raw.fixSent == null && legacy && raw.state === 'failure'),
   };
 }
 

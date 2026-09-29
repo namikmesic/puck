@@ -21,11 +21,17 @@
  *     the accept note records the status it came from; closed without
  *     merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
- *     redacted log tails of failed workflow jobs. A success or failure is
- *     a notice, once per head; `ci: fix` also queues a follow-up whenever
- *     the item can take one, up to `maxCiFixAttempts`. The notice is the
- *     latest run of every check name. Nothing reported settles as neutral
- *     and stays watched, so a check that appears later still reports.
+ *     redacted log tails of failed workflow jobs. Check names and summaries
+ *     are redacted the same way. A success or failure is a notice, and the
+ *     head stays polled until ten minutes after its results last changed
+ *     (a new head, or a closed or merged pull request, stops that). A
+ *     changed outcome — new failing check names, or success and failure
+ *     swapping — is another notice and updates `pr.checks`. `ci: fix`
+ *     queues one follow-up for a head the worker has not yet been sent, up
+ *     to `maxCiFixAttempts`, and does not queue again while that head's
+ *     failing set is unchanged. The notice is the latest run of every
+ *     check name. Nothing reported settles as neutral and stays watched,
+ *     so a check that appears later still reports.
  *   - Reviews, inline comments and conversation comments. Only feedback
  *     from a person whose repository permission is admin, maintain or
  *     write reaches an agent; a bot, a weaker permission, or a permission
@@ -64,7 +70,7 @@ import { type Backlog, holdsSlot, itemLabel } from './items';
 import type { Logger } from './log';
 import { ciFixPrompt, issueContext, reviewPrompt, type IssueComment } from './prompts';
 import { realTimers, type Timers } from './scheduler';
-import { emptySync, type CiWatch, type Feedback, type GithubFile, type ItemSync } from './store/github';
+import { ciOutcome, emptySync, type CiWatch, type Feedback, type GithubFile, type ItemSync } from './store/github';
 import type { ItemRecord } from './store/items';
 import type { JsonStore } from './store/store';
 import { WorkError, type Actor } from './work';
@@ -76,7 +82,10 @@ export const POLL = {
   checksMs: 60_000,
   /** How often the loop looks for anything due. */
   tickMs: 15_000,
-  /** A head commit with no check or status reported for this long settles as neutral. */
+  /**
+   * Nothing reported for this long settles as neutral. After a success or
+   * failure, the same head is polled until this long after its results last changed.
+   */
   quietChecksMs: 10 * 60_000,
 } as const;
 
@@ -147,6 +156,10 @@ function oneLine(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+function ciLine(text: string, max: number): string {
+  return oneLine(redact(text), max);
+}
+
 /** Text Puck writes to GitHub: one line, no HTML comment that could pass for a marker. */
 function forGitHub(text: string, max: number): string {
   return oneLine(text.replace(/<!--|-->/g, ''), max);
@@ -204,13 +217,13 @@ export function evaluateChecks(
     if (run.status !== 'completed') pending++;
     else if (FAILED_CONCLUSIONS.has(run.conclusion ?? '')) {
       const summary = run.output?.title || run.output?.summary || run.conclusion || 'failed';
-      failing.push({ name: oneLine(run.name, 120), url: run.html_url ?? run.details_url ?? '', summary: oneLine(summary, 300) });
+      failing.push({ name: ciLine(run.name, 120), url: run.html_url ?? run.details_url ?? '', summary: ciLine(summary, 300) });
     } else passed++;
   }
   for (const st of status?.statuses ?? []) {
     if (st.state === 'pending') pending++;
     else if (st.state === 'failure' || st.state === 'error') {
-      failing.push({ name: oneLine(st.context, 120), url: st.target_url ?? '', summary: oneLine(st.description || st.state, 300) });
+      failing.push({ name: ciLine(st.context, 120), url: st.target_url ?? '', summary: ciLine(st.description || st.state, 300) });
     } else passed++;
   }
   let state: 'pending' | 'failure' | 'success' | 'none' = pending ? 'pending' : failing.length ? 'failure' : passed ? 'success' : 'none';
@@ -261,6 +274,10 @@ function latestCheckRuns(runs: readonly GhCheckRun[]): GhCheckRun[] {
 function newerCheck(a: GhCheckRun, b: GhCheckRun): boolean {
   const delta = parseTime(a.started_at, 0) - parseTime(b.started_at, 0);
   return delta !== 0 ? delta > 0 : a.id >= b.id;
+}
+
+function ciSnapshot(state: 'pending' | 'failure' | 'success', failing: { name: string }[]): string {
+  return `${state}:${[...failing.map((f) => f.name)].sort().join('\0')}`;
 }
 
 /* ---------- The workflow ---------- */
@@ -382,7 +399,7 @@ export class GithubSync {
       const s = this.deps.store.get().items[item.id];
       if (item.pr && this.watchesPull(item, s)) await this.step(`pull:${item.id}`, POLL.pullMs, () => this.pollPull(item.id));
       const ci = this.deps.store.get().items[item.id]?.ci;
-      if (item.pr && ci && ci.notified !== ci.sha && this.watchesPull(item, s)) {
+      if (item.pr && ci && s?.prState === 'open' && this.ciOpen(ci) && this.watchesPull(item, s)) {
         await this.step(`checks:${item.id}`, POLL.checksMs, () => this.pollChecks(item.id));
       }
       if (item.source && gh.statusComment) {
@@ -790,6 +807,9 @@ export class GithubSync {
       failing: [],
       logs: [],
       notified: null,
+      reported: null,
+      observed: null,
+      fixSent: false,
     };
   }
 
@@ -970,12 +990,17 @@ export class GithubSync {
 
   /* ---------- CI ---------- */
 
+  private ciOpen(ci: CiWatch): boolean {
+    if (ci.notified !== ci.sha || ci.state === 'pending') return true;
+    return this.now() - ci.since < POLL.quietChecksMs;
+  }
+
   private async pollChecks(itemId: string): Promise<void> {
     const item = this.deps.backlog.get(itemId);
     const repo = item ? this.repoOf(item) : null;
     const s = this.deps.store.get().items[itemId];
     const ci = s?.ci;
-    if (!item?.pr || !repo || !ci || ci.notified === ci.sha) return;
+    if (!item?.pr || !repo || !ci || !this.ciOpen(ci)) return;
     const [polled, status] = await Promise.all([
       this.deps.api.checkRuns(repo.github, ci.sha),
       this.deps.api.combinedStatus(repo.github, ci.sha),
@@ -983,9 +1008,26 @@ export class GithubSync {
     if (s.ci !== ci) return;
     const checks = latestCheckRuns(polled.data ?? []);
     const result = evaluateChecks(checks, status.data ?? null, polled.incomplete === true || status.incomplete === true);
-    const state: CiWatch['state'] = result.state === 'none' ? (this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending') : result.state;
+    if (result.state === 'none') {
+      if (ci.observed != null) return;
+      const state: CiWatch['state'] = this.now() - ci.since >= POLL.quietChecksMs ? 'neutral' : 'pending';
+      if (ci.state !== state) {
+        ci.state = state;
+        this.save();
+      }
+      this.patchPr(item, { checks: { sha: ci.sha, state: ci.state, failing: ci.failing } });
+      return;
+    }
+    const snap = ciSnapshot(result.state, result.failing);
+    if (ci.observed !== snap) {
+      ci.observed = snap;
+      ci.since = this.now();
+    }
+    const state = result.state;
     ci.failing = result.failing;
-    if (state === 'failure') {
+    const outcome = state === 'success' || state === 'failure' ? ciOutcome(state, result.failing) : null;
+    const deliver = outcome !== null && outcome !== ci.reported;
+    if (deliver && state === 'failure') {
       try {
         await this.collectFailedJobs(repo.github, ci);
       } catch (err) {
@@ -993,10 +1035,11 @@ export class GithubSync {
       }
     }
     if (s.ci !== ci) return;
+    if (deliver && state === 'success') ci.logs = [];
     ci.state = state;
     this.save();
     this.patchPr(item, { checks: { sha: ci.sha, state, failing: ci.failing } });
-    if (state === 'pending' || state === 'neutral' || ci.notified === ci.sha) return;
+    if (!deliver) return;
     this.ciSettled(item, ci, result.passed);
   }
 
@@ -1010,7 +1053,7 @@ export class GithubSync {
         if (logs.length >= LIMITS.failedJobs) break;
         if (!FAILED_CONCLUSIONS.has(job.conclusion ?? '')) continue;
         try {
-          logs.push({ name: oneLine(job.name, 120), text: logTail(String((await this.deps.api.jobLog(repo, job.id)) ?? '')) });
+          logs.push({ name: ciLine(job.name, 120), text: logTail(String((await this.deps.api.jobLog(repo, job.id)) ?? '')) });
         } catch (err) {
           this.failed('ci-log', err);
         }
@@ -1034,11 +1077,12 @@ export class GithubSync {
       const shown = names.slice(0, 6).join(', ') + (names.length > 6 ? `, and ${names.length - 6} more` : '');
       let extra = ' Read them with ci_read.';
       const canFollowUp = !!item.sessionId && (item.status === 'review' || item.status === 'queued' || holdsSlot(item.status));
-      if (gh.ci === 'fix') {
+      if (gh.ci === 'fix' && !ci.fixSent) {
         if (s.ciFixAttempts >= gh.maxCiFixAttempts) {
           extra = ` The automatic fix attempts (${gh.maxCiFixAttempts}) are used up; read them with ci_read and decide.`;
         } else if (canFollowUp) {
           s.ciFixAttempts += 1;
+          ci.fixSent = true;
           const fix = ciFixPrompt({ pr: pr.number, sha: ci.sha, failing: ci.failing, logs: ci.logs });
           this.deps.work.followUp(item.id, fix, 'system').catch((err: unknown) => this.failed(`ci-follow-up:${item.id}`, err));
           extra = ` Queued a fix to the worker (attempt ${s.ciFixAttempts} of ${gh.maxCiFixAttempts}).`;
@@ -1048,6 +1092,7 @@ export class GithubSync {
     }
     this.deps.notify('pr.checks', text, item.id);
     ci.notified = ci.sha;
+    ci.reported = ci.state === 'success' ? 'success' : ciOutcome('failure', ci.failing);
     this.save();
   }
 

@@ -1073,7 +1073,7 @@ describe('CI on the published head', () => {
     else if (typeof c.notice === 'string') expect(texts).toEqual([c.notice]);
     else expect(texts[0]).toMatch(c.notice);
     await pollAll();
-    expect(noticesOf('pr.checks')).toHaveLength(c.notice ? 1 : 0); // once per head
+    expect(noticesOf('pr.checks')).toHaveLength(c.notice ? 1 : 0);
   });
 
   it('settles as neutral, silently, when nothing reports for ten minutes', async () => {
@@ -1097,6 +1097,91 @@ describe('CI on the published head', () => {
     await pollAll();
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([expect.stringMatching(/1 check failed \(test\)/)]);
     expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+  });
+
+  it('reports a later failure after the same head settled as success', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'lint', 'success')]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual(['W-1 PR #7: all 1 check passed.']);
+    expect(followUps).toEqual([]);
+    fake.gh.checkRuns.set(SHA, [run(1, 'lint', 'success'), run(2, 'test', 'failure')]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      'W-1 PR #7: all 1 check passed.',
+      expect.stringMatching(/^W-1 PR #7: 1 check failed \(test\)\. Queued a fix to the worker \(attempt 1 of 2\)\.$/),
+    ]);
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text).toContain('- test: test failure');
+    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+  });
+
+  it('does not repeat a notice or a fix while the same checks fail', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    await pollAll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    const before = fake.gh.requests.length;
+    clock += POLL.quietChecksMs;
+    await sync.poll();
+    expect(noticesOf('pr.checks')).toHaveLength(1);
+    expect(followUps).toHaveLength(1);
+    expect(fake.gh.requests.slice(before).some((r) => r.path.includes('/check-runs'))).toBe(false);
+  });
+
+  it('notices a new failing check without another fix once the worker was sent', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
+    await pollAll();
+    expect(followUps).toHaveLength(1);
+    fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure'), run(2, 'lint', 'failure')]);
+    await pollAll();
+    expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
+      expect.stringMatching(/1 check failed \(test\)\. Queued a fix to the worker \(attempt 1 of 2\)\./),
+      expect.stringMatching(/2 checks failed \(test, lint\)\. Read them with ci_read\./),
+    ]);
+    expect(followUps).toHaveLength(1);
+    expect(backlog.get(item.id)?.pr?.checks?.failing?.map((f) => f.name).sort()).toEqual(['lint', 'test']);
+  });
+
+  it('redacts a token-shaped check title before it is stored or sent to the worker', async () => {
+    policies = { intake: 'off', ci: 'fix' };
+    const item = publishedItem();
+    await sync.published(item.id);
+    const secret = 'Authorization: Bearer ghs_leakedtoken123';
+    fake.gh.checkRuns.set(SHA, [
+      {
+        id: 1,
+        name: secret,
+        status: 'completed',
+        conclusion: 'failure',
+        html_url: 'https://github.com/octo/app/runs/1',
+        output: { title: secret, summary: 'ignored because the title is set' },
+      },
+    ]);
+    fake.gh.statuses.set(SHA, [{ context: 'ci/legacy', state: 'failure', target_url: 'https://ci', description: secret }]);
+    await pollAll();
+    const current = backlog.get(item.id) as ItemRecord;
+    const read = sync.ciRead(current) as { failing: Array<{ name: string; summary: string }> };
+    const shown = JSON.stringify({ checks: current.pr?.checks, read, notices: noticesOf('pr.checks'), followUps });
+    expect(shown).not.toContain('ghs_leakedtoken123');
+    expect(read.failing).toEqual([
+      expect.objectContaining({ name: 'Authorization: [redacted]', summary: 'Authorization: [redacted]' }),
+      expect.objectContaining({ name: 'ci/legacy', summary: 'Authorization: [redacted]' }),
+    ]);
+    expect(followUps[0].text).toContain('- Authorization: [redacted]: Authorization: [redacted]');
+    expect(followUps[0].text).toContain('- ci/legacy: Authorization: [redacted]');
   });
 
   it('keeps the redacted last 200 lines of each failed job for ci_read', async () => {
