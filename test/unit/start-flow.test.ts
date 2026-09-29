@@ -106,13 +106,22 @@ describe('preflight', () => {
 
 describe('create', () => {
   it('records the index entry, uploads the bundle in chunks, and creates the container with the inbox', async () => {
-    const { d, calls, stages } = deps();
+    const def = resolved();
+    // The index entry carries policies.github whenever resolution attached it.
+    const github = { ci: 'fix', allowWorkflowEdits: true };
+    (def.policies as { github?: object }).github = github;
+    const { d, calls, stages } = deps({}, def);
     const plan = await preflight(spec(), d);
     const created: string[] = [];
     const envId = await create(plan, spec(), d, (id) => created.push(id));
     expect(envId).toBe('env_01J8Z3X0000000000000000000');
     expect(created).toEqual([envId]);
-    expect(d.createIndexEntry).toHaveBeenCalledWith({ runnerId: RUNNER, definition: 'example', repos: ['your-org/your-app'] });
+    expect(d.createIndexEntry).toHaveBeenCalledWith({
+      runnerId: RUNNER,
+      definition: 'example',
+      repos: ['your-org/your-app'],
+      policies: { github },
+    });
     expect(calls.map((c) => c.op)).toEqual(['bundle.has', 'bundle.put', 'bundle.put', 'instance.create']);
     const puts = calls.filter((c) => c.op === 'bundle.put').map((c) => c.args as { offset: number; last: boolean; data: string });
     expect(puts.map((p) => [p.offset, p.last])).toEqual([

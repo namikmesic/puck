@@ -529,7 +529,15 @@ describe('startability and summaries', () => {
     const repo = run(agentPatch({ effort: 'ludicrous' }));
     const { environments, agents } = summarize(repo);
     expect(environments).toEqual([
-      expect.objectContaining({ name: 'example', valid: true, startable: false, orchestrator: 'lead', agents: ['implementer', 'reviewer'] }),
+      expect.objectContaining({
+        name: 'example',
+        valid: true,
+        startable: false,
+        orchestrator: 'lead',
+        agents: ['implementer', 'reviewer'],
+        secrets: [],
+        resources: { cpus: 4, memory: '8g' },
+      }),
     ]);
     expect(agents.find((a) => a.name === 'implementer')).toMatchObject({ valid: false, harness: 'claude-code' });
   });
