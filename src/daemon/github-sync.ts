@@ -346,9 +346,18 @@ function replacedJobs(before: readonly GhJob[], after: readonly GhJob[]): GhJob[
   });
 }
 
-function jobsRecorded(failed: readonly GhJob[], before: readonly GhJob[], after: readonly GhJob[]): GhJob[] {
+function failedJobsReplaced(failed: readonly GhJob[], after: readonly GhJob[]): boolean {
+  return failed.some((job) => {
+    const same = after.find((row) => row.id === job.id);
+    return same === undefined || same.status === 'queued';
+  });
+}
+
+function jobsRecorded(failed: readonly GhJob[], before: readonly GhJob[], after: readonly GhJob[] | null): GhJob[] {
   const seen = new Set(failed.map((j) => j.id));
-  return [...failed, ...replacedJobs(before, after).filter((j) => !seen.has(j.id))];
+  const extra =
+    after !== null && failedJobsReplaced(failed, after) ? replacedJobs(before, after) : before.filter((job) => job.conclusion === 'skipped');
+  return [...failed, ...extra.filter((job) => !seen.has(job.id))];
 }
 
 function ciSnapshot(state: 'pending' | 'failure' | 'success', failing: { name: string }[]): string {
@@ -1308,21 +1317,24 @@ export class GithubSync {
           untracked = true;
           break;
         }
+        const track = (after: readonly GhJob[] | null): void => {
+          const recorded = jobsRecorded(failed, before, after);
+          entry.jobs = recorded.map((j) => ciLine(j.name, 120));
+          this.recordRerun(item, ci, recorded);
+        };
         try {
           const after = await this.deps.api.jobs(repo.github, run.id);
           if (moved()) {
             untracked = true;
             break;
           }
-          const recorded = jobsRecorded(failed, before, after);
-          entry.jobs = recorded.map((j) => ciLine(j.name, 120));
-          this.recordRerun(item, ci, recorded);
+          track(after);
         } catch (err) {
           if (moved()) {
             untracked = true;
             break;
           }
-          this.recordRerun(item, ci, failed);
+          track(null);
           if (err instanceof GitHubRateLimitError) break;
         }
       }

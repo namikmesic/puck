@@ -73,6 +73,12 @@ function fakeGitHub() {
     reruns: [] as number[],
     /** Run ids whose jobs read fails with HTTP 500. */
     jobsDown: new Set<number>(),
+    /** Run ids whose jobs read, once a re-run was requested, still returns the pre-attempt list. */
+    jobsStale: new Set<number>(),
+    /** Jobs as they were when a stale re-run was requested. */
+    jobsAtRerun: new Map<number, Json[]>(),
+    /** Run ids whose jobs read fails with HTTP 500 once a re-run was requested. */
+    jobsDownAfterRerun: new Set<number>(),
     /** Run ids whose re-run request fails with HTTP 500. */
     rerunDown: new Set<number>(),
     /** One-shot holds: a matching request waits for its gate before GitHub answers. */
@@ -175,8 +181,11 @@ function fakeGitHub() {
       return [200, { workflow_runs: page.body }, page.link ? { link: page.link } : undefined];
     }
     if ((m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(p))) {
-      if (gh.jobsDown.has(Number(m[1]))) return [500, { message: 'Server Error' }];
-      const page = paged(url, gh.jobs.get(Number(m[1])) ?? []);
+      const id = Number(m[1]);
+      if (gh.jobsDown.has(id)) return [500, { message: 'Server Error' }];
+      if (gh.reruns.includes(id) && gh.jobsDownAfterRerun.has(id)) return [500, { message: 'Server Error' }];
+      const listed = gh.reruns.includes(id) && gh.jobsAtRerun.has(id) ? (gh.jobsAtRerun.get(id) ?? []) : (gh.jobs.get(id) ?? []);
+      const page = paged(url, listed);
       return [200, { jobs: page.body }, page.link ? { link: page.link } : undefined];
     }
     if ((m = /^\/actions\/runs\/(\d+)\/rerun-failed-jobs$/.exec(p)) && method === 'POST') {
@@ -190,6 +199,7 @@ function fakeGitHub() {
       gh.reruns.push(id);
       const sha = String(found.head_sha);
       const current = gh.jobs.get(id) ?? [];
+      if (gh.jobsStale.has(id)) gh.jobsAtRerun.set(id, current.map((j) => ({ ...j })));
       const restart = new Set<string>();
       for (const j of current) {
         if (['failure', 'cancelled', 'timed_out'].includes(String(j.conclusion))) restart.add(String(j.name));
@@ -1671,6 +1681,12 @@ describe('ci_rerun', () => {
     fake.gh.logs.set(60, 'npm test\nFAIL old.test.js');
   }
 
+  /** `deploy` was skipped because it needs the failed `test` job. */
+  function skippedDeploy(): void {
+    fake.gh.jobs.set(50, [job(60, 'test', 'failure'), job(61, 'lint', 'success'), { ...job(62, 'deploy', 'skipped'), needs: ['test'] }]);
+    fake.gh.checkRuns.set(SHA, [check(60, 'test', 'failure'), check(61, 'lint', 'success'), check(62, 'deploy', 'skipped')]);
+  }
+
   /** One queued job of the re-run finishes; the others stay as they are. */
   function completeQueued(runId: number, name: string, conclusion: string): void {
     const run = findRun(runId);
@@ -1758,11 +1774,32 @@ describe('ci_rerun', () => {
       state: 'success',
       notice: 'W-1 PR #7: all 3 checks passed.',
       jobs: ['test', 'deploy'],
-      setup: () => {
-        fake.gh.jobs.set(50, [job(60, 'test', 'failure'), job(61, 'lint', 'success'), { ...job(62, 'deploy', 'skipped'), needs: ['test'] }]);
-        fake.gh.checkRuns.set(SHA, [check(60, 'test', 'failure'), check(61, 'lint', 'success'), check(62, 'deploy', 'skipped')]);
-      },
+      setup: () => skippedDeploy(),
       // The failed job's new run has passed; the dependent's new run has not started.
+      beforePending: () => completeQueued(50, 'test', 'success'),
+    },
+    {
+      name: 'passes after a skipped dependent when the jobs re-read still returns the pre-attempt list',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test', 'deploy'],
+      setup: () => {
+        skippedDeploy();
+        fake.gh.jobsStale.add(50);
+      },
+      beforePending: () => completeQueued(50, 'test', 'success'),
+    },
+    {
+      name: 'passes after a skipped dependent when the jobs re-read fails',
+      conclusion: 'success',
+      state: 'success',
+      notice: 'W-1 PR #7: all 3 checks passed.',
+      jobs: ['test', 'deploy'],
+      setup: () => {
+        skippedDeploy();
+        fake.gh.jobsDownAfterRerun.add(50);
+      },
       beforePending: () => completeQueued(50, 'test', 'success'),
     },
   ])('reports the re-run result when it $name, never the result it replaced', async (c) => {
