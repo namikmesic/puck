@@ -99,6 +99,7 @@ export const RULES = [
   'policies.github.maxCiFixAttempts',
   'policies.github.reviews',
   'policies.github.allowWorkflowEdits',
+  'policies.github.allowCiRerun',
   'git',
   'git.userName',
   'git.userEmail',
@@ -548,6 +549,7 @@ function checkEnvironment(c: Check, v: Record<string, unknown>, snap: RepoSnapsh
       c.int(gh.maxCiFixAttempts, at('maxCiFixAttempts'), 'policies.github.maxCiFixAttempts', 1, 5);
       c.oneOf(gh.reviews, at('reviews'), 'policies.github.reviews', ['notify', 'address']);
       c.bool(gh.allowWorkflowEdits, at('allowWorkflowEdits'), 'policies.github.allowWorkflowEdits');
+      c.bool(gh.allowCiRerun, at('allowCiRerun'), 'policies.github.allowCiRerun');
     }
   }
 

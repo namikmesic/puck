@@ -1,7 +1,8 @@
 /**
  * The daemon's GitHub reads and writes for the GitHub workflow: issues and
  * their comments, pull requests with their reviews and review comments,
- * check runs, commit statuses, workflow runs, jobs and job logs.
+ * check runs, commit statuses, workflow runs, jobs and job logs, and
+ * re-running a workflow run's failed jobs.
  *
  * Every poll is a conditional request on its first page. The ETag of that
  * URL's last 200 answer is kept with the body, so an unchanged resource
@@ -376,6 +377,11 @@ export class GitHubApi {
   /** A job's plain-text log (GitHub answers with a short-lived redirect to it). */
   jobLog(repo: string, jobId: number): Promise<string> {
     return this.get<string>(repo, `${repoPath(repo)}/actions/jobs/${jobId}/logs`, { text: true });
+  }
+
+  /** Re-run a completed workflow run's failed jobs and the jobs that depend on them (Actions write). */
+  async rerunFailedJobs(repo: string, runId: number): Promise<void> {
+    await this.post(repo, `${repoPath(repo)}/actions/runs/${runId}/rerun-failed-jobs`, {});
   }
 
   searchIssues(repo: string, q: string): Promise<GhIssue[]> {

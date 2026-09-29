@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "urn:puck:definitions:v1:0ffd8974",
+  "$id": "urn:puck:definitions:v1:019f2059",
   "title": "Puck definition",
   "description": "A Puck agent (agents/<name>.yaml) or environment (environments/<name>.yaml) definition.",
   "type": "object",
@@ -697,6 +697,11 @@
                   "type": "boolean",
                   "default": false,
                   "description": "Give the environment's GitHub tokens the Workflows permission."
+                },
+                "allowCiRerun": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Let the orchestrator re-run failed CI jobs (gives the environment's GitHub tokens Actions write)."
                 }
               }
             }

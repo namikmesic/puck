@@ -4,13 +4,14 @@
  * Always contents and pull requests (write) and metadata (read). Issues
  * write while intake or the status comment is on, and read otherwise
  * (issues can always be imported by hand). Checks and commit statuses
- * (read) to watch CI. Actions (read) while CI is watched, because failed-job
- * logs need it; never actions write. Workflows (write) only when the
- * definition allows workflow edits. Without workflows, GitHub refuses any
- * push that changes `.github/workflows/`, so a prompt-injected agent cannot
- * add a workflow that runs with the repository's secrets.
+ * (read) to watch CI. Actions write only while the definition allows
+ * re-running failed CI jobs, and read otherwise, because failed-job logs
+ * need it. Workflows (write) only when the definition allows workflow
+ * edits. Without workflows, GitHub refuses any push that changes
+ * `.github/workflows/`, so a prompt-injected agent cannot add a workflow
+ * that runs with the repository's secrets.
  *
- * These four fields are the whole input. A definition update that changes
+ * These five fields are the whole input. A definition update that changes
  * the resulting set has to be stored on the instance before the next mint.
  */
 
@@ -19,6 +20,7 @@ export interface GitHubTokenPolicies {
   statusComment: boolean;
   ci: 'notify' | 'fix';
   allowWorkflowEdits: boolean;
+  allowCiRerun: boolean;
 }
 
 export const DEFAULT_TOKEN_POLICIES: GitHubTokenPolicies = {
@@ -26,6 +28,7 @@ export const DEFAULT_TOKEN_POLICIES: GitHubTokenPolicies = {
   statusComment: true,
   ci: 'notify',
   allowWorkflowEdits: false,
+  allowCiRerun: false,
 };
 
 export type TokenPermission = 'read' | 'write';
@@ -38,7 +41,7 @@ export function permissionsFor(p: GitHubTokenPolicies): Record<string, TokenPerm
     issues: p.intake === 'label' || p.statusComment ? 'write' : 'read',
     checks: 'read',
     statuses: 'read',
-    actions: 'read',
+    actions: p.allowCiRerun ? 'write' : 'read',
   };
   if (p.allowWorkflowEdits) perms.workflows = 'write';
   return perms;
@@ -51,6 +54,7 @@ export function tokenPoliciesFrom(github: GitHubTokenPolicies): GitHubTokenPolic
     statusComment: github.statusComment,
     ci: github.ci,
     allowWorkflowEdits: github.allowWorkflowEdits,
+    allowCiRerun: github.allowCiRerun,
   };
 }
 

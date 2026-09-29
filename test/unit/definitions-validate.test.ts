@@ -466,6 +466,13 @@ const CASES: Case[] = [
     fail: envPatch({ policies: { github: { allowWorkflowEdits: 'yes' } } }),
     file: ENV,
   },
+  {
+    rule: 'policies.github.allowCiRerun',
+    name: 'a boolean',
+    pass: envPatch({ policies: { github: { allowCiRerun: true } } }),
+    fail: envPatch({ policies: { github: { allowCiRerun: 'yes' } } }),
+    file: ENV,
+  },
   { rule: 'git', name: 'a map', pass: envPatch({ git: {} }), fail: envPatch({ git: 'Puck Agent' }), file: ENV },
   {
     rule: 'git.userName',

@@ -33,6 +33,7 @@ export const ENVIRONMENT_FIELD_CLASSES: Readonly<Record<string, UpdateClass>> = 
   'policies.github.maxCiFixAttempts': 'hot',
   'policies.github.reviews': 'hot',
   'policies.github.allowWorkflowEdits': 'hot',
+  'policies.github.allowCiRerun': 'hot',
   'git.userName': 'reprovision',
   'git.userEmail': 'reprovision',
 };

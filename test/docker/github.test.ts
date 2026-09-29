@@ -275,7 +275,8 @@ describe('Docker scenario: the GitHub workflow', () => {
       ['PATCH /repos/octo/app/issues/comments/N', 'POST /repos/octo/app/issues/N/comments', 'POST /repos/octo/app/pulls'].sort(),
     );
 
-    // pr_read and ci_read run inside the orchestrator, the way an agent calls them.
+    // pr_read, ci_read and ci_rerun run inside the orchestrator, the way an agent calls them.
+    // This environment does not allow re-running CI, so ci_rerun is refused before any GitHub call.
     // Auto-wake is still delivering the review notice; wait until that turn is idle.
     const idleDeadline = Date.now() + 60_000;
     let orchestrator = '';
@@ -295,14 +296,16 @@ describe('Docker scenario: the GitHub workflow', () => {
     }
     const sent = await client.cmd<{ turnId?: string }>('chat.send', {
       sessionId: orchestrator,
-      text: ['!tool pr_read {"item":"W-1"}', '!tool ci_read {"item":"W-1"}'].join('\n'),
+      text: ['!tool pr_read {"item":"W-1"}', '!tool ci_read {"item":"W-1"}', '!tool ci_rerun {"item":"W-1"}'].join('\n'),
     });
     if (!sent.turnId) throw new Error('orchestrator queued the tool turn instead of running it');
     await client.untilEvent('turn.end', (ev) => ev.turnId === sent.turnId);
     const toolEnds = turnEvents(client.events(), sent.turnId).filter(
       (e): e is Extract<typeof e, { kind: 'tool-end' }> => e.kind === 'tool-end',
     );
-    expect(toolEnds.map((e) => e.ok)).toEqual([true, true]);
+    expect(toolEnds.map((e) => e.ok)).toEqual([true, true, false]);
+    expect(toolEnds[2].output).toContain('policies.github.allowCiRerun');
+    expect((await githubLog()).some((r) => r.url.includes('/rerun-failed-jobs'))).toBe(false);
     const prRead = JSON.parse(toolEnds[0].output) as Record<string, unknown>;
     const ciRead = JSON.parse(toolEnds[1].output) as Record<string, unknown>;
     const prReadText = JSON.stringify(prRead);

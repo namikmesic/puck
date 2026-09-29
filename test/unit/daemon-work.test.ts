@@ -695,6 +695,7 @@ describe('orchestrator tools', () => {
       'issues_import',
       'pr_read',
       'ci_read',
+      'ci_rerun',
       'agents_list',
       'environment_info',
     ]);

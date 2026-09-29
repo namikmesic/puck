@@ -199,6 +199,11 @@ function environmentSchema(): JsonSchema {
             default: GH.allowWorkflowEdits,
             description: "Give the environment's GitHub tokens the Workflows permission.",
           },
+          allowCiRerun: {
+            type: 'boolean',
+            default: GH.allowCiRerun,
+            description: "Let the orchestrator re-run failed CI jobs (gives the environment's GitHub tokens Actions write).",
+          },
         }),
       }),
       git: map({

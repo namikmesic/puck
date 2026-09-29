@@ -20,12 +20,18 @@ describe('permissionsFor', () => {
     [{ ci: 'notify' }, { ...base, issues: 'write' }],
     [{ allowWorkflowEdits: true }, { ...base, issues: 'write', workflows: 'write' }],
     [{ allowWorkflowEdits: false, ci: 'fix', intake: 'label' }, { ...base, issues: 'write' }],
+    [{ allowCiRerun: true }, { ...base, issues: 'write', actions: 'write' }],
+    [{ allowCiRerun: false, ci: 'fix' }, { ...base, issues: 'write', actions: 'read' }],
   ])('%j → %j', (policies, expected) => {
     expect(permissionsFor({ ...DEFAULT_POLICIES, ...(policies as object) })).toEqual(expected);
   });
 
   it('never grants workflows by default', () => {
     expect(permissionsFor(DEFAULT_POLICIES)).not.toHaveProperty('workflows');
+  });
+
+  it('never grants actions write by default', () => {
+    expect(permissionsFor(DEFAULT_POLICIES).actions).toBe('read');
   });
 });
 

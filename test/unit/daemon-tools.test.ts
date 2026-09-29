@@ -39,7 +39,7 @@ describe('orchestrator tools through the SDK MCP server', () => {
     const s = server();
     const listed = await s.list();
     expect(listed.tools.map((t) => t.name)).toEqual(s.tools.map((t) => t.name));
-    expect(listed.tools).toHaveLength(20);
+    expect(listed.tools).toHaveLength(21);
     for (const tool of listed.tools) {
       expect(tool.inputSchema.type).toBe('object');
       expect(tool._meta?.['anthropic/alwaysLoad']).toBe(true);

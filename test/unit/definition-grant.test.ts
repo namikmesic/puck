@@ -15,8 +15,8 @@ import { call, connectRunner, registerRunner, signIn, startServer, type Harness,
 
 // definition.apply is what changes policies.github after the instance exists.
 // The next installation-token mint has to follow that definition: workflows
-// appears only while allowWorkflowEdits is on, and issues follows intake and
-// the status comment. A change that does not affect permissions leaves the
+// appears only while allowWorkflowEdits is on, actions is write only while
+// allowCiRerun is on, and issues follows intake and the status comment. A change that does not affect permissions leaves the
 // grant alone. A change that cannot be recorded is not applied.
 
 const installed = expectedPackages(harnessDescriptors)
@@ -189,6 +189,20 @@ describe('definition.apply governs the next mint', () => {
     expect(JSON.stringify(audits)).not.toContain(userToken);
   });
 
+  it('grants actions write only while allowCiRerun is on, and actions read otherwise', async () => {
+    await setup(true);
+    const c = client();
+    const apply = (github: Record<string, unknown>, sha: string) =>
+      c.cmd('definition.apply', { definition: definition(github), pin: pin(sha) });
+
+    expect((await mint()).actions).toBe('read');
+    expect(await apply({ allowCiRerun: true }, 'aaa1111')).toEqual({ classes: ['hot'] });
+    expect(await mint()).toMatchObject({ actions: 'write', checks: 'read', statuses: 'read' });
+    expect(await apply({ allowCiRerun: false }, 'bbb2222')).toEqual({ classes: ['hot'] });
+    expect((await mint()).actions).toBe('read');
+    expect(await permissionAudits()).toHaveLength(2);
+  });
+
   it('leaves the definition and the grant unchanged when the update cannot be recorded', async () => {
     await setup(false);
     const c = client();
@@ -355,7 +369,7 @@ describe('definition.apply governs the next mint', () => {
 
 describe('syncGrantPolicies', () => {
   const env = { PUCK_SERVER_URL: 'https://puck.test', PUCK_GRANT_TOKEN: 'PSA_testtoken' };
-  const policies: GitHubTokenPolicies = { intake: 'off', statusComment: true, ci: 'notify', allowWorkflowEdits: true };
+  const policies: GitHubTokenPolicies = { intake: 'off', statusComment: true, ci: 'notify', allowWorkflowEdits: true, allowCiRerun: false };
 
   afterEach(() => {
     vi.unstubAllGlobals();
