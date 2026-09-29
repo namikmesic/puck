@@ -115,6 +115,20 @@ describe('toolchain pin', () => {
   });
 });
 
+describe('server image', () => {
+  it('ships the runner packages and serves them from PUCK_RUNNER_DOWNLOADS', () => {
+    const dockerfile = read('src/server/Dockerfile');
+    expect(dockerfile).toContain('scripts/package-runner.mjs --out /src/runner-downloads');
+    expect(dockerfile).toContain('COPY --from=runner /src/runner-downloads /app/runner-downloads');
+    expect(dockerfile).toContain('PUCK_RUNNER_DOWNLOADS=/app/runner-downloads');
+  });
+
+  it('rebuilds on every compose up, and CI checks the downloads of the started image', () => {
+    expect(read('compose.yaml')).toMatch(/^ {4}pull_policy: build$/m);
+    expect(read('.github/workflows/ci.yml')).toContain('run: node scripts/check-runner-downloads.mjs http://localhost:8765');
+  });
+});
+
 describe('release metadata', () => {
   const pkg = JSON.parse(read('package.json')) as { version: string };
   const changelog = read('CHANGELOG.md');

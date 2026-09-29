@@ -15,12 +15,17 @@ docker compose up -d --wait
 curl http://localhost:8765/healthz
 ```
 
+Compose rebuilds the image on every `up` (`pull_policy: build`; the build cache makes an unchanged checkout quick), so it never starts an older build.
+
 As a plain image:
 
 ```bash
 docker build -f src/server/Dockerfile -t puck-server .
 docker run -p 8080:8080 -v puck-server-data:/data -e PUCK_SERVER_URL=https://puck.example.com puck-server
 ```
+
+The image includes this version's runner packages (`npm run package:runner` for linux-x64, linux-arm64 and macos-arm64, run during the build) and sets `PUCK_RUNNER_DOWNLOADS` to them, so it offers runners without further setup.
+Building it downloads the pinned Node runtimes those packages bundle, checked against their sha256.
 
 The image's health check uses `--start-interval`, which needs Docker Engine 25 or newer, and `compose.yaml` marks its env file optional, which needs Compose 2.24 or newer.
 
@@ -44,7 +49,7 @@ Each secret can be given as `NAME` or as `NAME_FILE`, a path to a file holding i
 | `PUCK_GITHUB_CLIENT_SECRET[_FILE]` | The App's client secret, for the web-flow code exchange. |
 | `PUCK_GITHUB_PRIVATE_KEY[_FILE]` | The App's private key: PEM, or PEM base64-encoded on one line. Signs App JWTs. |
 | `PUCK_GITHUB_API_URL`, `PUCK_GITHUB_WEB_URL` | GitHub endpoints (default github.com). Optional. |
-| `PUCK_RUNNER_DOWNLOADS` | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz`: the layout `npm run package:runner` writes under `out/puck-runner/`. |
+| `PUCK_RUNNER_DOWNLOADS` | Directory of runner tarballs, `<version>/puck-runner-<os>-<arch>-<version>.tar.gz`: the layout `npm run package:runner` writes under `out/puck-runner/`. The image sets it to the packages it was built with. |
 | `PUCK_RUNNER_MIN_VERSION` | Runners older than this are refused. |
 
 GitHub sign-in needs the App id, client id, client secret, and private key together, plus `PUCK_SERVER_TOKEN_KEY`. With none of those four App settings the server still starts, and GitHub routes answer 503 `github-not-configured`. Setting some of them but not all four, or setting all four without the token key, stops the server at start. The App slug and the GitHub endpoint URLs are optional.

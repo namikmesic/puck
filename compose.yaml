@@ -2,6 +2,10 @@
 # http://localhost:8765/healthz. The store is the named volume
 # puck-server-data, so it survives restarts and rebuilds.
 #
+# `up` always rebuilds the image (pull_policy: build; unchanged sources come
+# from the build cache), so it never runs an older build of the server. The
+# image serves this version's runner packages at /v1/runner/releases.
+#
 # Without further configuration the server starts with GitHub disabled
 # (sign-in answers 503). To enable it, copy src/server/puck-server.env.example
 # to ./puck-server.env (git-ignored) and fill it in; see src/server/README.md.
@@ -13,6 +17,7 @@ services:
       context: .
       dockerfile: src/server/Dockerfile
     image: puck-server:local
+    pull_policy: build
     ports:
       - "127.0.0.1:${PUCK_SERVER_LOCAL_PORT:-8765}:8080"
     environment:

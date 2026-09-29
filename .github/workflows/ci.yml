@@ -78,10 +78,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
       - name: Build the puck-server image and bring it up with Compose
         run: docker compose up -d --build --wait --wait-timeout 120
       - name: Health check
         run: curl -fsS http://127.0.0.1:8765/healthz
+      - name: The server offers this version's runner packages, and each download matches its sha256
+        run: node scripts/check-runner-downloads.mjs http://localhost:8765
       - name: Server logs
         if: always()
         run: docker compose logs
