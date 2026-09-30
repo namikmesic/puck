@@ -104,9 +104,12 @@ const STEP_KIND: Record<Step['kind'], string> = {
   merge: 'Merge',
 };
 
-/** A step row's state words: "Running", "Waiting for you to accept or merge", "Passed". */
+/** A step row's words. A finished step shows its detail when it has one ("Accepted", "Merged on GitHub"); otherwise its result ("Passed", "Cancelled"). */
 export function stepWords(step: Pick<Step, 'kind' | 'state' | 'result' | 'detail'>): string {
-  if (step.state === 'done') return step.detail || (step.result ? step.result[0].toUpperCase() + step.result.slice(1) : 'Done');
+  if (step.state === 'done') {
+    if (step.detail) return step.detail;
+    return step.result ? step.result[0].toUpperCase() + step.result.slice(1) : 'Done';
+  }
   if (step.kind === 'merge' && step.state === 'waiting') return 'Waiting for you to accept or merge';
   const words: Record<string, string> = { pending: 'Pending', queued: 'Queued for a slot', running: 'Running', 'needs-input': 'Waiting on a question', waiting: 'Waiting' };
   return words[step.state] ?? step.state;

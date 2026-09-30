@@ -808,15 +808,15 @@ describe('the implement and merge workflow', () => {
       ['implement', 'done', 'passed'],
       ['merge', 'done', 'superseded'],
     ]);
-    // Accept needs no reason; the waiting merge step finishes passed and the round settles.
+    // Accept needs no reason; the waiting merge step ends cancelled, and the round settles.
     const accepted = await c.cmd<WorkItem>('item.accept', { itemId: current.id });
     expect(accepted).toMatchObject({ status: 'done', outcome: 'accepted', stage: null });
     expect(accepted.closedAt).toEqual(expect.any(Number));
-    const last = await c.cmd<{ round: { outcome: string }; steps: Array<{ kind: string; state: string; result: string | null }> }>('item.workflow', { itemId: current.id });
+    const last = await c.cmd<{ round: { outcome: string }; steps: Array<{ kind: string; result: string | null; detail: string }> }>('item.workflow', { itemId: current.id });
     expect(last.round.outcome).toBe('settled');
-    expect(last.steps.map((s) => [s.kind, s.result])).toEqual([
-      ['implement', 'passed'],
-      ['merge', 'passed'],
+    expect(last.steps.map((s) => [s.kind, s.result, s.detail])).toEqual([
+      ['implement', 'passed', ''],
+      ['merge', 'cancelled', 'Accepted'],
     ]);
   });
 

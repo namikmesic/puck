@@ -26,9 +26,9 @@
  *     not with this module's cached pull request state, so a crash between
  *     the cache write and the journal, a lost poll or a restart still
  *     records the merge exactly once. A ticket already done (merged) gets
- *     that row and keeps its record: no notice, and its delivery reference
- *     changes only when the state or merge commit differs. Closed without
- *     merging only tells the orchestrator.
+ *     that row and no notice; its status, steps and closedAt stay, and its
+ *     delivery reference changes only when the state or merge commit differs.
+ *     Closed without merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
  *     redacted log tails of failed workflow jobs. Check names and summaries
  *     are redacted the same way. A success or failure is a notice, and the
@@ -1041,8 +1041,8 @@ export class GithubSync {
     };
     const from = ticketPhrase(item);
     const during = this.deps.work.isRunning(item) || (item.status === 'in-progress' && item.stage === 'implement') ? ' during a follow-up' : '';
-    // A ticket already done (merged), as an older daemon recorded it, gets its merge.observed row and nothing else:
-    // nothing changed that the orchestrator needs to hear about.
+    // Already done (merged): the orchestrator needs no notice. Status, steps and closedAt stay;
+    // merged() rewrites the delivery reference only when its state or merge commit differs.
     const wasMerged = item.status === 'done' && item.outcome === 'merged';
     if (!this.deps.work.merged(item.id, observed, `Pull request #${pr.number} was merged on GitHub${during}; it was ${from}.`)) return;
     if (wasMerged) return;

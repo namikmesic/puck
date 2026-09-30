@@ -608,6 +608,56 @@ describe('work detail', () => {
     expect(daemon).toHaveBeenCalledWith('item.link', { itemId: withLink.id, ref: 'octo/web#9' });
   });
 
+  it('shows a cancelled step’s detail on the Workflow tab, and Cancelled when it has none', async () => {
+    const done = item({ number: 8, status: 'done', outcome: 'accepted', sessionId: WORKER });
+    const { wd, byId, daemon } = setup([done]);
+    const step = (over: Record<string, unknown>) => ({
+      id: 'stp_x',
+      kind: 'implement',
+      round: 1,
+      state: 'done',
+      result: 'cancelled',
+      agent: null,
+      sessionId: null,
+      reviewId: null,
+      task: null,
+      purpose: null,
+      group: 1,
+      after: null,
+      logicalId: 'stp_x',
+      attempt: 1,
+      retryOf: null,
+      work: null,
+      queuedAt: 1,
+      startedAt: null,
+      finishedAt: 2,
+      detail: '',
+      ...over,
+    });
+    daemon.mockImplementation(async (op: string) => {
+      if (op === 'item.workflow') {
+        return {
+          roundsTotal: 1,
+          round: { round: 1, roundId: 'rnd_1', purpose: 'task', headSha: null, gate: 'pending', settledGate: null, outcome: 'settled', startedAt: 1, settledAt: 2 },
+          steps: [
+            step({ id: 'stp_i', logicalId: 'stp_i', detail: '' }),
+            step({ id: 'stp_m', logicalId: 'stp_m', kind: 'merge', group: 7, detail: 'Accepted' }),
+            step({ id: 'stp_g', logicalId: 'stp_g', kind: 'merge', group: 7, detail: 'Merged on GitHub' }),
+          ],
+          stepsCursor: null,
+          reviews: [],
+          decisions: [],
+          findingsTotal: 0,
+        };
+      }
+      return {};
+    });
+    wd.show(done.id, 'workflow');
+    await flush();
+    await flush();
+    expect([...byId('workflow').querySelectorAll('.wd-step .wd-step-detail')].map((n) => n.textContent)).toEqual(['Cancelled', 'Accepted', 'Merged on GitHub']);
+  });
+
   it('says nothing has started on the Workflow tab of a ticket without steps', async () => {
     const todo = item({ number: 8, status: 'backlog' });
     const { wd, byId, daemon } = setup([todo]);

@@ -351,19 +351,17 @@ export function openRound(tx: Tx, itemId: string, purpose: ImplementPurpose, rea
 }
 
 /**
- * End every step of the ticket that is not done, as the ticket leaves In
- * progress: a waiting merge step finishes `passed` when the work is
- * accepted or merged (it waited for exactly that); anything else ends
- * cancelled. The open round settles.
+ * End every step that is not done when the ticket is accepted, cancelled,
+ * failed, or a merge is observed (4.3, 4.4). Each ends cancelled. A merge
+ * step that did not perform the merge records why: "Accepted" or "Merged
+ * on GitHub". A merge step passes only when it performed the merge. The
+ * open round settles; a cancellation settles it cancelled.
  */
 export function endSteps(tx: Tx, itemId: string, how: 'cancel' | 'accept' | 'merged' | 'fail'): void {
   for (const step of latestAttempts(tx.steps(itemId))) {
     if (step.state === 'done') continue;
-    if (step.kind === 'merge' && step.state === 'waiting' && (how === 'accept' || how === 'merged')) {
-      stepMove(tx, itemId, step, 'finish', 'done', { result: 'passed', patch: { detail: how === 'merged' ? 'Merged on GitHub' : 'Accepted' } });
-    } else {
-      stepMove(tx, itemId, step, 'cancel', 'done', { result: 'cancelled' });
-    }
+    const detail = step.kind === 'merge' && (how === 'accept' || how === 'merged') ? (how === 'merged' ? 'Merged on GitHub' : 'Accepted') : null;
+    stepMove(tx, itemId, step, 'cancel', 'done', { result: 'cancelled', ...(detail ? { patch: { detail } } : {}) });
   }
   settleRound(tx, itemId, how === 'cancel' ? 'cancelled' : 'settled');
 }

@@ -969,8 +969,11 @@ describe('pull request state', () => {
       expect(notices.find((n) => n.kind === 'pr.merged')?.text).toContain(c.during ? 'during a follow-up, so the item is done' : 'so the item is done');
       expect(merges).toHaveLength(1);
       expect(merges[0]).toMatchObject({ itemId: item.id, repo: 'octo/app', prNumber: 7, prHeadSha: SHA, initiatedBy: 'external', reviewed: false, reviewedHeadSha: null });
-      // Every step still going ended; a waiting merge step finished.
+      // Every step still going ended. The waiting merge on a finished ticket ends cancelled and says why.
       expect(stack.workflow.steps(item.id).filter((s) => s.state !== 'done')).toEqual([]);
+      if (c.status === 'review') {
+        expect(stack.workflow.steps(item.id).find((s) => s.kind === 'merge')).toMatchObject({ state: 'done', result: 'cancelled', detail: 'Merged on GitHub' });
+      }
     } else expect(merges).toHaveLength(0);
     expect(prOf(now)?.state).toBe(c.pull.merged ? 'merged' : c.pull.state);
     await pollAll();
@@ -1118,31 +1121,74 @@ describe('merge.observed', () => {
     return opened.transactions.flatMap((tx) => tx.events);
   }
 
-  it('records a pull request an older daemon already saw merged once, without a notice or a change to its ticket', async () => {
+  function legacyMerged(): void {
     policies = { intake: 'off' };
     stack.journal.close();
     writeLegacyState(root.paths.state);
     expect(migrateState(root.paths.state, { daemonVersion: 'new', now: T0, eventHead: 0 })).toMatchObject({ ok: true, to: 2 });
     restart();
     bootstrapLegacy(stack.workflow, backlog.list(), stack.items.get().nextNumber);
+    fake.gh.pulls.set(40, { number: 40, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/40', head: { sha: 'c'.repeat(40), ref: 'puck/W-7' } });
+  }
+
+  const stepShape = () => stack.workflow.steps(LEGACY.merged).map((s) => [s.id, s.kind, s.state, s.result, s.detail]);
+
+  it('records a migrated merge once, writes the merge commit, and does not stamp updatedAt again', async () => {
+    legacyMerged();
     const before = structuredClone(backlog.get(LEGACY.merged));
+    const steps = stepShape();
     expect(before).toMatchObject({ status: 'done', outcome: 'merged' });
     expect(deliveryPull(before)).toMatchObject({ number: 41, state: 'merged' });
+    expect(deliveryPull(before)?.mergeCommitSha ?? null).toBeNull();
     fake.gh.pulls.set(41, { number: 41, html_url: 'https://github.com/octo/app/pull/41', head: { sha: 'd'.repeat(40), ref: 'puck/W-9' }, ...merged });
-    fake.gh.pulls.set(40, { number: 40, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/40', head: { sha: 'c'.repeat(40), ref: 'puck/W-7' } });
     clock += 60_000;
+    const stamped = clock;
     await sync.poll();
-    await pollAll();
-    // The one-time read journals the merge row the journal lacked, with the pull request's facts…
     expect(observed()).toEqual([expect.objectContaining({ itemId: LEGACY.merged, repo: 'octo/app', prNumber: 41, mergeCommitSha: MERGE_SHA, mergedBy: 'octocat' })]);
-    // …and nothing else: no notice wakes the orchestrator, and the ticket keeps its record, updatedAt included.
     expect(noticesOf('pr.merged')).toEqual([]);
-    expect(backlog.get(LEGACY.merged)).toEqual(before);
+    const after = backlog.get(LEGACY.merged);
+    expect(after).toMatchObject({ status: 'done', outcome: 'merged', closedAt: before?.closedAt, updatedAt: stamped });
+    expect(deliveryPull(after)).toEqual({ ...deliveryPull(before), mergeCommitSha: MERGE_SHA });
+    expect(stepShape()).toEqual(steps);
+    await pollAll();
+    expect(backlog.get(LEGACY.merged)?.updatedAt).toBe(stamped);
+    expect(observed()).toHaveLength(1);
     restart();
     await sync.poll();
     await pollAll();
     expect(observed()).toHaveLength(1);
     expect(noticesOf('pr.merged')).toEqual([]);
+    expect(backlog.get(LEGACY.merged)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: before?.closedAt, updatedAt: stamped });
+    expect(deliveryPull(backlog.get(LEGACY.merged))?.mergeCommitSha).toBe(MERGE_SHA);
+    expect(stepShape()).toEqual(steps);
+  });
+
+  it('records a migrated merge with no commit and leaves updatedAt, status, steps and closedAt', async () => {
+    legacyMerged();
+    const before = structuredClone(backlog.get(LEGACY.merged));
+    const steps = stepShape();
+    fake.gh.pulls.set(41, {
+      number: 41,
+      html_url: 'https://github.com/octo/app/pull/41',
+      head: { sha: 'd'.repeat(40), ref: 'puck/W-9' },
+      state: 'closed',
+      merged: true,
+      merged_at: iso(T0 + 1_000),
+      merge_commit_sha: null,
+      merged_by: { login: 'octocat', type: 'User' },
+      commits: 3,
+    });
+    clock += 60_000;
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toEqual([expect.objectContaining({ itemId: LEGACY.merged, prNumber: 41, mergeCommitSha: null })]);
+    expect(noticesOf('pr.merged')).toEqual([]);
+    expect(backlog.get(LEGACY.merged)).toEqual(before);
+    expect(stepShape()).toEqual(steps);
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(LEGACY.merged)).toEqual(before);
   });
 
   it('records the merge with its commit, once, and the ticket is done (merged)', async () => {
@@ -1170,6 +1216,7 @@ describe('merge.observed', () => {
     ]);
     expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: clock });
     expect(prOf(backlog.get(item.id))).toMatchObject({ state: 'merged', mergeCommitSha: MERGE_SHA });
+    expect(stack.workflow.steps(item.id).find((s) => s.kind === 'merge')).toMatchObject({ state: 'done', result: 'cancelled', detail: 'Merged on GitHub' });
     await pollAll();
     restart();
     await sync.poll();
