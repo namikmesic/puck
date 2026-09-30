@@ -154,7 +154,7 @@
   stroke: none;
 }
 
-.bd-col-icon.col-ready {
+.bd-col-icon.col-todo {
   color: var(--emerald-light);
 }
 
@@ -162,7 +162,6 @@
   color: #b8922a;
 }
 
-.bd-col-icon.col-review,
 .bd-col-icon.col-done {
   color: var(--emerald);
 }
@@ -175,16 +174,6 @@
 .bd-col-icon .tick {
   stroke: var(--white);
   stroke-width: 1.8;
-}
-
-.bd-fold {
-  margin-left: auto;
-  padding: 4px;
-}
-
-.bd-fold svg {
-  width: 14px;
-  height: 14px;
 }
 
 .bd-slot:empty {
@@ -253,8 +242,7 @@
   box-shadow: 0 0 0 1px var(--gold), 0 0 0 4px var(--gold-muted);
 }
 
-.bd-card.status-done .bd-title,
-.bd-card.status-cancelled .bd-title {
+.bd-card.status-done .bd-title {
   color: var(--gray);
 }
 
@@ -376,8 +364,25 @@
   text-overflow: ellipsis;
 }
 
-.bd-signal.sig-queued {
+.bd-signal.sig-queued,
+.bd-signal.sig-off {
   color: var(--gray-light);
+}
+
+.bd-signal.sig-busy {
+  color: var(--charcoal);
+}
+
+/* Finished, waiting on the user to accept or merge: the one next step is theirs. */
+.bd-signal.sig-wait {
+  color: var(--emerald-dark);
+}
+
+.bd-stage .bd-signal-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .bd-signal.sig-failed,
@@ -500,6 +505,44 @@
   color: var(--gray);
 }
 
+/* A done ticket's outcome. */
+.bd-chip.outcome.merged {
+  background: var(--emerald);
+  color: var(--white);
+}
+
+.bd-chip.outcome.accepted {
+  background: var(--emerald-tint);
+  color: var(--emerald-dark);
+}
+
+.bd-chip.outcome.failed {
+  background: var(--red-tint);
+  color: var(--red);
+}
+
+.bd-chip.outcome.cancelled {
+  background: var(--gray-tint);
+  color: var(--gray);
+}
+
+/* How many questions wait on the user. */
+.bd-needs {
+  flex: none;
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--gold);
+  color: var(--white);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .glyph {
   display: inline-flex;
 }
@@ -617,76 +660,81 @@
   list-style: none;
 }
 
-/* Closed: a narrow rail with its counts until expanded. */
-.bd-rail {
-  display: none;
-}
-
-.bd-col.col-closed.collapsed {
-  flex: 0 0 40px;
-  min-width: 40px;
-}
-
-.bd-col.col-closed.collapsed > :not(.bd-rail) {
-  display: none;
-}
-
-.bd-col.col-closed.collapsed .bd-rail {
-  flex: 1;
+/* Done: a filter over its outcomes, and the failed count whatever the filter shows. */
+.bd-filter {
+  flex: none;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: 11px 0 var(--space-3);
-  border-radius: var(--radius-lg);
-  color: var(--gray);
-  transition: background var(--fast) ease;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 0 var(--space-2) var(--space-2);
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--gray-tint);
 }
 
-.bd-rail:hover {
-  background: var(--emerald-tint);
-}
-
-.bd-rail-open {
+.bd-filter-btn {
+  flex: 1 1 auto;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
   color: var(--gray);
+  font: 600 var(--text-2xs) var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.bd-rail-open svg {
-  width: 14px;
-  height: 14px;
-}
-
-.bd-rail:hover .bd-rail-open {
+.bd-filter-btn:hover {
   color: var(--charcoal);
 }
 
-.bd-rail-title {
-  writing-mode: vertical-rl;
-  font-size: var(--text-sm);
-  font-weight: 600;
+.bd-filter-btn.on {
+  background: var(--white);
   color: var(--charcoal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
-.bd-rail-count,
-.bd-rail-failed {
-  min-width: 20px;
-  height: 20px;
+.bd-filter-count {
+  color: var(--gray-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.bd-filter-btn.failed,
+.bd-filter-btn.failed .bd-filter-count {
+  color: var(--red);
+}
+
+.bd-col-failed {
+  min-width: 18px;
+  height: 18px;
   padding: 0 5px;
   border-radius: var(--radius-pill);
-  background: var(--gray-tint);
-  color: var(--gray);
+  background: var(--red-tint);
+  color: var(--red);
   font-size: var(--text-2xs);
   font-weight: 650;
-  line-height: 20px;
+  line-height: 18px;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
-.bd-rail-failed {
-  background: var(--red-tint);
-  color: var(--red);
+/* In progress narrowed to the tickets waiting on the user; the button shows them all again. */
+.bd-needs-filter {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--gold-edge);
+  border-radius: var(--radius-pill);
+  background: var(--gold-muted);
+  color: var(--gold-ink);
+  font: 600 var(--text-2xs) var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 /* New item and import */
@@ -1062,6 +1110,7 @@
 }
 
 .wd-changes,
+.wd-workflow,
 .wd-details {
   padding: var(--space-4) var(--space-5) var(--space-8);
 }
@@ -1325,4 +1374,233 @@
    support section's monospace. */
 .wd-facts dd {
   font-family: var(--font-ui);
+}
+
+/* Workflow tab: the rounds, newest first, each with its steps. */
+.wd-flow-policy {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  color: var(--gray-light);
+}
+
+.wd-flow-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.wd-flow-round {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.wd-flow-next {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  color: var(--gray);
+}
+
+.wd-rounds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.wd-round {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--white);
+}
+
+.wd-round-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px var(--space-3);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.wd-round-title {
+  font-weight: 600;
+}
+
+.wd-round-state {
+  margin-left: auto;
+  font-size: var(--text-2xs);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--gray-light);
+}
+
+.wd-round > .wd-empty {
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.wd-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-2);
+}
+
+.wd-step {
+  display: flex;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.wd-step-glyph {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gray-light);
+}
+
+.wd-step-glyph.state-running,
+.wd-step-glyph.state-needs-input {
+  border-color: var(--gold);
+  background: var(--gold);
+  animation: lifecycle-pulse 1.2s ease-in-out infinite;
+}
+
+.wd-step-glyph.state-waiting {
+  border-color: var(--emerald);
+  background: var(--emerald-tint);
+}
+
+.wd-step-glyph.result-passed,
+.wd-step-glyph.result-done {
+  border-color: var(--emerald);
+  background: var(--emerald);
+}
+
+.wd-step-glyph.result-failed {
+  border-color: var(--red);
+  background: var(--red);
+}
+
+.wd-step-glyph.result-cancelled,
+.wd-step-glyph.result-superseded,
+.wd-step-glyph.result-skipped,
+.wd-step-glyph.result-inconclusive {
+  border-style: dashed;
+}
+
+.wd-step-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.wd-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  font-size: var(--text-sm);
+}
+
+.wd-step-kind {
+  font-weight: 600;
+}
+
+.wd-step-agent,
+.wd-step-attempt {
+  font-size: var(--text-xs);
+  color: var(--gray);
+}
+
+.wd-step-time {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--gray-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.wd-step-detail {
+  font-size: var(--text-xs);
+  color: var(--gray);
+}
+
+.wd-step.result-failed .wd-step-detail {
+  color: var(--red);
+}
+
+.wd-step-work {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--gray-light);
+}
+
+/* References: the source issue, the delivery pull request and related links. */
+.wd-refs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wd-ref {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  font-size: var(--text-sm);
+}
+
+.wd-ref-role {
+  flex: none;
+  width: 92px;
+  font-size: var(--text-xs);
+  color: var(--gray-light);
+}
+
+.wd-ref-link {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--emerald-dark);
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+button.wd-ref-link {
+  cursor: pointer;
+}
+
+button.wd-ref-link:hover {
+  text-decoration: underline;
+}
+
+.wd-ref-remove {
+  margin-left: auto;
+}
+
+.wd-ref-input {
+  flex: 1;
+  min-width: 0;
+  font: var(--text-sm) var(--font-ui);
+  color: var(--charcoal);
+  background: var(--white);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  outline: none;
+}
+
+.wd-ref-input:focus {
+  border-color: var(--emerald-hover);
+  box-shadow: 0 0 0 3px var(--emerald-tint);
 }

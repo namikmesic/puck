@@ -316,6 +316,32 @@ describe('instance store', () => {
     expect(changes.filter((c) => c.kind === 'event').map((c) => (c as { seq: number }).seq)).toEqual([11]);
   });
 
+  it('advances past protocol 2’s workflow kinds, reading the ticket from the item.upsert that follows each', () => {
+    const { store, requestResync, changes } = setup();
+    store.applySnapshot(snap({ head: 1, items: [item({ number: 1, status: 'queued' })], order: ['itm_1'] }), ENV);
+    const step = { id: 'stp_1', kind: 'implement', round: 1, state: 'running', result: null } as never;
+    const events: DaemonEvent[] = [
+      { kind: 'round.opened', itemId: 'itm_1', roundId: 'rnd_1', round: 1, purpose: 'task', reason: 'assigned' },
+      { kind: 'step.changed', itemId: 'itm_1', step, from: 'queued', trigger: 'start' },
+      upsert(1, { status: 'running' }),
+      { kind: 'ticket.reference', itemId: 'itm_1', op: 'add', reference: { id: 'ref_1', role: 'related', kind: 'url', url: 'https://example.com', label: null } },
+      { kind: 'merge.observed', itemId: 'itm_1' } as unknown as DaemonEvent,
+      { kind: 'round.settled', itemId: 'itm_1', roundId: 'rnd_1', round: 1, gate: 'pending', outcome: 'settled', obligations: [] },
+      { kind: 'capacity', agents: {}, workers: { running: 0, max: 3 }, paused: false, verifying: 2 },
+      { kind: 'ticket.removed', itemId: 'itm_1', number: 1, title: 'Item 1', status: 'done', outcome: 'cancelled' },
+      { kind: 'item.removed', itemId: 'itm_1' },
+    ];
+    events.forEach((ev, i) => {
+      store.applyEvent(2 + i, ev, ENV);
+      if (ev.kind === 'item.upsert') expect(store.items().map((x) => [x.status, x.stage])).toEqual([['in-progress', 'implement']]);
+    });
+    expect(store.cursor()).toBe(1 + events.length);
+    expect(requestResync).not.toHaveBeenCalled();
+    expect(store.capacity()?.verifying).toBe(2);
+    expect(store.items()).toEqual([]);
+    expect(changes.filter((c) => c.kind === 'event')).toHaveLength(events.length);
+  });
+
   it('skips duplicates, waits for missing seqs, and asks for a resync once per gap', () => {
     const { store, requestResync } = setup();
     store.applySnapshot(snap({ head: 5 }), ENV);

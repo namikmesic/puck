@@ -23,6 +23,7 @@ import type { HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBr
 import type { ClientResult, OpArgs, RendererOp } from './harness/daemon-protocol';
 import { initBoard } from './renderer/board';
 import { liveWork } from './renderer/board-model';
+import { initWaitingStack } from './renderer/waiting-stack';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
 import { initComposer } from './renderer/composer';
 import { watchDayRollover } from './renderer/day-clock';
@@ -207,6 +208,18 @@ function boot(bridge: PuckBridge): void {
       if (id) sync?.resync(id);
     },
     prefs: storage,
+  });
+
+  const waiting = initWaitingStack({
+    host: byId('oc-waiting'),
+    store,
+    daemon: (op, args) => daemon(op, args),
+    openItem: (itemId) => openItem(itemId),
+    showNeedsYou: () => {
+      pickView('board');
+      board.showNeedsYou();
+    },
+    say: (text) => (byId('oc-msg').textContent = text),
   });
 
   const workDetail = initWorkDetail({
@@ -447,6 +460,8 @@ function boot(bridge: PuckBridge): void {
     byId('oc-intro-avatar').textContent = (s?.agent[0] ?? 'P').toUpperCase();
     byId('oc-intro-title').textContent = s ? `${s.agent} is ready when you are` : 'Your orchestrator is ready';
     byId('oc-paused').classList.toggle('hidden', !s?.autoWakePaused);
+    // Questions wait above the composer of the current session, not an earlier one's or a sub-agent's.
+    waiting.render(!viewing && !childTitle);
     const live = liveWork(store.items());
     const liveBtn = byId('oc-live');
     liveBtn.classList.toggle('hidden', !store.hasSnapshot() || !live.text);
@@ -646,6 +661,7 @@ function boot(bridge: PuckBridge): void {
     } else if (change.kind === 'reset' || change.kind === 'snapshot') {
       const was = sessions.reset();
       workDetail.reset();
+      if (change.kind === 'reset') waiting.reset();
       if (change.kind === 'reset') {
         board.reset();
         viewing = null;

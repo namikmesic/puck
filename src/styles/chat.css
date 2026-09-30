@@ -1099,6 +1099,129 @@
   color: var(--emerald);
 }
 
+/* ---------- Waiting on you: workers' questions above the composer ---------- */
+
+.oc-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.oc-wait-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 var(--space-2);
+}
+
+.oc-wait-title {
+  font-size: var(--text-2xs);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--gold-ink);
+}
+
+.oc-wait-count {
+  font-size: var(--text-2xs);
+  color: var(--gray-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.oc-wait-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.oc-wait-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 6px var(--space-2);
+  border: 1px solid var(--gold-edge);
+  border-radius: var(--radius-md);
+  background: var(--white);
+}
+
+.oc-wait-entry.open {
+  padding-bottom: var(--space-2);
+}
+
+/* Inside an entry the card needs no frame of its own. */
+.oc-wait-entry .ask {
+  border: none;
+  box-shadow: none;
+  padding: 0 var(--space-1);
+}
+
+.oc-wait-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.oc-wait-ticket {
+  flex: none;
+  height: 20px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--gold-muted);
+  color: var(--gold-ink);
+  font: 650 var(--text-2xs) var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.oc-wait-ticket:hover {
+  background: var(--gold-edge);
+}
+
+.oc-wait-text {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--charcoal);
+  font: var(--text-sm) var(--font-ui);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+button.oc-wait-text {
+  cursor: pointer;
+}
+
+.oc-wait-entry.open .oc-wait-text {
+  white-space: normal;
+  font-weight: 600;
+}
+
+.oc-wait-more-btn {
+  width: 100%;
+  height: 28px;
+  border: 1px dashed var(--gold-edge);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--gold-ink);
+  font: 600 var(--text-xs) var(--font-ui);
+  cursor: pointer;
+}
+
+.oc-wait-more-btn:hover {
+  background: var(--gold-muted);
+}
+
 /* ---------- Composer ---------- */
 
 .composer-zone {

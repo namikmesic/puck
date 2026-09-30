@@ -269,7 +269,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         order = ev.order.slice();
         break;
       case 'capacity':
-        state.capacity = { agents: ev.agents, workers: ev.workers, paused: ev.paused };
+        state.capacity = { agents: ev.agents, workers: ev.workers, paused: ev.paused, ...(ev.verifying !== undefined ? { verifying: ev.verifying } : {}) };
         break;
       case 'daemon.upgrading':
         if (completedUpgradeThrough !== null && seq <= completedUpgradeThrough) break;
