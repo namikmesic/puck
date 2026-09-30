@@ -50,7 +50,7 @@ export const MAX_MANIFEST_BYTES = 256 * 1024;
 export const MAX_SUMS_BYTES = 16 * 1024;
 /** Most signed releases one listing carries. */
 export const MAX_RELEASE_RECORDS = 16;
-/** Most bytes a whole release listing may have on the wire; readers refuse larger responses unread. */
+/** Most bytes a whole release listing may have on the wire; readers refuse a larger body before parsing it. */
 export const MAX_RELEASE_METADATA_BYTES = 4 * 1024 * 1024;
 
 /**

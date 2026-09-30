@@ -1,9 +1,9 @@
 /**
- * The bounded transport for runner releases: how the app's main process,
- * the Puck server and the runner read release metadata and fetch a runner
- * package before verify.ts and archive.ts check what arrived. Node
- * built-ins and the global fetch only; the renderer and the daemon never
- * import this directory (.eslintrc.json), and nothing here runs a package.
+ * The bounded transport for runner releases. The app and the runner bound
+ * a release listing with `readBoundedBody`; `downloadRunnerPackage` has no
+ * production caller yet. Node built-ins and the global fetch only; the
+ * renderer and the daemon never import this directory (.eslintrc.json),
+ * and nothing here runs a package.
  *
  * Metadata. `readBoundedBody` returns a response's bytes: the bound is
  * checked against Content-Length before the read and against the count

@@ -91,7 +91,12 @@ export interface RequestOptions {
   refuseContentEncoding?: boolean;
 }
 
-/** One JSON request; resolves with the parsed body (null for 204), throws ServerApiError otherwise. */
+/**
+ * One JSON request; resolves with the parsed body (null for 204).
+ * A non-2xx answer is ServerApiError, and an unreachable server is
+ * ServerUnreachableError. A bounded body (`maxBodyBytes`) throws
+ * RunnerDownloadError from the runner-release transport before parsing.
+ */
 export async function serverRequest<T = Record<string, unknown>>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
   const base = serverUrl();
   const headers: Record<string, string> = { Accept: 'application/json' };

@@ -9,7 +9,8 @@
  *
  * Errors carry the server's status and code. Two codes mean "stop and act":
  * `runner-removed` (403: the runner was removed; exit for good) and
- * `runner-outdated` (426: update first).
+ * `runner-outdated` (426: update first). A release listing over the bound
+ * throws RunnerDownloadError (src/runner-release/download.ts) before parsing.
  */
 
 import { Readable } from 'node:stream';
