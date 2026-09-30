@@ -12,6 +12,12 @@ import { MAX_PACKAGE_BYTES } from '../../src/runner-release/download';
 
 /** When set, the next staging directory is given a file named `bin`, so `bin/` cannot be created. */
 const plantBin = vi.hoisted(() => ({ on: false }));
+/**
+ * When set, every file handle opened persists only part of what it is given:
+ * `half` writes half of the first write and nothing after, `zero` writes
+ * nothing at all, as a full disk or a short POSIX write would.
+ */
+const shortWrite = vi.hoisted(() => ({ mode: null as null | 'half' | 'zero', opened: 0 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -21,6 +27,22 @@ vi.mock('node:fs', async (importOriginal) => {
       const dir = actual.mkdtempSync(prefix);
       if (plantBin.on) actual.writeFileSync(join(dir, 'bin'), 'not a directory');
       return dir;
+    },
+    promises: {
+      ...actual.promises,
+      async open(...args: Parameters<typeof actual.promises.open>): ReturnType<typeof actual.promises.open> {
+        const handle = await actual.promises.open(...args);
+        if (!shortWrite.mode) return handle;
+        shortWrite.opened++;
+        let calls = 0;
+        const patched = Object.create(handle) as typeof handle;
+        patched.write = (async (data: Uint8Array) => {
+          calls++;
+          if (shortWrite.mode === 'zero' || calls > 1) return { bytesWritten: 0, buffer: data };
+          return handle.write(data.subarray(0, Math.max(1, data.length >> 1)));
+        }) as typeof handle.write;
+        return patched;
+      },
     },
   };
 });
@@ -50,6 +72,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   plantBin.on = false;
+  shortWrite.mode = null;
+  shortWrite.opened = 0;
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -499,5 +523,19 @@ describe('staging', () => {
     const f = await failure(unpack(tarGz(entries())));
     expect(f.code).toBe('write-failed');
     expect(readdirSync(into)).toEqual([]);
+  });
+
+  it('fails with write-failed and removes staging when a file write persists only a prefix, or nothing', async () => {
+    for (const mode of ['half', 'zero'] as const) {
+      shortWrite.mode = mode;
+      shortWrite.opened = 0;
+      const f = await failure(unpack(tarGz(entries())));
+      expect(f.code, mode).toBe('write-failed');
+      expect(f.message, mode).toMatch(/Cannot write config\.sh in staging: wrote none of the remaining \d+ bytes/);
+      expect(shortWrite.opened, mode).toBe(1);
+      expect(readdirSync(into), mode).toEqual([]);
+    }
+    shortWrite.mode = null;
+    expectLayout((await unpack(tarGz(entries()))).dir);
   });
 });

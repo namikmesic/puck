@@ -699,7 +699,7 @@ describe('writeAll', () => {
     await expect(writeAll(stalls, randomBytes(4))).rejects.toThrow(/wrote none/);
   });
 
-  it('makes a short write fail a download with the file removed, and an unpack with staging removed', async () => {
+  it('makes a short write fail a download with the file removed (the unpack case is in the archive suite)', async () => {
     // A handle that writes half of what it is given, then nothing.
     const half = (real: { write(data: Uint8Array): Promise<{ bytesWritten: number }> }) => {
       let calls = 0;
