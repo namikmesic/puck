@@ -267,6 +267,7 @@ npm run make          # the release ZIP and its checksum, see RELEASE.md
 The environment daemon, `puckd` (`src/daemon/`), is a second webpack build that the app embeds as a string (`src/main/daemon-source.ts`) and hands to runners; a daemon change reaches an environment through **Daemon update**.
 
 `RELEASE.md` covers versioning, the build target, signing and notarization, and the release checklist.
+`docs/delivery-workflow-spec.md` is the design of the ticket model and the delivery workflow (definition of done, review panel, findings, merge policy) and its phased plan.
 
 ## Run the Puck server locally
 
