@@ -12,7 +12,8 @@
  * (3), review (4), publish (5), ci (6), merge (7). Without a delivery block
  * a round has only decompose, implement and a manual merge step, which
  * waits for the user's Accept or for GitHub to report the pull request
- * merged: today's Review column, inside In progress.
+ * merged. That wait sits inside In progress, where the old Review column's
+ * tickets now are.
  *
  * Every attempt of a logical step is its own record with the same
  * `logicalId`; readiness, the stage and the summary read the latest

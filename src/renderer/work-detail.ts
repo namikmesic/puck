@@ -26,6 +26,10 @@
  *   "Answer myself". On the Conversation tab, where the thread already
  *   shows the card, the banner is one line that scrolls to it.
  * - A daemon that predates the three-column board: the sheet is read-only.
+ *   The title and description show that daemon's sentence, and a question
+ *   names who is waiting without offering an answer. A running ticket on a
+ *   current daemon still says the title and description are read-only
+ *   while it runs.
  *
  * Context in, controller out; no DOM lookups.
  */

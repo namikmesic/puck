@@ -16,7 +16,9 @@
  * fsynced once. On any error the file is truncated back to where the
  * transaction started and fsynced: the transaction did not happen. If that
  * fails too, the journal is failing: nothing is appended again in this
- * process, and every mutation is refused until a boot finds the file sound.
+ * process. The daemon then refuses every op but reads, status, logs and
+ * the daemon update, and reports degraded, until a boot finds the file
+ * sound (6.6).
  *
  * Boot. The file is read whole. A final line without a newline, a final
  * line that does not parse, fragments whose commit never came, and a commit

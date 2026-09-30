@@ -25,8 +25,10 @@
  *     allows (a follow-up in flight stops). It compares with the journal,
  *     not with this module's cached pull request state, so a crash between
  *     the cache write and the journal, a lost poll or a restart still
- *     records the merge exactly once. Closed without merging only tells the
- *     orchestrator.
+ *     records the merge exactly once. A ticket already done (merged) gets
+ *     that row and keeps its record: no notice, and its delivery reference
+ *     changes only when the state or merge commit differs. Closed without
+ *     merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
  *     redacted log tails of failed workflow jobs. Check names and summaries
  *     are redacted the same way. A success or failure is a notice, and the

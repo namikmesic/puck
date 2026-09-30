@@ -3,7 +3,9 @@
  * user, above the orchestrator's composer, so it waits where the user
  * already talks to Puck. One entry per question, grouped by ticket, oldest
  * first; each names its ticket with a W-n chip and answers through
- * `ask.answer` with the same card as the work sheet's banner. At most three
+ * `ask.answer` with the same card as the work sheet's banner. Against a
+ * daemon that predates the three-column board the lines stay and nothing
+ * answers them. At most three
  * entries show. When more than one waits, each is one line until opened.
  * The rest are one `+N waiting` row that opens the Board with In progress
  * narrowed to the tickets that need you.
