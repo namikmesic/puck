@@ -31,6 +31,7 @@ import {
   readReleaseListing,
   RunnerDownloadError,
   verifySignedRunnerReleases,
+  writeAll,
   type DownloadPolicy,
   type PackageDownload,
   type RunnerDownloadErrorCode,
@@ -655,5 +656,80 @@ describe('verifySignedRunnerReleases', () => {
     expect(releaseFailure(() => verifySignedRunnerReleases([{ ...good, manifest: Buffer.alloc(MAX_MANIFEST_BYTES + 1, 0x20).toString('base64') }], [key.pem]))).toBe('malformed');
     expect(releaseFailure(() => verifySignedRunnerReleases([{ ...good, manifest: `${good.manifest}\n` }], [key.pem]))).toBe('malformed');
     expect(releaseFailure(() => verifySignedRunnerReleases({ records: [good] }, [key.pem]))).toBe('malformed');
+  });
+});
+
+
+describe('writeAll', () => {
+  /** A handle that persists at most `most` bytes per write and records what it got. */
+  const sink = (most: number) => {
+    const written: number[] = [];
+    let calls = 0;
+    return {
+      written,
+      calls: () => calls,
+      write: async (data: Uint8Array) => {
+        calls++;
+        const take = Math.min(most, data.length);
+        written.push(...data.subarray(0, take));
+        return { bytesWritten: take };
+      },
+    };
+  };
+
+  it('keeps writing until every byte is persisted, in order', async () => {
+    const bytes = randomBytes(10);
+    const short = sink(3);
+    await writeAll(short, bytes);
+    expect(Buffer.from(short.written).equals(bytes)).toBe(true);
+    expect(short.calls()).toBe(4);
+    const whole = sink(1024);
+    await writeAll(whole, bytes);
+    expect(whole.calls()).toBe(1);
+    const empty = sink(3);
+    await writeAll(empty, new Uint8Array(0));
+    expect(empty.calls()).toBe(0);
+  });
+
+  it('fails on a write that persists nothing rather than looping or reporting success', async () => {
+    const stuck = sink(0);
+    await expect(writeAll(stuck, randomBytes(4))).rejects.toThrow('wrote none of the remaining 4 bytes');
+    expect(stuck.calls()).toBe(1);
+    const stalls = { write: async () => ({ bytesWritten: Number.NaN }) };
+    await expect(writeAll(stalls, randomBytes(4))).rejects.toThrow(/wrote none/);
+  });
+
+  it('makes a short write fail a download with the file removed, and an unpack with staging removed', async () => {
+    // A handle that writes half of what it is given, then nothing.
+    const half = (real: { write(data: Uint8Array): Promise<{ bytesWritten: number }> }) => {
+      let calls = 0;
+      return async (data: Uint8Array) => {
+        calls++;
+        if (calls > 1) return { bytesWritten: 0 };
+        return real.write(data.subarray(0, Math.max(1, data.length >> 1)));
+      };
+    };
+    const fsPromises = (await import('node:fs')).promises;
+    const realOpen = fsPromises.open;
+    const opened: { write: (data: Uint8Array) => Promise<{ bytesWritten: number }> }[] = [];
+    (fsPromises as { open: unknown }).open = async (...args: unknown[]) => {
+      const handle = await (realOpen as (...a: unknown[]) => Promise<{ write(data: Uint8Array): Promise<{ bytesWritten: number }> }>)(...args);
+      const write = half(handle);
+      const patched = Object.create(handle) as typeof handle;
+      patched.write = write;
+      opened.push(patched);
+      return patched;
+    };
+    try {
+      const { fetch } = fakeFetch({ [PAGE]: () => streamed(chunked(PACKAGE)).res });
+      const req = request();
+      const f = await failure(downloadRunnerPackage(req, OFFICIAL, { fetch }));
+      expect(f.code).toBe('write-failed');
+      expect(f.message).toMatch(/wrote none of the remaining/);
+      expect(existsSync(req.dest)).toBe(false);
+      expect(opened).toHaveLength(1);
+    } finally {
+      (fsPromises as { open: unknown }).open = realOpen;
+    }
   });
 });

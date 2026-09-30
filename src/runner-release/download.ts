@@ -154,6 +154,26 @@ function contentLength(res: Response): number | null {
 
 const cancel = (res: Response): Promise<void> => (res.body ? res.body.cancel().catch(() => undefined) : Promise.resolve());
 
+/** As much of a file handle as writing needs; node:fs's FileHandle is one. */
+export interface ByteSink {
+  write(data: Uint8Array): Promise<{ bytesWritten: number }>;
+}
+
+/**
+ * Writes all of `bytes`. A file handle's write may persist only a prefix
+ * (a full disk, RLIMIT_FSIZE, a short POSIX write) without throwing, so
+ * this loops until every byte is written and treats a write of nothing
+ * as a failure; a package is only as verified as the bytes on disk.
+ */
+export async function writeAll(file: ByteSink, bytes: Uint8Array): Promise<void> {
+  let at = 0;
+  while (at < bytes.length) {
+    const { bytesWritten } = await file.write(bytes.subarray(at));
+    if (!Number.isInteger(bytesWritten) || bytesWritten <= 0) throw new Error(`wrote none of the remaining ${bytes.length - at} bytes`);
+    at += bytesWritten;
+  }
+}
+
 /**
  * Reads a response's body, at most `maxBytes`. The bound is checked
  * against Content-Length before the read and against the running count
@@ -413,7 +433,7 @@ async function store(
         if (received > req.size) throw new RunnerDownloadError('size-mismatch', `${req.file} is longer than the ${req.size} bytes the release signed.`);
         hash.update(chunk.value);
         try {
-          await file.write(chunk.value);
+          await writeAll(file, chunk.value);
         } catch (err) {
           throw failure(err, 'write-failed', `Cannot write ${req.dest}`);
         }

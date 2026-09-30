@@ -32,7 +32,7 @@ import * as path from 'node:path';
 import { Writable } from 'node:stream';
 import { createGunzip } from 'node:zlib';
 import { RUNNER_PACKAGE_ENTRIES, type RunnerPackageEntry } from '../harness/runner-releases';
-import { MAX_PACKAGE_BYTES } from './download';
+import { MAX_PACKAGE_BYTES, writeAll } from './download';
 
 /** Most bytes a package may inflate to. */
 export const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
@@ -272,7 +272,7 @@ class PackageSink extends Writable {
       if (current.entry.spec.name === 'VERSION') current.version.push(Buffer.from(bytes));
       if (current.file) {
         try {
-          await current.file.write(bytes);
+          await writeAll(current.file, bytes);
         } catch (err) {
           throw fail('write-failed', `Cannot write ${current.entry.spec.name} in staging: ${err instanceof Error ? err.message : String(err)}`);
         }
