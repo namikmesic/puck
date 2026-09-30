@@ -8,7 +8,10 @@ import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
 import { Daemon } from '../../src/daemon/daemon';
 import type { AdapterContext, AdapterRequest, HarnessAdapter } from '../../src/daemon/harness/types';
+import { JOURNAL_FAILING, nodeJournalIO, type JournalIO } from '../../src/daemon/delivery/journal';
 import { createLogger } from '../../src/daemon/log';
+import { sessionsStore } from '../../src/daemon/store/sessions';
+import { TranscriptBook } from '../../src/daemon/transcripts';
 import { continuePrompt, workerPrompt } from '../../src/daemon/prompts';
 import { stageLine } from '../../src/renderer/board-model';
 import { defined, deliveryStack, exampleDefinition, fakeRunner, LEGACY, LEGACY_T, tempRoot, writeLegacyState, type RecordedCommand } from './daemon-fakes';
@@ -40,6 +43,7 @@ let trace: string[];
 let originTip: string;
 let forkSha: string;
 let failWorktreeAdd: boolean;
+let journalIO: JournalIO | undefined;
 const adoptedBranches = new Set<string>();
 
 const end = (ctx: AdapterContext): void => ctx.emit({ kind: 'turn-end', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } });
@@ -127,6 +131,7 @@ async function launch(): Promise<void> {
     run,
     shutdownGraceMs: 2_000,
     adapters: { 'claude-code': adapter, codex: { ...adapter, id: 'codex' } },
+    journalIO,
   });
   await daemon.start();
 }
@@ -237,6 +242,7 @@ beforeEach(async () => {
   originTip = BASE;
   forkSha = BASE;
   failWorktreeAdd = false;
+  journalIO = undefined;
   adoptedBranches.clear();
   deliver();
   await launch();
@@ -974,6 +980,118 @@ describe('the format-2 upgrade', () => {
     await launch();
     await new Promise((r) => setTimeout(r, 100));
     expect(workerCalls.filter((r) => r.prompt.includes('The lost message.'))).toHaveLength(1);
+  });
+});
+
+describe('a failing delivery journal', () => {
+  it('refuses every mutation, keeps reads, status and logs, starts no background work, and says so', async () => {
+    let fail = false;
+    journalIO = {
+      ...nodeJournalIO,
+      write(fd, buf, offset, length) {
+        if (fail) throw new Error('EIO');
+        return nodeJournalIO.write(fd, buf, offset, length);
+      },
+      truncate(fd, size) {
+        if (fail) throw new Error('EIO on truncate');
+        nodeJournalIO.truncate(fd, size);
+      },
+    };
+    await daemon.shutdown();
+    root.cleanup();
+    root = tempRoot('pd-work-');
+    deliver();
+    await launch();
+    const c = client(2);
+    await c.cmd('scheduler.pause');
+    const queued = await c.cmd<WorkItem>('item.create', { title: 'Queued', agent: 'implementer' });
+    const plain = await c.cmd<WorkItem>('item.create', { title: 'Plain' });
+    const journal = path.join(root.paths.state, 'delivery', 'journal.ndjson');
+    const size = fs.statSync(journal).size;
+    // A write fails and cannot be undone: the journal is failing from now on.
+    fail = true;
+    await expect(c.cmd('item.update', { itemId: plain.id, title: 'Renamed' })).rejects.toThrow(`not-ready: ${JOURNAL_FAILING}`);
+    fail = false;
+    // Every mutation is refused, ticket or not, although writes would work again.
+    const refused = [
+      c.raw('item.create', { title: 'Another' }),
+      c.raw('item.update', { itemId: plain.id, title: 'Renamed' }),
+      c.raw('scheduler.resume'),
+      c.raw('scheduler.pause'),
+      c.raw('chat.send', { text: 'Anyone there?' }),
+      c.raw('github.put', { grants: [] }),
+    ];
+    for (const res of await Promise.all(refused)) expect(res).toMatchObject({ ok: false, error: { code: 'not-ready', message: JOURNAL_FAILING } });
+    // Reads, status and logs stay available, and the status says why nothing changes.
+    const snap = await c.cmd<Snapshot>('snapshot.get');
+    expect(snap.instance).toMatchObject({ status: 'degraded', error: JOURNAL_FAILING });
+    expect(snap.items.map((i) => i.title)).toEqual(['Queued', 'Plain']);
+    expect(c.events()).toContainEqual({ kind: 'instance.status', status: 'degraded', error: JOURNAL_FAILING });
+    await expect(c.cmd('item.workflow', { itemId: queued.id })).resolves.toMatchObject({ roundsTotal: 1 });
+    await expect(c.cmd('session.history', { sessionId: defined(snap.orchestratorSessionId) })).resolves.toMatchObject({ entries: [] });
+    await expect(c.cmd('logs.tail', { lines: 5 })).resolves.toHaveProperty('text');
+    // Background scheduling starts nothing, even with the scheduler running again.
+    const scheduler = (daemon as unknown as { scheduler: { resume(): void; tick(): string[] } }).scheduler;
+    scheduler.resume();
+    expect(scheduler.tick()).toEqual([]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(workerCalls).toHaveLength(0);
+    expect(orchestratorCalls).toHaveLength(0);
+    expect(fs.statSync(journal).size).toBe(size);
+  });
+});
+
+describe('input recovery with a repeated request', () => {
+  it('queues the second of two identical journaled inputs again when a crash kept it from the session', async () => {
+    const c = client(2);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    workerSteps = [
+      async (req, ctx) => {
+        ctx.reportSession(`worker-${req.sessionId}`);
+        await gate;
+        end(ctx);
+      },
+      async (req, ctx) => {
+        ctx.reportSession(req.resumeId ?? `worker-${req.sessionId}`);
+        await new Promise<void>((r) => ctx.onInterrupt(r));
+        end(ctx);
+      },
+    ];
+    const created = await c.cmd<WorkItem>('item.create', { title: 'Long job', agent: 'implementer' });
+    await vi.waitFor(() => expect(workerCalls).toHaveLength(1));
+    const sessionId = defined((await item(c, 1)).sessionId);
+    // The first request joins the running step's queue, then becomes the next turn's prompt.
+    await c.cmd('chat.send', { sessionId, text: 'Same text.' });
+    release();
+    await vi.waitFor(() => expect(workerCalls.map((r) => r.prompt)).toEqual([expect.any(String), 'Same text.']), { timeout: 3000 });
+    await daemon.shutdown();
+
+    // A crash while that turn ran: its handoff and its transcript line both hold the first request,
+    // and a second, identical request is in the journal only.
+    const book = new TranscriptBook(root.paths.transcripts);
+    const log = book.get(sessionId).log;
+    const turn = defined([...log].reverse().find((e): e is Extract<TranscriptEntry, { kind: 'turn' }> => e.kind === 'turn'));
+    turn.events = turn.events.filter((e) => e.kind !== 'turn-end' && e.kind !== 'error');
+    book.commit(sessionId);
+    const sessions = sessionsStore(root.paths.state);
+    const record = defined(sessions.get()[sessionId]);
+    record.status = 'running';
+    record.handoff = { turnId: turn.turnId, inputs: [{ text: 'Same text.', author: 'user' }], handedOff: true };
+    sessions.commit();
+    const stack = deliveryStack(root.paths.state);
+    const step = defined(stack.workflow.activeImplement(created.id));
+    const tx = stack.workflow.begin('item.follow-up');
+    tx.push({ kind: 'step.input', itemId: created.id, stepId: step.id, sessionId, author: 'user', text: 'Same text.', attachment: null });
+    stack.workflow.commit(tx);
+    stack.journal.close();
+
+    workerSteps = [say('Resumed.'), say('Got it again.')];
+    await launch();
+    // The first request is not sent again; the second, lost one is, exactly once.
+    await vi.waitFor(() => expect(workerCalls.filter((r) => r.prompt === 'Same text.')).toHaveLength(2), { timeout: 3000 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(workerCalls.filter((r) => r.prompt === 'Same text.')).toHaveLength(2);
   });
 });
 

@@ -1103,6 +1103,45 @@ describe('daemon turns: crash windows and storage failures', () => {
     };
   }
 
+  it('counts an input handed to a turn once after a crash, though its handoff and its transcript line both hold it, and keeps a same-text repeat', async () => {
+    const s = orchestrator();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    attempts = [
+      async (_req, ctx) => {
+        ctx.emit({ kind: 'text-delta', text: 'working' });
+        await gate;
+        ctx.emit(END);
+      },
+      async (_req, ctx) => {
+        ctx.emit(END);
+      },
+    ];
+    turns.send(s.id, 'Same text.');
+    for (let i = 0; i < 100 && turns.get(s.id)?.handoff?.handedOff !== true; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(turns.get(s.id)?.handoff).toMatchObject({ handedOff: true, inputs: [{ text: 'Same text.' }] });
+    expect(turns.inputTexts(s.id, 0)).toEqual(['Same text.']);
+    // The same request again, queued behind the running turn: a second input, not the first one twice.
+    turns.send(s.id, 'Same text.');
+    expect(turns.inputTexts(s.id, 0)).toEqual(['Same text.', 'Same text.']);
+    await flushJsonWrites();
+    // A crash: a fresh Turns reads the same state; the turn never ended.
+    const before = turns;
+    turns = build();
+    expect(turns.get(s.id)?.handoff).toMatchObject({ handedOff: true });
+    turns.reconcile();
+    expect(turns.inputTexts(s.id, 0)).toEqual(['Same text.', 'Same text.']);
+    release();
+    await before.idle();
+  });
+
+  it('counts a handed-off input its turn did not record yet once, from the handoff', async () => {
+    const s = orchestrator();
+    const session = defined(turns.get(s.id));
+    session.handoff = { turnId: 'trn_01J0000000000000000000000Z', inputs: [{ text: 'Only in the handoff.', author: 'user' }], handedOff: false };
+    expect(turns.inputTexts(s.id, 0)).toEqual(['Only in the handoff.']);
+  });
+
   it('keeps the handoff when the turn-end transcript write fails, and a restart resumes it', async () => {
     const errors: string[] = [];
     turns = build({ log: { ...nullLogger, error: (message) => errors.push(message) } });

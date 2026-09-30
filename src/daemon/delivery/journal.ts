@@ -272,6 +272,7 @@ export function encodeTransaction(j: number, at: number, op: string, events: Jou
 
 export class Journal {
   private failed = false;
+  private readonly failingListeners: Array<() => void> = [];
 
   constructor(
     private readonly fd: number,
@@ -289,6 +290,11 @@ export class Journal {
   /** True once a failed write could not be undone: nothing is appended again. */
   failing(): boolean {
     return this.failed;
+  }
+
+  /** Called once, when a failed write cannot be undone and the journal starts failing. */
+  onFailing(listener: () => void): void {
+    this.failingListeners.push(listener);
   }
 
   /**
@@ -316,6 +322,13 @@ export class Journal {
       } catch (undo) {
         this.failed = true;
         this.log.error('journal.failing', undo, { op });
+        for (const listener of this.failingListeners) {
+          try {
+            listener();
+          } catch (hook) {
+            this.log.error('journal.failing-hook-failed', hook);
+          }
+        }
         throw new JournalError('not-ready', JOURNAL_FAILING);
       }
       this.log.error('journal.write-failed', err, { op });

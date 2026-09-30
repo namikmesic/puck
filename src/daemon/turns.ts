@@ -240,16 +240,24 @@ export class Turns {
   }
 
   /**
-   * The texts a session holds as input: queued, handed to the running
-   * turn, or recorded in the transcript at or after `since`. Boot recovery
-   * compares journaled step inputs against it.
+   * The texts a session holds as input, one per logical input: queued,
+   * handed to the running turn, or recorded in the transcript at or after
+   * `since`. An input handed to a turn is in the handoff and, once its turn
+   * recorded it, in the transcript too; it counts once, so a repeated
+   * request with the same text stays distinct. Boot recovery compares
+   * journaled step inputs against it.
    */
   inputTexts(sessionId: string, since: number): string[] {
     const session = this.get(sessionId);
     if (!session) return [];
+    const log = this.deps.transcripts.get(sessionId).log;
     const texts = (this.queues.get(sessionId) ?? session.queue).map((q) => q.text);
-    for (const q of session.handoff?.inputs ?? []) texts.push(q.text);
-    for (const entry of this.deps.transcripts.get(sessionId).log) if (entry.kind === 'user' && entry.ts >= since) texts.push(entry.text);
+    const handoff = session.handoff;
+    if (handoff) {
+      const recorded = durableInputs(turnLines(log, handoff.turnId).map(copyInput), handoff.inputs);
+      for (const q of handoff.inputs.slice(recorded)) texts.push(q.text);
+    }
+    for (const entry of log) if (entry.kind === 'user' && entry.ts >= since) texts.push(entry.text);
     return texts;
   }
 
@@ -1254,6 +1262,23 @@ function sawProvider(events: TurnEntry['events']): boolean {
   return events.some(
     (e) => e.kind === 'text-delta' || e.kind === 'thinking' || e.kind === 'tool-start' || e.kind === 'tool-end' || e.kind === 'ask',
   );
+}
+
+/**
+ * The user lines recorded for turn `turnId`: those just before its turn
+ * entry (notices between are skipped), or, while it has no entry yet, the
+ * lines after the last turn entry.
+ */
+function turnLines(log: TranscriptEntry[], turnId: string): UserEntry[] {
+  const at = log.findIndex((entry) => entry.kind === 'turn' && entry.turnId === turnId);
+  const lines: UserEntry[] = [];
+  for (let i = (at < 0 ? log.length : at) - 1; i >= 0; i--) {
+    const entry = log[i];
+    if (entry.kind === 'notice') continue;
+    if (entry.kind !== 'user') break;
+    lines.unshift(entry);
+  }
+  return lines;
 }
 
 /** User lines of the in-flight turn. A finished turn ends the tail; a restart-closed one does not. */

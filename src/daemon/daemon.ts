@@ -47,7 +47,7 @@ import {
 } from '../harness/daemon-protocol';
 import { latestAttempts, latestRound, roundSteps, StepStateError } from '../harness/workflow';
 import { asLedgerEvents } from './delivery/derive';
-import { CheckpointAheadError, JournalDamagedError, JournalError, type Journal } from './delivery/journal';
+import { CheckpointAheadError, JOURNAL_FAILING, JournalDamagedError, JournalError, type Journal, type JournalIO } from './delivery/journal';
 import { deliveryStore, type TablesFile } from './store/delivery';
 import type { ItemRecord, ItemsFile } from './store/items';
 import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
@@ -118,6 +118,8 @@ export interface DaemonOptions {
   shutdownGraceMs?: number;
   /** Deadline of one policies PUT to the server (`GRANT_SYNC_TIMEOUT_MS`). */
   grantSyncTimeoutMs?: number;
+  /** The delivery journal's file operations (tests inject failures). */
+  journalIO?: JournalIO;
 }
 
 /** Ops a failed daemon still answers (fresh GitHub grants help the next boot). */
@@ -126,6 +128,23 @@ const FAILED_OPS: ReadonlySet<Op> = new Set<Op>(['snapshot.get', 'logs.tail', 'g
 const GITHUB_CHECK_MS = 60_000;
 /** Ops that need a ready environment. */
 const READY_OPS: ReadonlySet<Op> = new Set<Op>(['chat.send', 'credentials.get', 'daemon.upgrade']);
+/**
+ * Ops a daemon whose delivery journal is failing still answers (6.6): reads,
+ * status and logs, and the daemon update, since the next boot is what checks
+ * the journal again. Every other op mutates and is refused.
+ */
+const JOURNAL_FAILING_OPS: ReadonlySet<Op> = new Set<Op>([
+  'snapshot.get',
+  'snapshot.part',
+  'session.history',
+  'item.workflow',
+  'item.records',
+  'item.pr',
+  'issue.search',
+  'credentials.get',
+  'logs.tail',
+  'daemon.upgrade',
+]);
 
 export class Daemon {
   private state: InstanceState = { status: 'provisioning' };
@@ -223,7 +242,7 @@ export class Daemon {
           upsert: (session) => this.turns.upsert(session),
         },
         settings: () => this.definition?.orchestrator ?? null,
-        canWake: () => this.running(),
+        canWake: () => this.running() && !this.journalFailing(),
         log,
         now: this.now,
       });
@@ -280,7 +299,7 @@ export class Daemon {
         notify: (kind, text, itemId) => {
           this.orchestrator.push(kind, text, itemId);
         },
-        canRun: () => this.running(),
+        canRun: () => this.running() && !this.journalFailing(),
         mergeParents: (item, sha) => {
           const repo = this.definition?.repos.find((r) => r.dir === item.repo);
           if (!repo) return Promise.resolve([]);
@@ -291,7 +310,7 @@ export class Daemon {
       });
       this.scheduler = new Scheduler({
         view: () => this.schedulerView(),
-        canRun: () => this.running() && !this.reprovisioning,
+        canRun: () => this.running() && !this.reprovisioning && !this.journalFailing(),
         start: (stepId) => this.work.dispatch(stepId),
         log,
       });
@@ -390,6 +409,7 @@ export class Daemon {
         emit: (ev) => this.emit(ev),
         log,
         now: this.now,
+        io: this.opts.journalIO,
       });
     } catch (err) {
       if (err instanceof CheckpointAheadError) {
@@ -404,6 +424,7 @@ export class Daemon {
     }
     this.journal = boot.journal;
     this.workflow = boot.workflow;
+    boot.journal.onFailing(() => this.journalFailed());
     const transactions = boot.transactions;
     const bootstrapped = bootstrapLegacy(this.workflow, this.backlog.list(), this.itemsFile.get().nextNumber);
     if (bootstrapped || !transactions.length) log.info('journal.bootstrap', { tickets: bootstrapped });
@@ -620,8 +641,18 @@ export class Daemon {
   }
 
   private setState(next: InstanceState): void {
-    this.state = next;
-    this.emit({ kind: 'instance.status', ...next });
+    // A failing journal keeps the environment degraded: it serves reads but refuses every change.
+    this.state = next.status === 'ready' && this.journalFailing() ? { status: 'degraded', error: JOURNAL_FAILING } : next;
+    this.emit({ kind: 'instance.status', ...this.state });
+  }
+
+  /** True once the delivery journal could not undo a failed write (6.6). */
+  private journalFailing(): boolean {
+    return this.workflow?.failing() ?? false;
+  }
+
+  private journalFailed(): void {
+    if (this.state.status === 'ready' || this.state.status === 'degraded') this.setState({ status: 'degraded', error: JOURNAL_FAILING });
   }
 
   /** Emits `github.auth` when the state changed since the last one (or always, when forced). */
@@ -712,6 +743,7 @@ export class Daemon {
     if (READY_OPS.has(op) && !this.running()) {
       return Promise.reject(new OpError('not-ready', 'The environment is still starting.'));
     }
+    if (this.journalFailing() && !JOURNAL_FAILING_OPS.has(op)) return Promise.reject(new OpError('not-ready', JOURNAL_FAILING));
     return dispatch(this.handlers, op, args, ctx).catch((err: unknown) => {
       if (err instanceof TurnsError || err instanceof WorkError || err instanceof JournalError) throw new OpError(err.code, err.message);
       if (err instanceof ItemStateError || err instanceof StepStateError) throw new OpError('invalid-state', err.message);
