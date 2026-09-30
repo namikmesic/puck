@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { nextStatus, type ItemTrigger } from '../../src/daemon/items';
+import { nextStatus, type ItemTrigger } from '../../src/harness/item-transitions';
 import type { DaemonEventPayload, PuckBridge } from '../../src/harness/bridge';
 import type { ItemStatus, WorkItem } from '../../src/harness/daemon-protocol';
 import { buildWorld, ENV_ID, ORCH } from '../../src/renderer/fixture/data';

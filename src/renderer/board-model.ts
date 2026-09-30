@@ -91,13 +91,15 @@ export function armsFirst(action: CardAction, status: ItemStatus): boolean {
 /**
  * The agents an item can be assigned to. An item with a session keeps that
  * agent (`sessionAgent` when the item's own agent was cleared): a queued
- * one is already on it, and a backlog one can only be assigned back to it.
+ * one is already on it, and a backlog one, or a queued one that lost its
+ * agent, can only be assigned back to it.
  */
 export function assignable(item: Pick<WorkItem, 'status' | 'agent' | 'sessionId'>, agents: readonly string[], sessionAgent: string | null = null): string[] {
   if (item.status !== 'backlog' && item.status !== 'queued') return [];
   if (item.sessionId) {
+    if (item.status === 'queued' && item.agent) return [];
     const agent = item.agent ?? sessionAgent;
-    if (item.status === 'queued' || !agent) return [];
+    if (!agent) return [];
     return agents.filter((a) => a === agent);
   }
   return agents.filter((a) => !(item.status === 'queued' && a === item.agent));

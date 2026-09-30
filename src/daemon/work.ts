@@ -290,7 +290,11 @@ export class Work {
 
   retry(ref: string): ItemRecord {
     const item = this.item(ref);
-    this.guard(() => this.deps.backlog.transition(item, 'retry', { attempts: 0, requeue: item.sessionId ? 'retry' : null }));
+    // An item unassigned before it was cancelled keeps its session but no
+    // agent; the session's owner takes it back so the scheduler can dispatch
+    // it (an owner no longer assigned in the definition just waits there).
+    const agent = item.agent ?? (item.sessionId ? (this.deps.turns.get(item.sessionId)?.agent ?? null) : null);
+    this.guard(() => this.deps.backlog.transition(item, 'retry', { attempts: 0, agent, requeue: item.sessionId ? 'retry' : null }));
     this.deps.requestTick();
     return item;
   }

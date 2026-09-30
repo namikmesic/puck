@@ -266,6 +266,62 @@ describe('board', () => {
     expect(daemon).toHaveBeenCalledWith('item.cancel', { itemId: 'itm_3' });
   });
 
+  it('dismisses a card’s menu when the item changes, so a stale Cancel never reaches now-running work', async () => {
+    const { card, daemon, store } = setup([item({ number: 2, status: 'queued', agent: 'implementer' })]);
+    const more = (): HTMLButtonElement => card('itm_2').querySelector('.bd-more') as HTMLButtonElement;
+    more().click();
+    expect(menuItems()).toEqual(['open', 'assign:reviewer', 'unassign', 'cancel']);
+    const stale = document.querySelector('.menu [data-action="cancel"]') as HTMLButtonElement;
+    store.applyEvent(2, { kind: 'item.upsert', item: item({ number: 2, status: 'running', agent: 'implementer', sessionId: 's2' }) }, ENV);
+    expect(document.querySelector('.menu')).toBeNull();
+    expect(more().getAttribute('aria-expanded')).toBe('false');
+    stale.click();
+    await flush();
+    expect(daemon).not.toHaveBeenCalledWith('item.cancel', expect.anything());
+    // Opened again, the menu is the running card's: no Reassign or Unassign, and Cancel arms first.
+    more().click();
+    expect(menuItems()).toEqual(['open', 'stop', 'cancel']);
+    const cancel = document.querySelector('.menu [data-action="cancel"]') as HTMLButtonElement;
+    cancel.click();
+    await flush();
+    expect(cancel.classList.contains('armed')).toBe(true);
+    expect(daemon).not.toHaveBeenCalledWith('item.cancel', expect.anything());
+    cancel.click();
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.cancel', { itemId: 'itm_2' });
+  });
+
+  it('offers a queued item that lost its agent back to its session’s agent', () => {
+    const { card, daemon, store } = setup([item({ number: 2, status: 'queued', sessionId: 's2' })]);
+    store.applyEvent(2, { kind: 'session.upsert', session: session({ id: 's2', kind: 'worker', agent: 'reviewer' }) }, ENV);
+    (card('itm_2').querySelector('.bd-more') as HTMLButtonElement).click();
+    expect(menuItems()).toEqual(['open', 'assign:reviewer', 'cancel']);
+    expect(document.querySelector('.menu [data-action="assign:reviewer"]')?.textContent).toBe('Assign to reviewer');
+    (document.querySelector('.menu [data-action="assign:reviewer"]') as HTMLButtonElement).click();
+    expect(daemon).toHaveBeenCalledWith('item.assign', { itemId: 'itm_2', agent: 'reviewer' });
+  });
+
+  it('keeps the tab stop on a visible card when Closed folds, or the active item closes', () => {
+    const { board, card, col, store } = setup([item({ number: 1, status: 'backlog' }), item({ number: 2, status: 'queued', agent: 'implementer' }), item({ number: 7, status: 'failed' })]);
+    const stops = (): (string | undefined)[] => [...document.querySelectorAll<HTMLElement>('.bd-card')].filter((c) => c.tabIndex === 0).map((c) => c.dataset.item);
+    expect(stops()).toEqual(['itm_1']);
+    (col('closed').querySelector('.bd-rail') as HTMLButtonElement).click();
+    expect(document.activeElement).toBe(card('itm_7'));
+    expect(stops()).toEqual(['itm_7']);
+    (col('closed').querySelector('.bd-fold') as HTMLButtonElement).click();
+    expect(col('closed').classList.contains('collapsed')).toBe(true);
+    expect(stops()).toEqual(['itm_1']);
+    // A hidden card is never focused, whoever asks.
+    expect(board.focusCard('itm_7')).toBe(false);
+    expect(document.activeElement).not.toBe(card('itm_7'));
+    expect(stops()).toEqual(['itm_1']);
+    // The active item closing while Closed is a rail hands the stop to a card that is still shown.
+    card('itm_1').focus();
+    store.applyEvent(2, { kind: 'item.upsert', item: item({ number: 1, status: 'cancelled' }) }, ENV);
+    expect(stops()).toEqual(['itm_2']);
+    expect(document.activeElement).not.toBe(card('itm_1'));
+  });
+
   it('moves between cards with the arrow keys, one tab stop for the board', () => {
     const { card } = setup([
       item({ number: 1, status: 'backlog' }),
