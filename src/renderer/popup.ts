@@ -131,6 +131,8 @@ export function openMenu(anchor: HTMLElement | null, entries: readonly MenuEntry
     let armed: ReturnType<typeof setTimeout> | null = null;
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
+      // A menu that was closed under the pointer (its card was rebuilt) never runs its entries.
+      if (current?.box !== box) return;
       if (entry.confirm && !armed) {
         label.textContent = entry.confirm;
         b.classList.add('armed');

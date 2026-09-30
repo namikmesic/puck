@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { nextStatus, TRANSITIONS, type ItemTrigger } from '../../src/daemon/items';
+import { nextStatus, TRANSITIONS, type ItemTrigger } from '../../src/harness/item-transitions';
 import type { ItemStatus } from '../../src/harness/daemon-protocol';
 import {
   armsFirst,
@@ -107,7 +107,9 @@ describe('card actions', () => {
     expect(assignable(item({ status: 'queued', agent: 'reviewer', sessionId: 's' }), agents)).toEqual([]);
     expect(assignable(item({ status: 'backlog', sessionId: 's' }), agents)).toEqual([]);
     expect(assignable(item({ status: 'backlog', sessionId: 's' }), agents, 'reviewer')).toEqual(['reviewer']);
-    expect(assignable(item({ status: 'queued', sessionId: 's' }), agents, 'reviewer')).toEqual([]);
+    // A queued item that lost its agent but kept its session (unassigned, cancelled, retried) goes back to the owner.
+    expect(assignable(item({ status: 'queued', sessionId: 's' }), agents, 'reviewer')).toEqual(['reviewer']);
+    expect(assignable(item({ status: 'queued', sessionId: 's' }), agents)).toEqual([]);
     expect(assignable(item({ status: 'running', agent: 'reviewer' }), agents)).toEqual([]);
   });
 });

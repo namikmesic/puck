@@ -19,7 +19,7 @@ describe('msUntilNextDay', () => {
 describe('watchDayRollover', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('fires at each local midnight and on focus, until stopped', () => {
+  it('fires at each local midnight, on focus, and when the window becomes visible again, until stopped', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-18T23:59:00'));
     const onDayTurn = vi.fn();
@@ -33,12 +33,17 @@ describe('watchDayRollover', () => {
     window.dispatchEvent(new Event('focus'));
     expect(onDayTurn).toHaveBeenCalledTimes(2);
 
-    vi.advanceTimersByTime(24 * 3_600_000);
+    // Waking from sleep with the window frontmost: no focus, only visibilitychange.
+    document.dispatchEvent(new Event('visibilitychange'));
     expect(onDayTurn).toHaveBeenCalledTimes(3);
+
+    vi.advanceTimersByTime(24 * 3_600_000);
+    expect(onDayTurn).toHaveBeenCalledTimes(4);
 
     stop();
     window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
     vi.advanceTimersByTime(48 * 3_600_000);
-    expect(onDayTurn).toHaveBeenCalledTimes(3);
+    expect(onDayTurn).toHaveBeenCalledTimes(4);
   });
 });

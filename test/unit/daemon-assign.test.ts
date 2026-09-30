@@ -3,8 +3,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readDefinition } from '../../src/harness/env-definition';
+import { assignable } from '../../src/renderer/board-model';
 import { Backlog } from '../../src/daemon/items';
 import { nullLogger } from '../../src/daemon/log';
+import { pickDispatches } from '../../src/daemon/scheduler';
 import { itemsStore } from '../../src/daemon/store/items';
 import type { SessionRecord } from '../../src/daemon/store/sessions';
 import { Work, type WorkDeps } from '../../src/daemon/work';
@@ -13,7 +15,8 @@ import { exampleDefinition } from './daemon-fakes';
 /**
  * Assigning an item that already has a worker session. The session's own
  * agent is accepted when the item's agent was cleared; any other agent is
- * refused; an item with no session assigns as before.
+ * refused; an item with no session assigns as before. Retry gives such an
+ * item its owner back, so the scheduler can dispatch it.
  */
 
 const log = nullLogger;
@@ -48,7 +51,7 @@ describe('Work.assign keeps a session with its agent', () => {
     const sessions = new Map<string, SessionRecord>([['ses_owner', worker('ses_owner', 'implementer')]]);
     const deps: WorkDeps = {
       backlog,
-      turns: { get: (id: string) => sessions.get(id) ?? null } as WorkDeps['turns'],
+      turns: { get: (id: string) => sessions.get(id) ?? null, clearQueue: () => undefined, interrupt: () => undefined } as unknown as WorkDeps['turns'],
       git: {} as WorkDeps['git'],
       publisher: {} as WorkDeps['publisher'],
       definition: () => parsed.value,
@@ -85,6 +88,27 @@ describe('Work.assign keeps a session with its agent', () => {
     backlog.patch(named, { sessionId: 'ses_owner' });
     expect(() => work.assign(named.id, 'reviewer', 'orchestrator')).toThrow(/keeps that agent/);
     expect(backlog.get(named.id)).toMatchObject({ status: 'queued', agent: 'implementer', sessionId: 'ses_owner' });
+  });
+
+  it('retry restores the session owner after the orchestrator unassigned and the user cancelled it', () => {
+    const item = backlog.create({ title: 'Returned', body: '', agent: 'implementer', repo: null, createdBy: 'user' });
+    backlog.patch(item, { sessionId: 'ses_owner' });
+    expect(work.assign(item.id, null, 'orchestrator')).toMatchObject({ status: 'backlog', agent: null, sessionId: 'ses_owner' });
+    expect(work.cancel(item.id, 'user')).toMatchObject({ status: 'cancelled', agent: null, sessionId: 'ses_owner' });
+    const retried = work.retry(item.id);
+    expect(retried).toMatchObject({ status: 'queued', agent: 'implementer', sessionId: 'ses_owner', attempts: 0 });
+    expect(pickDispatches({ items: [retried], assignments: { implementer: 1 }, maxWorkers: 3 })).toEqual([item.id]);
+    // An item an older daemon retried without its agent: the board offers the owner, and only the owner is accepted.
+    expect(assignable({ status: 'queued', agent: null, sessionId: 'ses_owner' }, ['implementer', 'reviewer'], 'implementer')).toEqual(['implementer']);
+    backlog.patch(retried, { agent: null });
+    expect(() => work.assign(item.id, 'reviewer', 'user')).toThrow(/keeps that agent/);
+    expect(work.assign(item.id, 'implementer', 'user')).toMatchObject({ status: 'queued', agent: 'implementer', sessionId: 'ses_owner' });
+  });
+
+  it('retry leaves an item that never had a session or an agent waiting for one', () => {
+    const item = backlog.create({ title: 'Plain', body: '', agent: null, repo: null, createdBy: 'user' });
+    work.cancel(item.id, 'user');
+    expect(work.retry(item.id)).toMatchObject({ status: 'queued', agent: null, sessionId: null });
   });
 
   it('assigns an item with no session to any agent and can clear it', () => {

@@ -242,7 +242,7 @@ export function initBoard(ctx: BoardContext) {
       if (action === 'assign') {
         for (const agent of choicesFor(item)) {
           entries.push({
-            label: `${item.status === 'queued' ? 'Reassign' : 'Assign'} to ${agent}`,
+            label: `${item.agent ? 'Reassign' : 'Assign'} to ${agent}`,
             action: `assign:${agent}`,
             group: !grouped,
             run: () => {
@@ -270,11 +270,14 @@ export function initBoard(ctx: BoardContext) {
     return entries;
   }
 
-  function openCardMenu(item: WorkItem, anchor: HTMLElement): void {
+  /** The entries come from the item as it is now, not as the card was built (a rebuild dismisses the menu anyway). */
+  function openCardMenu(itemId: string, anchor: HTMLElement): void {
     if (popupAnchor() === anchor) {
       closePopup();
       return;
     }
+    const item = store.items().find((i) => i.id === itemId);
+    if (!item) return;
     openMenu(anchor, menuEntries(item), { label: `Actions for W-${item.number}` });
   }
 
@@ -379,7 +382,7 @@ export function initBoard(ctx: BoardContext) {
     more.setAttribute('aria-expanded', 'false');
     more.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      openCardMenu(item, more);
+      openCardMenu(item.id, more);
     });
     top.appendChild(more);
 
@@ -444,9 +447,15 @@ export function initBoard(ctx: BoardContext) {
     }
   }
 
+  /** True when the card is shown: not in Closed while that is a rail. */
+  function shown(node: HTMLElement): boolean {
+    return closedOpen || !cols.get('closed')?.list.contains(node);
+  }
+
+  /** Focus a card; false when there is none or it is hidden in the folded Closed column. */
   function focusCard(itemId: string): boolean {
     const node = els.columns.querySelector<HTMLElement>(`.bd-card[data-item="${CSS.escape(itemId)}"]`);
-    if (!node) return false;
+    if (!node || !shown(node)) return false;
     setActive(itemId);
     node.focus();
     node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -500,7 +509,7 @@ export function initBoard(ctx: BoardContext) {
       case 'F10':
       case 'ContextMenu':
         if (ev.key === 'F10' && !ev.shiftKey) return;
-        openCardMenu(item, li.querySelector<HTMLElement>('.bd-more') ?? li);
+        openCardMenu(item.id, li.querySelector<HTMLElement>('.bd-more') ?? li);
         break;
       default:
         return;
@@ -597,6 +606,7 @@ export function initBoard(ctx: BoardContext) {
         i.createdBy,
         i.source?.number,
         i.attempts,
+        i.sessionId,
         i.pendingAsk?.routedTo,
         i.lastError,
         i.cancelReason,
@@ -624,6 +634,13 @@ export function initBoard(ctx: BoardContext) {
     return li;
   }
 
+  /** Empty a column; a card menu open on one of its cards goes with the card (its actions were that card's). */
+  function clearList(list: HTMLElement): void {
+    const anchor = popupAnchor();
+    if (anchor && list.contains(anchor)) closePopup();
+    list.textContent = '';
+  }
+
   function fill(column: ColumnId, items: WorkItem[], all: WorkItem[]): void {
     const parts = cols.get(column);
     if (!parts) return;
@@ -641,7 +658,7 @@ export function initBoard(ctx: BoardContext) {
     }
     const scroll = parts.list.scrollTop;
     parts.built = k;
-    parts.list.textContent = '';
+    clearList(parts.list);
     if (!items.length) {
       if (column === 'backlog' && !all.length) parts.list.appendChild(emptyCta());
       else parts.list.appendChild(el('li', 'bd-hint', COLUMNS.find((c) => c.id === column)?.hint ?? ''));
@@ -739,7 +756,7 @@ export function initBoard(ctx: BoardContext) {
         parts.count.textContent = '';
         if (parts.built !== 'skeleton') {
           parts.built = 'skeleton';
-          parts.list.textContent = '';
+          clearList(parts.list);
           for (let n = 0; n < (i < 3 ? 2 : 1); n++) parts.list.appendChild(el('li', `bd-skel${n ? ' short' : ''}`));
         }
         i++;
@@ -753,7 +770,8 @@ export function initBoard(ctx: BoardContext) {
     renderClosedRail(columnItems(all, 'closed'));
     const selected = ctx.selected();
     for (const node of els.columns.querySelectorAll<HTMLElement>('.bd-card')) node.classList.toggle('selected', node.dataset.item === selected);
-    const cards = [...els.columns.querySelectorAll<HTMLElement>('.bd-card')];
+    // The tab stop stays on a card that can be seen: never one folded away in Closed.
+    const cards = visibleCards().flat();
     const keep = active && cards.some((n) => n.dataset.item === active) ? active : (cards[0]?.dataset.item ?? null);
     if (keep) setActive(keep);
     // Keyboard reorder asks for the card back. A rebuild drops whatever was

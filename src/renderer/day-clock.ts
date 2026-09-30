@@ -4,7 +4,8 @@
  *
  * It fires at the next local midnight, then reschedules from the time it
  * actually ran. Timers stall while the machine sleeps, so it also fires
- * whenever the window regains focus. A fire can be early or repeated; the
+ * on window focus and on `visibilitychange`, the signal a woken window
+ * can get without regaining focus. A fire can be early or repeated; the
  * callback just relabels for the current time.
  */
 
@@ -13,9 +14,11 @@ export function msUntilNextDay(now: number): number {
   return new Date(now).setHours(24, 0, 0, 0) - now;
 }
 
-type ClockWindow = Pick<Window, 'setTimeout' | 'clearTimeout' | 'addEventListener' | 'removeEventListener'>;
+type ClockWindow = Pick<Window, 'setTimeout' | 'clearTimeout' | 'addEventListener' | 'removeEventListener'> & {
+  document: Pick<Document, 'addEventListener' | 'removeEventListener'>;
+};
 
-/** Call `onDayTurn` at each local midnight and on window focus. Returns a stop function. */
+/** Call `onDayTurn` at each local midnight, on window focus, and on `visibilitychange`. Returns a stop function. */
 export function watchDayRollover(win: ClockWindow, onDayTurn: () => void, now: () => number = Date.now): () => void {
   let timer: ReturnType<Window['setTimeout']> | undefined;
   const schedule = (): void => {
@@ -27,9 +30,11 @@ export function watchDayRollover(win: ClockWindow, onDayTurn: () => void, now: (
     schedule();
   }
   win.addEventListener('focus', fire);
+  win.document.addEventListener('visibilitychange', fire);
   schedule();
   return () => {
     win.removeEventListener('focus', fire);
+    win.document.removeEventListener('visibilitychange', fire);
     if (timer !== undefined) win.clearTimeout(timer);
   };
 }
