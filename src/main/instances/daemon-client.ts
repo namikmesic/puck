@@ -56,7 +56,7 @@ export interface DaemonClientDeps {
   since(): number | null;
   saveSeq(seq: number): void;
   onEvent(seq: number, at: number, ev: DaemonEvent): void;
-  /** A resync: the snapshot replaces everything the owner projected. */
+  /** A resync: the owner applies this snapshot in place of missed events. */
   onSnapshot(snapshot: Snapshot): void;
   onState(state: AttachState, detail: string): void;
   /** Each welcome: the current build and the head through which events are replayed. */

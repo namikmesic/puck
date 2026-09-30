@@ -12,10 +12,13 @@
  * - Chips: "Update available" (the apply dialog, with the changes grouped
  *   by how they apply), a GitHub warning when the environment's GitHub
  *   access is not ok, a reconnecting spinner, "Daemon update" when this
- *   Puck carries a newer daemon, and "Daemon updating" while that runs.
+ *   Puck carries a newer daemon, "Daemon updating" while that runs, and
+ *   "Daemon update failed" when it does not finish.
  * - The banner over the content says when the environment cannot be reached
  *   ("Can't reach build-box. Work continues there; Puck keeps trying."),
- *   is incompatible, or is not connected, with Reconnect where it helps.
+ *   is incompatible, is not connected, or a daemon update failed. Reconnect
+ *   shows when it can help and whenever an update failed; Retry update
+ *   shows while the environment is attached.
  *
  * Context in, controller out; no DOM lookups.
  */

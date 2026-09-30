@@ -7,8 +7,11 @@
  *   is a replay overlap and is skipped. Events that arrive before the first
  *   snapshot, or ahead of a missing seq, wait in a buffer; a gap that the
  *   buffer cannot close asks the owner for a resync (once per cursor).
- * - A snapshot replaces everything and moves the cursor to its head;
- *   buffered events after the head then apply on top.
+ * - A snapshot replaces the projection and moves the cursor to its head;
+ *   buffered events after the head then apply on top. The same daemon
+ *   keeps an in-progress or failed update; a different version or build
+ *   clears it. A welcome updates the version and build without replacing
+ *   the projection, and clears the update only when either changed.
  * - Kept: items, backlog order, sessions, capacity, instance status, GitHub
  *   state, open questions, and live turn buffers (the recorded dialect of
  *   every turn still running, so a thread opened mid-turn and the board's
