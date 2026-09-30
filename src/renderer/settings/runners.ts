@@ -19,6 +19,10 @@
  *   another machine cannot reach it there, and adds that This Mac still
  *   works only when This Mac is already installed or the server publishes
  *   a macOS ARM64 package.
+ *   Copied installation commands quote control-free values, check the
+ *   development package in private staging, and publish only a complete
+ *   installation. Configure and Run each check and enter its directory in
+ *   a subshell; copying a block never changes the caller's directory.
  *
  * A controller that survives re-renders: a runner-list push or a focus
  * refresh redraws the list and restores an open dialog and a half-typed
@@ -36,6 +40,7 @@ import type {
   RunnerRow,
   RunnersState,
 } from '../../harness/bridge';
+import { shellQuote } from '../../harness/shell';
 import { armDelete, el } from '../dom';
 import { relTime } from '../format';
 import { buildSeg, button, errText } from '../util';
@@ -134,18 +139,92 @@ export function serverAddress(url: string): { scheme: 'HTTP' | 'HTTPS'; host: st
   return { scheme: parsed.protocol === 'https:' ? 'HTTPS' : 'HTTP', host: parsed.host, loopback };
 }
 
-/** The copy-paste blocks for one platform's tarball. */
+/** Fail-closed copy-paste blocks for today's development tarballs. The
+ *  advertised checksum detects corruption; it adds no authenticity claim. */
 export function commandsFor(asset: RunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
   const mac = asset.os === 'macos';
+  const file = shellQuote(asset.file);
+  const url = shellQuote(asset.url);
+  const sha256 = shellQuote(asset.sha256);
+  const version = shellQuote(asset.version);
+  const server = shellQuote(reg.serverUrl);
+  const token = shellQuote(reg.token);
+  if (!asset.file || asset.file === '.' || asset.file === '..' || /[/\\]/.test(asset.file)) {
+    throw new Error('Runner package file must be a file name without a path.');
+  }
+  if (!/^[a-f\d]{64}$/i.test(asset.sha256) || !asset.version) {
+    throw new Error('Runner package must have a SHA-256 checksum and a version.');
+  }
+  const transport = new URL(asset.url);
+  const origin = new URL(reg.serverUrl);
+  const curl = transport.protocol === 'https:'
+    ? "--fail --location --proto '=https' --proto-redir '=https'"
+    : transport.protocol === 'http:' && transport.origin === origin.origin && !asset.url.includes('\\')
+      ? '--fail --max-redirs 0'
+      : null;
+  if (!curl) throw new Error('Runner downloads require HTTPS or HTTP on this Puck server\'s own origin.');
+  const hash = mac ? 'shasum -a 256' : 'sha256sum';
+  // Even delimiter-like text inside a quoted value cannot terminate the heredoc.
+  let delimiter = 'PUCK_RUNNER_INSTALL';
+  while ([asset.file, asset.url, asset.sha256, asset.version, reg.serverUrl, reg.token].some((v) => v.includes(delimiter))) delimiter += '_';
+  const inRunner = (command: string): string => [
+    '(',
+    '  set -eu',
+    '  # Check the completed installation before entering it.',
+    `  if [ ! -f ./puck-runner/VERSION ] || [ "$(cat ./puck-runner/VERSION 2>/dev/null)" != ${version} ] || [ ! -x ./puck-runner/config.sh ]; then`,
+    "    printf '%s\\n' 'Puck runner installation is incomplete or has a different version.' >&2",
+    '    exit 1',
+    '  fi',
+    '  cd ./puck-runner || exit 1',
+    `  ${command}`,
+    ')',
+  ].join('\n');
   return {
-    download: [
-      'mkdir puck-runner && cd puck-runner',
-      `curl -fLo ${asset.file} ${asset.url}`,
-      `echo "${asset.sha256}  ${asset.file}" | shasum -a 256 -c`,
-      `tar xzf ./${asset.file}`,
-    ],
-    configure: [`./config.sh --url ${reg.serverUrl} --token ${reg.token}`],
-    run: ['./run.sh', mac ? './svc.sh install && ./svc.sh start' : 'sudo ./svc.sh install && sudo ./svc.sh start'],
+    download: [[
+      `sh -eu <<'${delimiter}'`,
+      'fail() { printf \'%s\\n\' "$1" >&2; exit 1; }',
+      '# Check prerequisites and refuse an existing destination.',
+      `for tool in curl ${mac ? 'shasum' : 'sha256sum'} tar mktemp mv rm cat; do`,
+      '  command -v "$tool" >/dev/null 2>&1 || fail "Missing prerequisite: $tool"',
+      'done',
+      '[ ! -e ./puck-runner ] && [ ! -L ./puck-runner ] || fail \'puck-runner already exists.\'',
+      '# Create private staging beside the destination; clean up on failure.',
+      'parent=$(pwd -P)',
+      'stage=\'\'',
+      'trap \'status=$?; trap - 0; [ -z "$stage" ] || rm -rf "$stage"; exit "$status"\' 0',
+      'trap \'exit 1\' HUP INT TERM',
+      'umask 077',
+      'stage=$(mktemp -d "$parent/.puck-runner.XXXXXXXXXX")',
+      'cd "$stage"',
+      `file=${file}`,
+      '# Download to a partial file with bounded timeouts.',
+      `curl ${curl} --globoff --connect-timeout 30 --max-time 900 --output "./$file.partial" -- ${url}`,
+      '# Verify the checksum before renaming or extracting.',
+      `printf '%s  %s\\n' ${sha256} "./$file.partial" | ${hash} -c --status`,
+      'mv "./$file.partial" "./$file"',
+      '# Extract in staging and require the shipped files and version.',
+      'tar -xzf "./$file"',
+      'for required in config.sh run.sh svc.sh VERSION bin/node bin/puck-runner.cjs; do',
+      '  [ -f "$required" ] || fail "Runner package is missing $required."',
+      'done',
+      'for executable in config.sh run.sh svc.sh bin/node; do',
+      '  [ -x "$executable" ] || fail "Runner package cannot execute $executable."',
+      'done',
+      `[ "$(cat VERSION)" = ${version} ] || fail 'Runner package version does not match.'`,
+      '# Publish only after every check succeeds; never replace a destination.',
+      'cd "$parent"',
+      '[ ! -e ./puck-runner ] && [ ! -L ./puck-runner ] || fail \'puck-runner already exists.\'',
+      'mv -n "$stage" ./puck-runner',
+      '[ ! -d "$stage" ] || fail \'Could not publish puck-runner.\'',
+      'if [ -d "./puck-runner/${stage##*/}" ]; then',
+      '  stage="$parent/puck-runner/${stage##*/}"',
+      '  fail \'puck-runner appeared during publication.\'',
+      'fi',
+      'stage=\'\'',
+      delimiter,
+    ].join('\n')],
+    configure: [inRunner(`./config.sh --url ${server} --token ${token}`)],
+    run: [inRunner('./run.sh'), inRunner(mac ? './svc.sh install && ./svc.sh start' : 'sudo ./svc.sh install && sudo ./svc.sh start')],
   };
 }
 
@@ -338,20 +417,24 @@ export function initRunnersView(ctx: RunnersContext): RunnersView {
             ),
           );
         } else {
-          waiting = true;
-          const c = commandsFor(asset, add.reg);
-          commands.appendChild(codeBlock('Download', c.download));
-          commands.appendChild(codeBlock('Configure', c.configure));
-          const left = add.reg.expiresAt - now();
-          if (left > 0) {
-            commands.appendChild(el('div', 'rn-expiry', `The token expires in ${Math.max(1, Math.round(left / 60_000))} min and can register several runners until then.`));
-          } else {
-            const again = button('btn-ghost', 'The token expired — get a new one');
-            again.addEventListener('click', () => void fetchToken());
-            commands.appendChild(again);
+          try {
+            const c = commandsFor(asset, add.reg);
+            waiting = true;
+            commands.appendChild(codeBlock('Download', c.download));
+            commands.appendChild(codeBlock('Configure', c.configure));
+            const left = add.reg.expiresAt - now();
+            if (left > 0) {
+              commands.appendChild(el('div', 'rn-expiry', `The token expires in ${Math.max(1, Math.round(left / 60_000))} min and can register several runners until then.`));
+            } else {
+              const again = button('btn-ghost', 'The token expired — get a new one');
+              again.addEventListener('click', () => void fetchToken());
+              commands.appendChild(again);
+            }
+            commands.appendChild(codeBlock('Run', c.run));
+            commands.appendChild(el('p', 'pv-note', asset.os === 'macos' ? 'Run it in a terminal, or as a LaunchAgent (no sudo).' : 'Run it in a terminal, or as a systemd service.'));
+          } catch (err) {
+            commands.appendChild(el('div', 'pv-health-msg', errText(err)));
           }
-          commands.appendChild(codeBlock('Run', c.run));
-          commands.appendChild(el('p', 'pv-note', asset.os === 'macos' ? 'Run it in a terminal, or as a LaunchAgent (no sudo).' : 'Run it in a terminal, or as a systemd service.'));
         }
       }
       addPanel.appendChild(commands);
