@@ -19,15 +19,17 @@
  * only on the default branch, so a known other base uses `Refs` and says
  * why merging will not close the issue. Keywords never go in commit messages.
  *
- * Publishing never changes the item's status. The token is the grant the
- * runner supplied for the repository's owner; the daemon never refreshes
- * one, so an expired grant fails with a message and waits for the next.
+ * Publishing never changes the ticket's status (Work checks that its
+ * worker has finished). The token is the grant the runner supplied for the
+ * repository's owner; the daemon never refreshes one, so an expired grant
+ * fails with a message and waits for the next.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createGitHubClient, type GitHubDeps } from '../harness/github';
-import type { GithubGrant } from '../harness/daemon-protocol';
+import type { GithubGrant, GithubPullReference } from '../harness/daemon-protocol';
+import { deliveryPull, sourceIssue } from '../harness/references';
 import type { DaemonDefinition, DaemonRepo } from '../harness/env-definition';
 import { type Git, pushable } from './git';
 import { itemLabel } from './items';
@@ -56,7 +58,8 @@ export interface PublishRequest {
 }
 
 export interface Published {
-  pr: NonNullable<ItemRecord['pr']>;
+  /** The delivery pull request, without its reference id and role. */
+  pr: Omit<GithubPullReference, 'id' | 'role' | 'kind'>;
   created: boolean;
   /** The issue link line, for an item from an issue. */
   link?: string;
@@ -66,8 +69,8 @@ export interface Published {
  * The issue link of an item's pull request body. `defaultBranch` is the
  * repository's default branch, or '' when a lookup could not determine it.
  */
-export function issueLink(item: Pick<ItemRecord, 'source' | 'base'>, defaultBranch: string): string | null {
-  const src = item.source;
+export function issueLink(item: Pick<ItemRecord, 'references' | 'base'>, defaultBranch: string): string | null {
+  const src = sourceIssue(item);
   if (!src) return null;
   const ref = `${src.repo}#${src.number}`;
   const base = item.base?.branch ?? '';
@@ -95,9 +98,6 @@ export class Publisher {
 
   /** `onPushed` records the pushed sha as soon as GitHub has it (the lease of the next push). */
   async publish(item: ItemRecord, req: PublishRequest = {}, onPushed: (sha: string) => void = () => undefined): Promise<Published> {
-    if (item.status !== 'review' && item.status !== 'done') {
-      throw new PublishError(`${itemLabel(item)} is ${item.status}; publish it once it is in review.`);
-    }
     return this.run(item, req, onPushed);
   }
 
@@ -130,7 +130,7 @@ export class Publisher {
 
     fs.mkdirSync(this.deps.tmpDir, { recursive: true, mode: 0o700 });
     const bundle = path.join(this.deps.tmpDir, `W-${item.number}.bundle`);
-    const lease = item.pushedSha ?? item.pr?.lastPushedSha ?? null;
+    const lease = item.pushedSha ?? deliveryPull(item)?.lastPushedSha ?? null;
     let head: string;
     try {
       head = await git.serial(repo.dir, async () => {
@@ -159,7 +159,7 @@ export class Publisher {
       ...(this.deps.fetch ? { deps: { fetch: this.deps.fetch } } : {}),
     });
     let link: string | null = null;
-    if (item.source) {
+    if (sourceIssue(item)) {
       let defaultBranch = '';
       try {
         const reported = (await client.repo(owner, name)).default_branch;
@@ -188,7 +188,7 @@ export class Publisher {
     }
     log.info('publish.pull-request', { itemId: item.id, number: pull.number, created });
     return {
-      pr: { number: pull.number, url: pull.html_url, draft: pull.draft ?? (created ? draft : false), lastPushedSha: head },
+      pr: { repo: repo.github, number: pull.number, url: pull.html_url, draft: pull.draft ?? (created ? draft : false), lastPushedSha: head },
       created,
       ...(link ? { link: link.split('\n')[0] } : {}),
     };

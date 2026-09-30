@@ -1,100 +1,103 @@
 /**
- * The work-item state machine, shared by the daemon (which enforces it) and
- * the renderer's dev fixture (which mimics it).
+ * The ticket state machine, shared by the daemon (which enforces it), the
+ * board's menus (which offer only what it allows) and the renderer's dev
+ * fixture (which mimics it). A ticket's status is Todo, In progress or
+ * Done, and a Done ticket's `outcome` says how it ended. Its steps have
+ * their own table in `src/harness/workflow.ts`; the daemon applies a
+ * ticket's transition and every step change it causes in one journal
+ * transaction.
  *
- * TRANSITIONS is the complete set of status changes. Anything not in it is
- * refused with `invalid-state`, whoever asks (a client, an orchestrator
- * tool, or the daemon itself). Only `running` and `needs-input` hold one of
- * the assigned agent's slots.
+ * TICKET_TRANSITIONS is the complete set over (status, outcome). Anything
+ * not in it is refused with `invalid-state`, whoever asks (a client, an
+ * orchestrator tool, or the daemon itself), naming the status and outcome.
  *
- * Rows that go beyond the plain lifecycle, and are deliberate:
- *   - `restart` also takes `needs-input` back to `queued`: the question
- *     died with the turn that asked it, and the resumed session asks again.
- *   - `assign` from `queued` to `queued` re-assigns a waiting item.
- *   - `accept` takes every status except `done` to `done`. A merged pull
- *     request is the work shipped, including after a follow-up, a failure
- *     or a cancellation. `running` and `needs-input` release their slot.
+ * Rows that are deliberate:
+ *   - `start` is the scheduler's, when the ticket's first step starts.
+ *   - `merged` takes In progress, and every Done outcome but `merged`, to
+ *     Done (merged): a merged pull request is the work shipped, including
+ *     after an accept, a failure or a cancellation.
+ *   - `retry` takes a failed or cancelled ticket to In progress, or back to
+ *     Todo when no implement step of it ever started.
+ *   - Assigning, unassigning, planning and reordering change a Todo
+ *     ticket's steps or order, never its status.
  */
 
-import type { ItemStatus } from './daemon-protocol';
+import type { ItemOutcome, ItemStatus } from './daemon-protocol';
 
-export type ItemTrigger =
-  | 'assign'
-  | 'unassign'
-  | 'dispatch'
-  | 'ask'
-  | 'answer'
-  | 'finish'
-  | 'interrupt'
-  | 'error'
-  | 'error-final'
-  | 'restart'
-  | 'cancel'
-  | 'follow-up'
-  | 'accept'
-  | 'retry'
-  | 'delete';
+export type TicketTrigger = 'start' | 'accept' | 'cancel' | 'delete' | 'merged' | 'fail' | 'retry';
 
-export type SlotEffect = 'acquires' | 'keeps' | 'releases' | null;
-
-export interface Transition {
-  from: readonly ItemStatus[];
-  trigger: ItemTrigger;
-  to: ItemStatus | 'removed';
-  slot: SlotEffect;
+/** A ticket's place: its status, and its outcome once done. */
+export interface TicketState {
+  status: ItemStatus;
+  outcome: ItemOutcome | null;
 }
 
-export const TRANSITIONS: readonly Transition[] = [
-  { from: ['backlog'], trigger: 'assign', to: 'queued', slot: null },
-  { from: ['queued'], trigger: 'assign', to: 'queued', slot: null },
-  { from: ['queued'], trigger: 'unassign', to: 'backlog', slot: null },
-  { from: ['queued'], trigger: 'dispatch', to: 'running', slot: 'acquires' },
-  { from: ['running'], trigger: 'ask', to: 'needs-input', slot: 'keeps' },
-  { from: ['needs-input'], trigger: 'answer', to: 'running', slot: 'keeps' },
-  { from: ['running'], trigger: 'finish', to: 'review', slot: 'releases' },
-  { from: ['running'], trigger: 'interrupt', to: 'review', slot: 'releases' },
-  { from: ['running'], trigger: 'error', to: 'queued', slot: 'releases' },
-  { from: ['running'], trigger: 'error-final', to: 'failed', slot: 'releases' },
-  { from: ['running', 'needs-input'], trigger: 'restart', to: 'queued', slot: 'releases' },
-  { from: ['running', 'needs-input', 'queued', 'backlog', 'review'], trigger: 'cancel', to: 'cancelled', slot: 'releases' },
-  { from: ['review'], trigger: 'follow-up', to: 'queued', slot: null },
-  { from: ['backlog', 'queued', 'review', 'failed', 'cancelled'], trigger: 'accept', to: 'done', slot: null },
-  { from: ['running', 'needs-input'], trigger: 'accept', to: 'done', slot: 'releases' },
-  { from: ['failed', 'cancelled'], trigger: 'retry', to: 'queued', slot: null },
-  { from: ['backlog', 'done', 'failed', 'cancelled'], trigger: 'delete', to: 'removed', slot: null },
+export interface TicketTransition {
+  from: ItemStatus;
+  /** For `done`: the outcomes the row applies to. */
+  outcomes?: readonly ItemOutcome[];
+  trigger: TicketTrigger;
+  /** `retry` resolves to `todo` or `in-progress` by whether an implement step ever started. */
+  to: TicketState | 'removed' | 'retry';
+}
+
+const DONE = (outcome: ItemOutcome): TicketState => ({ status: 'done', outcome });
+
+export const TICKET_TRANSITIONS: readonly TicketTransition[] = [
+  { from: 'todo', trigger: 'start', to: { status: 'in-progress', outcome: null } },
+  { from: 'todo', trigger: 'accept', to: DONE('accepted') },
+  { from: 'todo', trigger: 'cancel', to: DONE('cancelled') },
+  { from: 'todo', trigger: 'delete', to: 'removed' },
+  { from: 'in-progress', trigger: 'merged', to: DONE('merged') },
+  { from: 'in-progress', trigger: 'accept', to: DONE('accepted') },
+  { from: 'in-progress', trigger: 'fail', to: DONE('failed') },
+  { from: 'in-progress', trigger: 'cancel', to: DONE('cancelled') },
+  { from: 'done', outcomes: ['failed', 'cancelled'], trigger: 'retry', to: 'retry' },
+  { from: 'done', outcomes: ['accepted', 'failed', 'cancelled'], trigger: 'merged', to: DONE('merged') },
+  { from: 'done', outcomes: ['merged', 'accepted', 'failed', 'cancelled'], trigger: 'delete', to: 'removed' },
 ];
-
-export const SLOT_STATUSES: readonly ItemStatus[] = ['running', 'needs-input'];
-
-export function holdsSlot(status: ItemStatus): boolean {
-  return SLOT_STATUSES.includes(status);
-}
 
 export class ItemStateError extends Error {
   readonly code = 'invalid-state';
 }
 
-const VERB: Record<ItemTrigger, string> = {
-  assign: 'assign',
-  unassign: 'unassign',
-  dispatch: 'start',
-  ask: 'pause for a question',
-  answer: 'resume',
-  finish: 'finish',
-  interrupt: 'interrupt',
-  error: 'requeue',
-  'error-final': 'fail',
-  restart: 'requeue',
-  cancel: 'cancel',
-  'follow-up': 'send a follow-up to',
+const VERB: Record<TicketTrigger, string> = {
+  start: 'start',
   accept: 'accept',
-  retry: 'retry',
+  cancel: 'cancel',
   delete: 'delete',
+  merged: 'mark as merged',
+  fail: 'fail',
+  retry: 'retry',
 };
 
-/** The status a trigger leads to from `status`, or an ItemStateError naming why not. */
-export function nextStatus(status: ItemStatus, trigger: ItemTrigger): ItemStatus | 'removed' {
-  const row = TRANSITIONS.find((t) => t.trigger === trigger && t.from.includes(status));
-  if (!row) throw new ItemStateError(`Cannot ${VERB[trigger]} an item that is ${status}.`);
+/** "in Todo", "in progress", "done (merged)". */
+export function ticketPhrase(state: TicketState): string {
+  if (state.status === 'todo') return 'in Todo';
+  if (state.status === 'in-progress') return 'in progress';
+  return state.outcome ? `done (${state.outcome})` : 'done';
+}
+
+export function findTicketTransition(state: TicketState, trigger: TicketTrigger): TicketTransition | null {
+  return (
+    TICKET_TRANSITIONS.find(
+      (t) => t.trigger === trigger && t.from === state.status && (!t.outcomes || (state.outcome !== null && t.outcomes.includes(state.outcome))),
+    ) ?? null
+  );
+}
+
+/**
+ * Where a trigger takes a ticket, or an ItemStateError naming why not.
+ * `started` (retry only): some implement step of the ticket has started.
+ */
+export function nextTicket(state: TicketState, trigger: TicketTrigger, started = false): TicketState | 'removed' {
+  const row = findTicketTransition(state, trigger);
+  if (!row) throw new ItemStateError(`Cannot ${VERB[trigger]} a ticket that is ${ticketPhrase(state)}.`);
+  if (row.to === 'retry') return { status: started ? 'in-progress' : 'todo', outcome: null };
   return row.to;
+}
+
+/** True when the trigger is allowed from this state. */
+export function allows(state: TicketState, trigger: TicketTrigger): boolean {
+  return findTicketTransition(state, trigger) !== null;
 }

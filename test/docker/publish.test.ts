@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
-import { copyIn, exec, FAKE_GITHUB, must, startEnv, untilSnapshot, waitReady, type Env } from './helpers';
+import { deliveryPull } from '../../src/harness/references';
+import { copyIn, exec, FAKE_GITHUB, finished, must, startEnv, untilSnapshot, waitReady, type Env } from './helpers';
 
 // Scenario 4: publish. A grant arrives the way the runner supplies it
 // (`github.put` over attach). Publishing lands the item's branch in the
@@ -49,7 +50,7 @@ describe('Docker scenario 4: publish', () => {
     await client.untilEvent('github.auth', (ev) => ev.state === 'ok');
 
     const created = await client.cmd<WorkItem>('item.create', { title: 'Add docs', body: commit('docs'), agent: 'implementer' });
-    const reviewed = (await untilSnapshot(client, (s) => s.items[0]?.status === 'review', 90_000)).items[0];
+    const reviewed = (await untilSnapshot(client, (s) => finished(s.items[0]), 90_000)).items[0];
     const branch = reviewed.branch as string;
     expect(branch).toBe('puck/W-1-add-docs');
     const head1 = reviewed.result?.commits[0].sha as string;
@@ -58,8 +59,8 @@ describe('Docker scenario 4: publish', () => {
     expect(first.prUrl).toBe('https://github.com/octo/app/pull/1');
     expect(await remoteSha(branch)).toBe(head1);
     const afterFirst = (await client.cmd<Snapshot>('snapshot.get')).items[0];
-    expect(afterFirst.status).toBe('review'); // publishing never changes status
-    expect(afterFirst.pr).toMatchObject({ number: 1, url: first.prUrl, draft: true, lastPushedSha: head1 });
+    expect(finished(afterFirst)).toBe(true); // publishing never changes status
+    expect(deliveryPull(afterFirst)).toMatchObject({ role: 'delivery', number: 1, url: first.prUrl, draft: true, lastPushedSha: head1 });
 
     let log = await githubLog();
     expect(log.map((r) => r.method)).toEqual(['GET', 'POST']);
@@ -70,7 +71,7 @@ describe('Docker scenario 4: publish', () => {
     // A follow-up adds a commit; the second publish moves the branch and updates the same pull request.
     await client.cmd('chat.send', { sessionId: reviewed.sessionId, text: commit('more') });
     const again = (
-      await untilSnapshot(client, (s) => s.items[0]?.status === 'review' && (s.items[0].result?.commits.length ?? 0) === 2, 90_000)
+      await untilSnapshot(client, (s) => finished(s.items[0]) && (s.items[0].result?.commits.length ?? 0) === 2, 90_000)
     ).items[0];
     const head2 = again.result?.commits[0].sha as string;
     const second = await client.cmd<{ prUrl: string }>('item.publish', { itemId: created.id });
@@ -89,7 +90,7 @@ describe('Docker scenario 4: publish', () => {
     ]);
     const rogue = await remoteSha(branch);
     await client.cmd('chat.send', { sessionId: reviewed.sessionId, text: commit('third') });
-    await untilSnapshot(client, (s) => s.items[0]?.status === 'review' && (s.items[0].result?.commits.length ?? 0) === 3, 90_000);
+    await untilSnapshot(client, (s) => finished(s.items[0]) && (s.items[0].result?.commits.length ?? 0) === 3, 90_000);
     await expect(client.cmd('item.publish', { itemId: created.id })).rejects.toThrow(
       /invalid-state: GitHub refused the push of puck\/W-1-add-docs \(stale info\)/,
     );

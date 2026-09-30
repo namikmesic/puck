@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { GithubGrant, IssueSource } from '../../src/harness/daemon-protocol';
+import type { GithubGrant, GithubIssueReference, GithubPullReference, MergeObserved } from '../../src/harness/daemon-protocol';
+import { deliveryPull, sourceIssue } from '../../src/harness/references';
 import type { EntryAuthor, NoticeKind } from '../../src/harness/transcript';
 import { readDefinition } from '../../src/harness/env-definition';
 import { GitHubApi } from '../../src/daemon/github-api';
@@ -14,15 +16,18 @@ import {
   POLL,
   statusMarker,
   statusText,
-  type SyncWork,
 } from '../../src/daemon/github-sync';
-import { Backlog, holdsSlot } from '../../src/daemon/items';
+import type { Backlog } from '../../src/daemon/items';
 import { nullLogger } from '../../src/daemon/log';
 import { issueLink } from '../../src/daemon/publish';
 import { githubStore } from '../../src/daemon/store/github';
-import { itemsStore, type ItemRecord } from '../../src/daemon/store/items';
-import { WorkError } from '../../src/daemon/work';
-import { exampleDefinition, tempRoot } from './daemon-fakes';
+import type { ItemRecord } from '../../src/daemon/store/items';
+import { Work, WorkError, type WorkDeps } from '../../src/daemon/work';
+import { deliveryStack, exampleDefinition, LEGACY, placeOf, seedChanges, seedTicket, tempRoot, writeLegacyState, type Stack } from './daemon-fakes';
+import { activeImplementOf, addManualMerge, askFields, bootstrapLegacy, stepMove, ticketStatus } from '../../src/daemon/workflow';
+import { migrateState } from '../../src/daemon/store/meta';
+import { PIPELINE } from '../../src/daemon/delivery/derive';
+import { openJournal } from '../../src/daemon/delivery/journal';
 
 // The GitHub workflow against a fake GitHub that answers with ETags and
 // 304s, a real backlog, and a small stand-in for the Work operations.
@@ -295,6 +300,8 @@ let clock: number;
 let fake: ReturnType<typeof fakeGitHub>;
 let fetchImpl: typeof fetch;
 let backlog: Backlog;
+let stack: Stack;
+let work: Work;
 let notices: Array<{ kind: NoticeKind; text: string; itemId?: string }>;
 let followUps: Array<{ itemId: string; text: string; author: EntryAuthor }>;
 let grant: GithubGrant | null;
@@ -307,29 +314,83 @@ const def = () => {
   return r.value;
 };
 
-/** The Work operations over the real backlog (the state machine still decides). */
-const work: SyncWork = {
-  create: (init, actor) =>
-    backlog.create({
-      title: init.title,
-      body: init.body ?? '',
-      agent: init.agent ?? null,
-      repo: init.repo ?? null,
-      createdBy: actor,
-      position: init.position,
-      source: init.source ?? null,
-    }),
-  update: (ref, change) => backlog.patch(backlog.find(ref) as ItemRecord, change),
-  cancel: (ref, _actor, reason) => backlog.transition(backlog.find(ref) as ItemRecord, 'cancel', { cancelReason: reason ?? null }),
-  accept: (ref, note) =>
-    backlog.transition(backlog.find(ref) as ItemRecord, 'accept', { acceptNote: note ?? null, requeue: null, pendingAsk: null }),
-  followUp: async (ref, text, author) => {
-    const item = backlog.find(ref) as ItemRecord;
-    followUps.push({ itemId: item.id, text, author });
-    if (item.status === 'review') backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
-    return { queued: true };
-  },
-};
+/** The real Work over the journaled backlog, with a stand-in turn loop that records follow-ups. */
+function makeWork(): Work {
+  const turns = {
+    get: () => null,
+    send: (sessionId: string, text: string, author: EntryAuthor) => {
+      const item = backlog.list().find((i) => i.sessionId === sessionId);
+      followUps.push({ itemId: item?.id ?? '', text, author });
+      return { queued: true };
+    },
+    clearQueue: () => undefined,
+    interrupt: () => false,
+    queueLength: () => 0,
+  } as unknown as WorkDeps['turns'];
+  return new Work({
+    backlog,
+    workflow: stack.workflow,
+    turns,
+    git: {} as WorkDeps['git'],
+    publisher: {} as WorkDeps['publisher'],
+    definition: def,
+    notify: () => undefined,
+    slotsChanged: () => undefined,
+    requestTick: () => undefined,
+    reprovisioning: () => false,
+    log: nullLogger,
+    now: () => clock,
+  });
+}
+
+/** Where a ticket is, in protocol 1's eight words (the projection's mapping). */
+const st = (item: ItemRecord | null | undefined): string | null => placeOf(stack, item);
+const prOf = (item: ItemRecord | null | undefined): GithubPullReference | null => (item ? deliveryPull(item) : null);
+const srcOf = (item: ItemRecord | null | undefined): GithubIssueReference | null => (item ? sourceIssue(item) : null);
+
+/** Change the ticket's delivery pull request, the way a publish or a poll records it. */
+function setPr(item: ItemRecord, pr: Omit<GithubPullReference, 'id' | 'role' | 'kind' | 'repo'> & { repo?: string }): ItemRecord {
+  const current = backlog.get(item.id) as ItemRecord;
+  const previous = deliveryPull(current);
+  const tx = stack.workflow.begin('test.pr');
+  tx.push({ kind: 'ticket.reference', itemId: item.id, op: previous ? 'update' : 'add', reference: { repo: 'octo/app', ...pr, id: previous?.id ?? 'ref_01J00000000000000000000PR7', role: 'delivery', kind: 'github-pr' } });
+  stack.workflow.commit(tx);
+  return backlog.get(item.id) as ItemRecord;
+}
+
+/** A follow-up opened a round: its worker runs and finishes, and the merge step waits again (protocol 1's review). */
+function backToReview(item: ItemRecord): void {
+  const tx = stack.workflow.begin('test.round');
+  const step = activeImplementOf(tx.steps(item.id));
+  if (step) {
+    const running = stepMove(tx, item.id, step, 'start', 'running');
+    stepMove(tx, item.id, running, 'finish', 'done', { result: 'passed' });
+    addManualMerge(tx, item.id, step.round);
+  }
+  stack.workflow.commit(tx);
+}
+
+/** Move a ticket's implement step the way the daemon does (for the status comment). */
+function stepTo(item: ItemRecord, to: 'running' | 'ask' | 'answer' | 'finish'): void {
+  const tx = stack.workflow.begin('test.step');
+  const current = tx.item(item.id) as ItemRecord;
+  const step = activeImplementOf(tx.steps(item.id));
+  if (!step) throw new Error('no implement step');
+  if (to === 'running') {
+    ticketStatus(tx, current, 'start', { change: { sessionId: 'ses_01J0000000000000000000000A', attempts: 1 }, by: PIPELINE });
+    stepMove(tx, item.id, step, 'start', 'running');
+  } else if (to === 'ask') {
+    stepMove(tx, item.id, step, 'ask', 'needs-input');
+    tx.push({ kind: 'ticket.patch', itemId: item.id, change: askFields([{ askId: 'ask_01J0000000000000000000000A', kind: 'question', roundId: '', stepId: step.id, routedTo: 'user', since: clock }]) });
+  } else if (to === 'answer') {
+    stepMove(tx, item.id, step, 'answer', 'running');
+    tx.push({ kind: 'ticket.patch', itemId: item.id, change: askFields([]) });
+  } else {
+    stepMove(tx, item.id, step, 'finish', 'done', { result: 'passed' });
+    tx.push({ kind: 'step.changed', itemId: item.id, step: { ...step, id: 'stp_01J000000000000000000MERGE', kind: 'merge', state: 'waiting', result: null, group: 7, logicalId: 'stp_01J000000000000000000MERGE', purpose: null }, from: null, trigger: 'legacy' });
+  }
+  stack.workflow.commit(tx);
+}
 
 function build(): GithubSync {
   return new GithubSync({
@@ -357,7 +418,9 @@ beforeEach(() => {
   clock = T0;
   fake = fakeGitHub();
   fetchImpl = fake.fetch;
-  backlog = new Backlog({ store: itemsStore(root.paths.state), emit: () => undefined, now: () => clock });
+  stack = deliveryStack(root.paths.state, { now: () => clock });
+  backlog = stack.backlog;
+  work = makeWork();
   notices = [];
   followUps = [];
   grant = { owner: 'octo', installationId: 1, repos: ['octo/app'], token: 'ghs_env', expiresAt: T0 + 30 * 86_400_000 };
@@ -366,7 +429,7 @@ beforeEach(() => {
 });
 afterEach(() => root.cleanup());
 
-const source = (number: number): IssueSource => ({
+const source = (number: number): Omit<GithubIssueReference, 'id' | 'role'> => ({
   kind: 'github-issue',
   repo: 'octo/app',
   number,
@@ -374,51 +437,58 @@ const source = (number: number): IssueSource => ({
   updatedAt: T0,
 });
 
-/** An item from issue #n, moved to `status` the way the daemon would. */
-function linkedItem(number: number, status: ItemRecord['status'], over: Partial<ItemRecord> = {}): ItemRecord {
+/** A ticket from issue #n, in protocol 1's place `status`, seeded the way the daemon leaves it. */
+function linkedItem(number: number, status: ItemRecord['legacyStatus'] & string, over: Partial<ItemRecord> = {}): ItemRecord {
   fake.gh.issues.set(number, fake.gh.issues.get(number) ?? issue(number, ['puck']));
-  const item = backlog.create({ title: `Issue ${number}`, body: `Body of ${number}`, agent: 'implementer', repo: 'app', createdBy: 'user', source: source(number) });
-  const steps: Record<string, Array<Parameters<Backlog['transition']>[1]>> = {
-    queued: [],
-    running: ['dispatch'],
-    'needs-input': ['dispatch', 'ask'],
-    review: ['dispatch', 'finish'],
-    done: ['dispatch', 'finish', 'accept'],
-    failed: ['dispatch', 'error-final'],
-    cancelled: ['cancel'],
-  };
-  for (const t of steps[status] ?? []) {
-    backlog.transition(item, t, t === 'dispatch' ? { sessionId: 'ses_01J0000000000000000000000A', attempts: 1 } : {});
-  }
-  return backlog.patch(item, over);
+  return seedTicket(
+    stack,
+    { title: `Issue ${number}`, body: `Body of ${number}`, agent: status === 'backlog' ? null : 'implementer', repo: 'app', references: [{ ...source(number), id: `ref_01J000000000000000000SRC${String(number).padStart(2, '0')}`.slice(0, 30), role: 'source' }] },
+    status === 'done' || status === 'failed' || status === 'cancelled' || status === 'backlog' || status === 'queued' || status === 'running' || status === 'needs-input' || status === 'review' ? status : 'queued',
+    over,
+  );
 }
 
-/** A published item: in review with pull request #7 at SHA. */
-function publishedItem(status: ItemRecord['status'] = 'review', sourceNumber: number | null = null): ItemRecord {
-  const item = sourceNumber
-    ? linkedItem(sourceNumber, 'review')
-    : (() => {
-        const i = backlog.create({ title: 'Fix it', body: '', agent: 'implementer', repo: 'app', createdBy: 'user' });
-        backlog.transition(i, 'dispatch', { sessionId: 'ses_01J0000000000000000000000B', attempts: 1 });
-        backlog.transition(i, 'finish');
-        return i;
-      })();
-  backlog.patch(item, { pr: { number: 7, url: 'https://github.com/octo/app/pull/7', draft: true, lastPushedSha: SHA } });
-  if (status === 'queued' || status === 'running' || status === 'needs-input') backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
-  if (status === 'running' || status === 'needs-input') backlog.transition(item, 'dispatch', { attempts: 1 });
-  if (status === 'needs-input') backlog.transition(item, 'ask');
-  if (status === 'failed') {
-    backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
-    backlog.transition(item, 'dispatch', { attempts: 1 });
-    backlog.transition(item, 'error-final');
+/** A published ticket: its worker finished (protocol 1's review) with pull request #7 at SHA, then moved to `status`. */
+function publishedItem(status: 'review' | 'queued' | 'running' | 'needs-input' | 'failed' | 'cancelled' = 'review', sourceNumber: number | null = null): ItemRecord {
+  let item = sourceNumber ? linkedItem(sourceNumber, 'review') : seedTicket(stack, { title: 'Fix it', repo: 'app' }, 'review', { sessionId: 'ses_01J0000000000000000000000B' });
+  item = setPr(item, { number: 7, url: 'https://github.com/octo/app/pull/7', draft: true, lastPushedSha: SHA });
+  if (status !== 'review' && status !== 'cancelled') item = seedChanges(stack, item);
+  if (status === 'running' || status === 'needs-input' || status === 'failed') {
+    const tx = stack.workflow.begin('test.run');
+    const step = activeImplementOf(tx.steps(item.id));
+    if (step) {
+      const running = stepMove(tx, item.id, step, 'start', 'running');
+      if (status === 'needs-input') stepMove(tx, item.id, running, 'ask', 'needs-input');
+      if (status === 'failed') {
+        stepMove(tx, item.id, running, 'error-final', 'done', { result: 'failed' });
+        ticketStatus(tx, tx.item(item.id) as ItemRecord, 'fail', { by: PIPELINE });
+      }
+    }
+    stack.workflow.commit(tx);
   }
-  if (status === 'cancelled') backlog.transition(item, 'cancel');
-  if (status === 'backlog') {
-    backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
-    backlog.transition(item, 'unassign', { agent: null });
-  }
+  if (status === 'cancelled') work.cancel(item.id, 'user');
   fake.gh.pulls.set(7, { number: 7, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/7', head: { sha: SHA, ref: 'puck/W-1-fix-it' } });
-  return item;
+  return backlog.get(item.id) as ItemRecord;
+}
+
+/** A merge of pull request #7 as the daemon observes it. */
+function observed(itemId: string, over: Partial<MergeObserved> = {}): MergeObserved {
+  return {
+    itemId,
+    repo: 'octo/app',
+    prNumber: 7,
+    prHeadSha: SHA,
+    prCommits: 1,
+    mergeCommitSha: 'f'.repeat(40),
+    mergeParents: [],
+    mergedAt: clock,
+    mergedBy: 'octocat',
+    method: null,
+    initiatedBy: 'external',
+    reviewedHeadSha: null,
+    reviewed: false,
+    ...over,
+  };
 }
 
 /** Everything due runs again (as if its interval passed). */
@@ -498,10 +568,10 @@ describe('issue intake', () => {
     for (const i of c.issues) fake.gh.issues.set(i.number as number, i);
     await sync.poll();
     const items = backlog.list();
-    expect(items.map((i) => ({ number: i.source?.number, status: i.status, agent: i.agent }))).toEqual(c.items);
+    expect(items.map((i) => ({ number: srcOf(i)?.number, status: st(i), agent: i.agent }))).toEqual(c.items);
     for (const item of items) {
-      expect(item).toMatchObject({ title: `Issue ${item.source?.number}`, body: `Body of ${item.source?.number}`, repo: 'app', createdBy: 'user' });
-      expect(item.source).toEqual(source(item.source?.number ?? 0));
+      expect(item).toMatchObject({ title: `Issue ${srcOf(item)?.number}`, body: `Body of ${srcOf(item)?.number}`, repo: 'app', createdBy: 'user' });
+      expect(srcOf(item)).toMatchObject(source(srcOf(item)?.number ?? 0));
     }
     if (c.notice) expect(noticesOf('item.created').map((n) => n.text).join('\n')).toMatch(c.notice);
     else expect(noticesOf('item.created')).toHaveLength(c.items.length);
@@ -556,7 +626,7 @@ describe('issue intake', () => {
     expect(backlog.list()).toHaveLength(101);
     fake.gh.issues.set(102, issue(102, ['puck']));
     await pollAll();
-    expect(backlog.list().map((i) => i.source?.number)).toContain(102);
+    expect(backlog.list().map((i) => srcOf(i)?.number)).toContain(102);
     expect(backlog.list()).toHaveLength(102);
   }, PAGE_OF_ITEMS_MS);
 
@@ -566,7 +636,7 @@ describe('issue intake', () => {
     expect(backlog.list()).toHaveLength(100);
     fake.gh.issues.set(101, issue(101, ['puck']));
     await pollAll();
-    expect(backlog.list().map((i) => i.source?.number)).toContain(101);
+    expect(backlog.list().map((i) => srcOf(i)?.number)).toContain(101);
     expect(backlog.list()).toHaveLength(101);
   }, PAGE_OF_ITEMS_MS);
 
@@ -580,14 +650,16 @@ describe('manual import', () => {
   it('imports an open issue for the orchestrator, assigned when asked', async () => {
     fake.gh.issues.set(5, issue(5, ['bug']));
     const item = await sync.importIssue('octo/app', 5, { agent: 'implementer' }, 'orchestrator');
-    expect(item).toMatchObject({ status: 'queued', agent: 'implementer', createdBy: 'orchestrator', source: source(5) });
+    expect(item).toMatchObject({ status: 'todo', agent: 'implementer', createdBy: 'orchestrator' });
+    expect(st(item)).toBe('queued');
+    expect(srcOf(item)).toMatchObject({ ...source(5), role: 'source' });
     expect(notices).toEqual([]); // the orchestrator knows what it imported
   });
 
   it("tells the orchestrator about the user's import", async () => {
     fake.gh.issues.set(6, issue(6, ['bug']));
     const item = await sync.importIssue('octo/app', 6, {}, 'user');
-    expect(item).toMatchObject({ status: 'backlog', createdBy: 'user' });
+    expect(item).toMatchObject({ status: 'todo', agent: null, createdBy: 'user' });
     expect(notices.map((n) => n.text)).toEqual(['The user imported issue octo/app#6 as W-1 "Issue 6", in the backlog.']);
   });
 
@@ -602,14 +674,14 @@ describe('manual import', () => {
 
   it('refuses an issue with an open item and a repository outside the environment', async () => {
     const open = linkedItem(5, 'review');
-    await expect(sync.importIssue('octo/app', 5, {}, 'user')).rejects.toThrow(`Issue octo/app#5 is already W-${open.number} (review).`);
+    await expect(sync.importIssue('octo/app', 5, {}, 'user')).rejects.toThrow(`Issue octo/app#5 is already W-${open.number} (in progress).`);
     await expect(sync.importIssue('octo/other', 1, {}, 'user')).rejects.toBeInstanceOf(WorkError);
   });
 
   it('imports again once every earlier item is done or cancelled', async () => {
     linkedItem(5, 'done');
     const again = await sync.importIssue('app', 5, {}, 'user');
-    expect(again.source?.number).toBe(5);
+    expect(srcOf(again)?.number).toBe(5);
   });
 
   it('links a search hit only to an open item, the same one import would reject', async () => {
@@ -622,12 +694,12 @@ describe('manual import', () => {
     fake.gh.searchTotal = 6;
     const found = await sync.searchIssues('bug');
     const hit = (n: number) => found.issues.find((h) => h.number === n);
-    expect(hit(3)?.item).toBe(`W-${open.number} (review)`);
-    expect(hit(4)?.item).toBe(`W-${older.number} (review)`);
+    expect(hit(3)?.item).toBe(`W-${open.number} (in progress)`);
+    expect(hit(4)?.item).toBe(`W-${older.number} (in progress)`);
     expect(hit(5)?.item).toBeNull();
     expect(hit(6)?.item).toBeNull();
-    await expect(sync.importIssue('octo/app', 4, {}, 'user')).rejects.toThrow(`Issue octo/app#4 is already W-${older.number} (review).`);
-    await expect(sync.importIssue('octo/app', 5, {}, 'user')).resolves.toMatchObject({ source: { number: 5 } });
+    await expect(sync.importIssue('octo/app', 4, {}, 'user')).rejects.toThrow(`Issue octo/app#4 is already W-${older.number} (in progress).`);
+    await expect(sync.importIssue('octo/app', 5, {}, 'user')).resolves.toMatchObject({ references: [{ role: 'source', number: 5 }] });
   });
 
   it('returns the first 1000 search hits when more match', async () => {
@@ -648,15 +720,14 @@ describe('changes on a linked issue', () => {
   it.each([
     { status: 'backlog', after: 'cancelled', notice: /was cancelled/ },
     { status: 'queued', after: 'cancelled', notice: /was cancelled/ },
-    { status: 'running', after: 'running', notice: /is running\. Decide/ },
-    { status: 'review', after: 'review', notice: /is review\. Decide/ },
+    { status: 'running', after: 'running', notice: /is in progress\. Decide/ },
+    { status: 'review', after: 'review', notice: /is in progress\. Decide/ },
   ] as const)('closing the issue while the item is $status', async (c) => {
     policies = { intake: 'off', statusComment: false };
-    const item = linkedItem(1, c.status === 'backlog' ? 'queued' : c.status);
-    if (c.status === 'backlog') backlog.transition(item, 'unassign', { agent: null });
+    const item = linkedItem(1, c.status);
     fake.gh.issues.set(1, issue(1, ['puck'], { state: 'closed' }));
     await sync.poll();
-    expect(backlog.get(item.id)?.status).toBe(c.after);
+    expect(st(backlog.get(item.id))).toBe(c.after);
     expect(noticesOf('issue.closed')).toHaveLength(1);
     expect(noticesOf('issue.closed')[0].text).toMatch(c.notice);
     await pollAll();
@@ -678,8 +749,8 @@ describe('changes on a linked issue', () => {
     const now = backlog.get(item.id) as ItemRecord;
     expect(now.title === 'New title' && now.body === 'New body').toBe(c.updated);
     expect(noticesOf('issue.updated')).toHaveLength(1);
-    expect(now.source?.updatedAt).toBe(T0 + 5_000);
-    expect(holdsSlot(now.status)).toBe(!c.updated);
+    expect(srcOf(now)?.updatedAt).toBe(T0 + 5_000);
+    expect(work.isRunning(now)).toBe(!c.updated);
   });
 
   it.each([
@@ -780,22 +851,21 @@ describe('the status comment', () => {
     const item = linkedItem(1, 'queued');
     const steps: Array<{ act: () => void; text: string | null; method?: string }> = [
       { act: () => undefined, text: null },
-      { act: () => backlog.transition(item, 'dispatch', { sessionId: 'ses_01J0000000000000000000000A', attempts: 1 }), text: 'running', method: 'POST' },
-      { act: () => backlog.transition(item, 'ask'), text: 'waiting for an answer', method: 'PATCH' },
-      { act: () => backlog.transition(item, 'answer'), text: 'running', method: 'PATCH' },
+      { act: () => stepTo(item, 'running'), text: 'in progress', method: 'POST' },
+      { act: () => stepTo(item, 'ask'), text: 'waiting for an answer', method: 'PATCH' },
+      { act: () => stepTo(item, 'answer'), text: 'in progress', method: 'PATCH' },
       {
         act: () => {
-          backlog.transition(item, 'finish');
-          backlog.patch(item, { pr: { number: 7, url: 'u', draft: true, lastPushedSha: SHA } });
+          stepTo(item, 'finish');
+          setPr(item, { number: 7, url: 'u', draft: true, lastPushedSha: SHA });
         },
-        text: 'review — PR #7',
+        text: 'in progress, finished — PR #7',
         method: 'PATCH',
       },
-      { act: () => undefined, text: 'review — PR #7' },
+      { act: () => undefined, text: 'in progress, finished — PR #7' },
       {
         act: () => {
-          backlog.patch(item, { pr: { number: 7, url: 'u', draft: true, lastPushedSha: SHA, state: 'merged' } });
-          backlog.transition(item, 'accept');
+          work.merged(item.id, observed(item.id), 'Pull request #7 was merged on GitHub.');
         },
         text: 'done — PR #7 merged',
         method: 'PATCH',
@@ -827,7 +897,7 @@ describe('the status comment', () => {
     policies = { intake: 'off' };
     const item = linkedItem(1, 'running');
     await sync.poll();
-    backlog.transition(item, 'cancel', { cancelReason: 'Superseded by <!-- W-3 --> @everyone `x`' });
+    work.cancel(item.id, 'user', 'Superseded by <!-- W-3 --> @everyone `x`');
     await sync.poll();
     expect(fake.gh.comments.get(1)?.[0].body).toContain("— cancelled: `Superseded by W-3 @everyone 'x'`\n");
   });
@@ -846,10 +916,10 @@ describe('the status comment', () => {
     const item = linkedItem(1, 'running');
     await sync.poll();
     fake.gh.comments.set(1, []);
-    backlog.transition(item, 'finish');
+    stepTo(item, 'finish');
     await sync.poll();
     expect(writes().map((w) => w.method)).toEqual(['POST', 'PATCH', 'POST']);
-    expect(fake.gh.comments.get(1)?.[0].body).toContain('— review');
+    expect(fake.gh.comments.get(1)?.[0].body).toContain('— in progress, finished');
   });
 
   it.each([
@@ -858,10 +928,7 @@ describe('the status comment', () => {
   ])('nothing is written for $name', async (c) => {
     policies = c.policies;
     if (c.linked) linkedItem(1, 'running');
-    else {
-      const i = backlog.create({ title: 'Plain', body: '', agent: 'implementer', repo: 'app', createdBy: 'user' });
-      backlog.transition(i, 'dispatch', { sessionId: 'ses_01J0000000000000000000000A', attempts: 1 });
-    }
+    else seedTicket(stack, { title: 'Plain', repo: 'app' }, 'running');
     await sync.poll();
     expect(writes()).toEqual([]);
   });
@@ -882,7 +949,6 @@ describe('pull request state', () => {
     { status: 'needs-input', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: true },
     { status: 'failed', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
     { status: 'cancelled', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
-    { status: 'backlog', pull: { state: 'closed', merged: true, merged_at: iso(T0) }, after: 'done', notice: 'pr.merged', during: false },
     { status: 'review', pull: { state: 'closed', merged: false, merged_at: null }, after: 'review', notice: 'pr.closed', during: false },
     { status: 'review', pull: { state: 'open', merged: false, merged_at: null }, after: 'review', notice: null, during: false },
   ] as const)('$pull.state (merged: $pull.merged) with the item in $status', async (c) => {
@@ -891,15 +957,25 @@ describe('pull request state', () => {
     Object.assign(fake.gh.pulls.get(7) as Json, c.pull);
     await sync.poll();
     const now = backlog.get(item.id) as ItemRecord;
-    expect(now.status).toBe(c.after);
+    expect(st(now)).toBe(c.after);
     expect(notices.filter((n) => n.kind === 'pr.merged' || n.kind === 'pr.closed').map((n) => n.kind)).toEqual(c.notice ? [c.notice] : []);
+    const merges = Object.values(stack.tables.get().merges);
     if (c.after === 'done') {
-      const note = `Pull request #7 was merged on GitHub${c.during ? ' during a follow-up' : ''}; it was ${c.status}.`;
-      expect(now.acceptNote).toBe(note);
-      expect(now.requeue).toBeNull();
+      const was = c.status === 'failed' || c.status === 'cancelled' ? `done (${c.status})` : 'in progress';
+      const note = `Pull request #7 was merged on GitHub${c.during ? ' during a follow-up' : ''}; it was ${was}.`;
+      // A ticket already done keeps its note; one that was in progress records how it ended.
+      expect(now.acceptNote).toBe(was === 'in progress' ? note : null);
+      expect(now).toMatchObject({ status: 'done', outcome: 'merged', requeue: null, stage: null });
       expect(notices.find((n) => n.kind === 'pr.merged')?.text).toContain(c.during ? 'during a follow-up, so the item is done' : 'so the item is done');
-    }
-    expect(now.pr?.state).toBe(c.pull.merged ? 'merged' : c.pull.state);
+      expect(merges).toHaveLength(1);
+      expect(merges[0]).toMatchObject({ itemId: item.id, repo: 'octo/app', prNumber: 7, prHeadSha: SHA, initiatedBy: 'external', reviewed: false, reviewedHeadSha: null });
+      // Every step still going ended. The waiting merge on a finished ticket ends cancelled and says why.
+      expect(stack.workflow.steps(item.id).filter((s) => s.state !== 'done')).toEqual([]);
+      if (c.status === 'review') {
+        expect(stack.workflow.steps(item.id).find((s) => s.kind === 'merge')).toMatchObject({ state: 'done', result: 'cancelled', detail: 'Merged on GitHub' });
+      }
+    } else expect(merges).toHaveLength(0);
+    expect(prOf(now)?.state).toBe(c.pull.merged ? 'merged' : c.pull.state);
     await pollAll();
     expect(notices.filter((n) => n.kind === 'pr.merged' || n.kind === 'pr.closed')).toHaveLength(c.notice ? 1 : 0);
   });
@@ -912,8 +988,8 @@ describe('pull request state', () => {
     Object.assign(fake.gh.pulls.get(7) as Json, { state: 'closed', merged: true, merged_at: iso(T0) });
     await sync.poll();
     const now = backlog.get(item.id) as ItemRecord;
-    expect(now.status).toBe('done');
-    expect(now.acceptNote).toBe('Pull request #7 was merged on GitHub during a follow-up; it was queued.');
+    expect(st(now)).toBe('done');
+    expect(now.acceptNote).toBe('Pull request #7 was merged on GitHub during a follow-up; it was in progress.');
     expect(noticesOf('issue.closed')).toHaveLength(1);
     expect(noticesOf('pr.merged')).toHaveLength(1);
   });
@@ -930,7 +1006,7 @@ describe('pull request state', () => {
       if (!raced && url.pathname === '/repos/octo/app/pulls/7') {
         raced = true;
         const current = backlog.get(item.id) as ItemRecord;
-        backlog.patch(current, { pr: { ...(current.pr as NonNullable<ItemRecord['pr']>), lastPushedSha: sha2 } });
+        setPr(current, { ...(prOf(current) as GithubPullReference), lastPushedSha: sha2 });
         await sync.published(item.id);
       }
       return orig(input, init);
@@ -946,10 +1022,10 @@ describe('pull request state', () => {
     fake.gh.checkRuns.set(SHA, [run(1, 'failure')]);
     fake.gh.checkRuns.set(sha2, [run(2, 'success')]);
     await sync.poll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
     expect(noticesOf('pr.checks')).toEqual([]);
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual(['W-1 PR #7: all 1 check passed.']);
     expect(followUps).toEqual([]);
   });
@@ -962,7 +1038,7 @@ describe('pull request state', () => {
     const pull = fake.gh.pulls.get(7) as Json;
     pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
   });
 
   it('follows a force-push back onto an earlier head', async () => {
@@ -973,10 +1049,10 @@ describe('pull request state', () => {
     const pull = fake.gh.pulls.get(7) as Json;
     pull.head = { sha: sha2, ref: 'puck/W-1-fix-it' };
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
     pull.head = { sha: SHA, ref: 'puck/W-1-fix-it' };
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(SHA);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(SHA);
   });
 
   it('moves the item to done when an earlier head is merged', async () => {
@@ -990,7 +1066,7 @@ describe('pull request state', () => {
     pull.head = { sha: SHA, ref: 'puck/W-1-fix-it' };
     Object.assign(pull, { state: 'closed', merged: true, merged_at: iso(T0) });
     await pollAll();
-    expect(backlog.get(item.id)?.status).toBe('done');
+    expect(st(backlog.get(item.id))).toBe('done');
     expect(noticesOf('pr.merged')).toHaveLength(1);
   });
 
@@ -999,13 +1075,13 @@ describe('pull request state', () => {
     const item = publishedItem();
     await sync.published(item.id);
     await sync.poll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(SHA);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(SHA);
     const sha2 = 'd'.repeat(40);
     const current = backlog.get(item.id) as ItemRecord;
-    backlog.patch(current, { pr: { ...(current.pr as NonNullable<ItemRecord['pr']>), lastPushedSha: sha2 } });
+    setPr(current, { ...(prOf(current) as GithubPullReference), lastPushedSha: sha2 });
     await sync.published(item.id);
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
   });
 
   it('stops polling a merged pull request', async () => {
@@ -1016,6 +1092,197 @@ describe('pull request state', () => {
     const count = fake.gh.requests.length;
     await pollAll();
     expect(fake.gh.requests.length).toBe(count);
+  });
+});
+
+/* ---------- Merges, reconciled against the journal ---------- */
+
+describe('merge.observed', () => {
+  const MERGE_SHA = 'e'.repeat(40);
+  const merged = { state: 'closed', merged: true, merged_at: iso(T0 + 1_000), merge_commit_sha: MERGE_SHA, merged_by: { login: 'octocat', type: 'User' }, commits: 3 };
+
+  /** A new daemon on the same state: stores, journal and the GitHub workflow built again (its ETag cache is gone). */
+  function restart(): void {
+    stack.journal.close();
+    stack = deliveryStack(root.paths.state, { now: () => clock });
+    backlog = stack.backlog;
+    work = makeWork();
+    sync = build();
+  }
+
+  const observed = () =>
+    stack.journal.head() > 0
+      ? openJournalEvents().filter((e) => e.kind === 'merge.observed')
+      : [];
+
+  function openJournalEvents() {
+    const opened = openJournal(path.join(root.paths.state, 'delivery', 'journal.ndjson'));
+    opened.journal.close();
+    return opened.transactions.flatMap((tx) => tx.events);
+  }
+
+  function legacyMerged(): void {
+    policies = { intake: 'off' };
+    stack.journal.close();
+    writeLegacyState(root.paths.state);
+    expect(migrateState(root.paths.state, { daemonVersion: 'new', now: T0, eventHead: 0 })).toMatchObject({ ok: true, to: 2 });
+    restart();
+    bootstrapLegacy(stack.workflow, backlog.list(), stack.items.get().nextNumber);
+    fake.gh.pulls.set(40, { number: 40, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/40', head: { sha: 'c'.repeat(40), ref: 'puck/W-7' } });
+  }
+
+  const stepShape = () => stack.workflow.steps(LEGACY.merged).map((s) => [s.id, s.kind, s.state, s.result, s.detail]);
+
+  it('records a migrated merge once, writes the merge commit, and does not stamp updatedAt again', async () => {
+    legacyMerged();
+    const before = structuredClone(backlog.get(LEGACY.merged));
+    const steps = stepShape();
+    expect(before).toMatchObject({ status: 'done', outcome: 'merged' });
+    expect(deliveryPull(before)).toMatchObject({ number: 41, state: 'merged' });
+    expect(deliveryPull(before)?.mergeCommitSha ?? null).toBeNull();
+    fake.gh.pulls.set(41, { number: 41, html_url: 'https://github.com/octo/app/pull/41', head: { sha: 'd'.repeat(40), ref: 'puck/W-9' }, ...merged });
+    clock += 60_000;
+    const stamped = clock;
+    await sync.poll();
+    expect(observed()).toEqual([expect.objectContaining({ itemId: LEGACY.merged, repo: 'octo/app', prNumber: 41, mergeCommitSha: MERGE_SHA, mergedBy: 'octocat' })]);
+    expect(noticesOf('pr.merged')).toEqual([]);
+    const after = backlog.get(LEGACY.merged);
+    expect(after).toMatchObject({ status: 'done', outcome: 'merged', closedAt: before?.closedAt, updatedAt: stamped });
+    expect(deliveryPull(after)).toEqual({ ...deliveryPull(before), mergeCommitSha: MERGE_SHA });
+    expect(stepShape()).toEqual(steps);
+    await pollAll();
+    expect(backlog.get(LEGACY.merged)?.updatedAt).toBe(stamped);
+    expect(observed()).toHaveLength(1);
+    restart();
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+    expect(noticesOf('pr.merged')).toEqual([]);
+    expect(backlog.get(LEGACY.merged)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: before?.closedAt, updatedAt: stamped });
+    expect(deliveryPull(backlog.get(LEGACY.merged))?.mergeCommitSha).toBe(MERGE_SHA);
+    expect(stepShape()).toEqual(steps);
+  });
+
+  it('records a migrated merge with no commit and leaves updatedAt, status, steps and closedAt', async () => {
+    legacyMerged();
+    const before = structuredClone(backlog.get(LEGACY.merged));
+    const steps = stepShape();
+    fake.gh.pulls.set(41, {
+      number: 41,
+      html_url: 'https://github.com/octo/app/pull/41',
+      head: { sha: 'd'.repeat(40), ref: 'puck/W-9' },
+      state: 'closed',
+      merged: true,
+      merged_at: iso(T0 + 1_000),
+      merge_commit_sha: null,
+      merged_by: { login: 'octocat', type: 'User' },
+      commits: 3,
+    });
+    clock += 60_000;
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toEqual([expect.objectContaining({ itemId: LEGACY.merged, prNumber: 41, mergeCommitSha: null })]);
+    expect(noticesOf('pr.merged')).toEqual([]);
+    expect(backlog.get(LEGACY.merged)).toEqual(before);
+    expect(stepShape()).toEqual(steps);
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(LEGACY.merged)).toEqual(before);
+  });
+
+  it('records the merge with its commit, once, and the ticket is done (merged)', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    await sync.poll();
+    expect(observed()).toEqual([
+      expect.objectContaining({
+        kind: 'merge.observed',
+        itemId: item.id,
+        repo: 'octo/app',
+        prNumber: 7,
+        prHeadSha: SHA,
+        prCommits: 3,
+        mergeCommitSha: MERGE_SHA,
+        mergeParents: [],
+        mergedAt: T0 + 1_000,
+        mergedBy: 'octocat',
+        method: null,
+        initiatedBy: 'external',
+        reviewedHeadSha: null,
+        reviewed: false,
+      }),
+    ]);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: clock });
+    expect(prOf(backlog.get(item.id))).toMatchObject({ state: 'merged', mergeCommitSha: MERGE_SHA });
+    expect(stack.workflow.steps(item.id).find((s) => s.kind === 'merge')).toMatchObject({ state: 'done', result: 'cancelled', detail: 'Merged on GitHub' });
+    await pollAll();
+    restart();
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+  });
+
+  it('records it after a crash between the poll’s cache write and the journal', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    // The poll saves the pull request's state first; the crash comes before the journal has the merge.
+    work.merged = () => {
+      throw new Error('crash');
+    };
+    await sync.poll();
+    expect(observed()).toHaveLength(0);
+    expect(githubStore(root.paths.state).get().items[item.id]?.prState).toBe('merged');
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(observed()[0]).toMatchObject({ mergeCommitSha: MERGE_SHA });
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+  });
+
+  it('records it after a lost poll', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    await sync.poll();
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    const orig = fetchImpl;
+    fetchImpl = (async (input, init) => {
+      if (new URL(String(input)).pathname === '/repos/octo/app/pulls/7') throw new TypeError('fetch failed');
+      return orig(input, init);
+    }) as typeof fetch;
+    await pollAll();
+    expect(observed()).toHaveLength(0);
+    expect(backlog.get(item.id)?.status).toBe('in-progress');
+    fetchImpl = orig;
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+  });
+
+  it('reads each unrecorded pull request once at boot, and records a merge from before the restart', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    await sync.poll();
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+  });
+
+  it('moves a failed ticket to done (merged) too, and keeps a done (merged) ticket as it is', async () => {
+    policies = { intake: 'off' };
+    const failed = publishedItem('failed');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    await sync.poll();
+    expect(backlog.get(failed.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+    expect(observed()).toHaveLength(1);
+    expect(work.merged(failed.id, { ...(observed()[0] as unknown as MergeObserved) }, 'again')).toBe(false);
+    expect(observed()).toHaveLength(1);
   });
 });
 
@@ -1128,17 +1395,13 @@ describe('review feedback and the trust filter', () => {
         ...(fake.gh.reviewComments.get(7) ?? []),
         { ...comment(id, 'dana', 'OWNER', `Point ${round}`), path: 'a.ts', line: round, diff_hunk: '@@', pull_request_review_id: 1 },
       ]);
-      const current = backlog.get(item.id) as ItemRecord;
-      if (current.status !== 'review') {
-        backlog.transition(current, 'dispatch', { attempts: 1 });
-        backlog.transition(current, 'finish');
-      }
+      backToReview(item);
       await pollAll();
     }
     expect(followUps).toHaveLength(MAX_REVIEW_ROUNDS);
     expect(noticesOf('pr.review').at(-1)?.text).toMatch(/automatic review rounds \(5\) are used up/);
 
-    backlog.patch(item, { pr: { number: 7, url: 'u', draft: true, lastPushedSha: 'def5678'.padEnd(40, '0') } });
+    setPr(item, { number: 7, url: 'u', draft: true, lastPushedSha: 'def5678'.padEnd(40, '0') });
     await sync.published(item.id);
     expect(writes().filter((w) => String(w.path).includes('/replies'))).toEqual([]);
   });
@@ -1171,8 +1434,8 @@ describe('CI on the published head', () => {
     fake.gh.statuses.set(SHA, c.statuses);
     await pollAll();
     const now = backlog.get(item.id) as ItemRecord;
-    expect(now.pr?.checks?.state).toBe(c.state);
-    expect(now.status).toBe('review'); // CI never changes status
+    expect(prOf(now)?.checks?.state).toBe(c.state);
+    expect(st(now)).toBe('review'); // CI never changes status
     const texts = noticesOf('pr.checks').map((n) => n.text);
     if (c.notice === null) expect(texts).toEqual([]);
     else if (typeof c.notice === 'string') expect(texts).toEqual([c.notice]);
@@ -1187,7 +1450,7 @@ describe('CI on the published head', () => {
     await sync.published(item.id);
     clock += 11 * 60_000;
     await sync.poll();
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('neutral');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('neutral');
     expect(noticesOf('pr.checks')).toEqual([]);
   });
 
@@ -1197,11 +1460,11 @@ describe('CI on the published head', () => {
     await sync.published(item.id);
     clock += 11 * 60_000;
     await sync.poll();
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('neutral');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('neutral');
     fake.gh.checkRuns.set(SHA, [run(1, 'test', 'failure')]);
     await pollAll();
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([expect.stringMatching(/1 check failed \(test\)/)]);
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('failure');
   });
 
   it('reports a later failure after the same head settled as success', async () => {
@@ -1220,7 +1483,7 @@ describe('CI on the published head', () => {
     ]);
     expect(followUps).toHaveLength(1);
     expect(followUps[0].text).toContain('- test: test failure');
-    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+    expect(prOf(backlog.get(item.id))?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
   });
 
   it('does not repeat a notice or a fix while the same checks fail', async () => {
@@ -1234,7 +1497,7 @@ describe('CI on the published head', () => {
     await pollAll();
     expect(noticesOf('pr.checks')).toHaveLength(1);
     expect(followUps).toHaveLength(1);
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('failure');
     const before = fake.gh.requests.length;
     clock += POLL.quietChecksMs;
     await sync.poll();
@@ -1257,7 +1520,7 @@ describe('CI on the published head', () => {
       expect.stringMatching(/2 checks failed \(test, lint\)\. Read them with ci_read\./),
     ]);
     expect(followUps).toHaveLength(1);
-    expect(backlog.get(item.id)?.pr?.checks?.failing?.map((f) => f.name).sort()).toEqual(['lint', 'test']);
+    expect(prOf(backlog.get(item.id))?.checks?.failing?.map((f) => f.name).sort()).toEqual(['lint', 'test']);
   });
 
   it('redacts a token-shaped check title before it is stored or sent to the worker', async () => {
@@ -1279,7 +1542,7 @@ describe('CI on the published head', () => {
     await pollAll();
     const current = backlog.get(item.id) as ItemRecord;
     const read = sync.ciRead(current) as { failing: Array<{ name: string; summary: string }> };
-    const shown = JSON.stringify({ checks: current.pr?.checks, read, notices: noticesOf('pr.checks'), followUps });
+    const shown = JSON.stringify({ checks: prOf(current)?.checks, read, notices: noticesOf('pr.checks'), followUps });
     expect(shown).not.toContain('ghs_leakedtoken123');
     expect(read.failing).toEqual([
       expect.objectContaining({ name: 'Authorization: [redacted]', summary: 'Authorization: [redacted]' }),
@@ -1320,7 +1583,7 @@ describe('CI on the published head', () => {
     await pollAll();
     expect(noticesOf('pr.checks')).toEqual([]);
     expect(followUps).toEqual([]);
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('failure');
     fake.gh.logsDown.delete(60);
     await pollAll();
     expect(noticesOf('pr.checks')).toHaveLength(1);
@@ -1370,7 +1633,7 @@ describe('CI on the published head', () => {
 
     fake.gh.checkRuns.set(SHA, [run(2, 'test', null, 'in_progress')]);
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('pending');
     expect(noticesOf('pr.checks')).toEqual([]);
     expect(followUps).toEqual([]);
 
@@ -1439,7 +1702,7 @@ describe('CI on the published head', () => {
     const pull = fake.gh.pulls.get(7) as { head: { sha: string } };
     pull.head.sha = sha2;
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.sha).toBe(sha2);
+    expect(prOf(backlog.get(item.id))?.checks?.sha).toBe(sha2);
     expect(noticesOf('pr.checks')).toEqual([]);
 
     pull.head.sha = SHA;
@@ -1470,9 +1733,7 @@ describe('CI on the published head', () => {
       html_url: 'https://github.com/octo/app/pull/8',
       head: { sha: SHA, ref: 'puck/W-1-fix-it' },
     });
-    backlog.patch(backlog.get(item.id) as ItemRecord, {
-      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
-    });
+    setPr(backlog.get(item.id) as ItemRecord, { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA });
     await sync.published(item.id);
     await pollAll();
     expect(noticesOf('pr.checks')).toEqual([]);
@@ -1494,7 +1755,7 @@ describe('CI on the published head', () => {
     expect(noticesOf('pr.checks')).toHaveLength(1);
     expect(followUps).toHaveLength(1);
     await sync.published(item.id);
-    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+    expect(prOf(backlog.get(item.id))?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
     await pollAll();
     expect(noticesOf('pr.checks')).toHaveLength(1);
     expect(followUps).toHaveLength(1);
@@ -1521,11 +1782,9 @@ describe('CI on the published head', () => {
       html_url: 'https://github.com/octo/app/pull/8',
       head: { sha: SHA, ref: 'puck/W-1-fix-it' },
     });
-    backlog.patch(backlog.get(item.id) as ItemRecord, {
-      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
-    });
+    setPr(backlog.get(item.id) as ItemRecord, { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA });
     await sync.published(item.id);
-    expect(backlog.get(item.id)?.pr?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
+    expect(prOf(backlog.get(item.id))?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
 
     await pollAll();
     expect(noticesOf('pr.checks').map((n) => n.text)).toEqual([
@@ -1554,9 +1813,7 @@ describe('CI on the published head', () => {
       html_url: 'https://github.com/octo/app/pull/8',
       head: { sha: SHA, ref: 'puck/W-1-fix-it' },
     });
-    backlog.patch(backlog.get(item.id) as ItemRecord, {
-      pr: { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA },
-    });
+    setPr(backlog.get(item.id) as ItemRecord, { number: 8, url: 'https://github.com/octo/app/pull/8', draft: true, lastPushedSha: SHA });
     const before = fake.gh.requests.length;
     await pollAll();
     expect(fake.gh.requests.slice(before).some((r) => r.path.includes(`/commits/${SHA}/check-runs`))).toBe(true);
@@ -1573,12 +1830,8 @@ describe('CI on the published head', () => {
     const item = publishedItem();
     for (let attempt = 1; attempt <= 3; attempt++) {
       const sha = `${attempt}`.repeat(40);
-      const current = backlog.get(item.id) as ItemRecord;
-      if (current.status !== 'review') {
-        backlog.transition(current, 'dispatch', { attempts: 1 });
-        backlog.transition(current, 'finish');
-      }
-      backlog.patch(current, { pr: { number: 7, url: 'u', draft: true, lastPushedSha: sha } });
+      backToReview(item);
+      setPr(item, { number: 7, url: 'u', draft: true, lastPushedSha: sha });
       (fake.gh.pulls.get(7) as { head: { sha: string } }).head.sha = sha;
       await sync.published(item.id);
       fake.gh.checkRuns.set(sha, [run(attempt, 'test', 'failure')]);
@@ -1603,7 +1856,7 @@ describe('CI on the published head', () => {
     expect(followUps).toHaveLength(1);
     expect(followUps[0].text).toMatch(/^CI failed on pull request #7/);
     expect(noticesOf('pr.checks')[0].text).toMatch(/Queued a fix to the worker \(attempt 1 of /);
-    expect(backlog.get(item.id)?.status).toBe(status);
+    expect(st(backlog.get(item.id))).toBe(status);
     await pollAll();
     expect(followUps).toHaveLength(1);
   });
@@ -1617,7 +1870,7 @@ describe('CI on the published head', () => {
       Array.from({ length: 101 }, (_, i) => run(i + 1, `job-${i}`, i === 100 ? 'failure' : 'success')),
     );
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('failure');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('failure');
     expect(noticesOf('pr.checks')[0].text).toContain('job-100');
   });
 
@@ -1628,7 +1881,7 @@ describe('CI on the published head', () => {
     fake.gh.checkRuns.set(SHA, [run(1, 'test', 'success')]);
     fake.gh.checkTotal.set(SHA, 3);
     await pollAll();
-    expect(backlog.get(item.id)?.pr?.checks?.state).toBe('pending');
+    expect(prOf(backlog.get(item.id))?.checks?.state).toBe('pending');
     expect(noticesOf('pr.checks')).toEqual([]);
   });
 
@@ -1907,14 +2160,14 @@ describe('ci_rerun', () => {
     const jobsRead = fake.gh.requests.findIndex((r) => r.method === 'GET' && r.path.startsWith('/repos/octo/app/actions/runs/50/jobs'));
     expect(jobsRead).toBeGreaterThanOrEqual(0);
     expect(jobsRead).toBeLessThan(fake.gh.requests.indexOf(rerunPosts()[0]));
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA, state: 'pending', failing: [] });
 
     // The checks the re-run replaced are still listed, and their replacements have not all started.
     c.beforePending();
     await pollAll();
     await pollAll();
     expect(texts()).toHaveLength(1);
-    expect(current(item).pr?.checks?.state).toBe('pending');
+    expect(prOf(current(item))?.checks?.state).toBe('pending');
     const read = sync.ciRead(current(item));
     expect(read).toMatchObject({ state: 'pending' });
     expect(read).not.toHaveProperty('rerun');
@@ -1922,7 +2175,7 @@ describe('ci_rerun', () => {
     finishRerun(50, c.conclusion, 'npm test\nFAIL new.test.js');
     await pollAll();
     expect(texts()).toEqual([expect.stringMatching(/1 check failed \(test\)/), c.notice]);
-    expect(current(item).pr?.checks?.state).toBe(c.state);
+    expect(prOf(current(item))?.checks?.state).toBe(c.state);
     if (c.state === 'failure') {
       const logs = JSON.stringify((sync.ciRead(current(item)) as { logs: unknown }).logs);
       expect(logs).toContain('new.test.js');
@@ -1959,17 +2212,17 @@ describe('ci_rerun', () => {
     const item = await reported(c.setup);
     await sync.ciRerun(current(item));
     expect(fake.gh.reruns).toEqual([50]);
-    expect(current(item).pr?.checks).toMatchObject({ state: 'pending' });
-    expect(current(item).pr?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
+    expect(prOf(current(item))?.checks).toMatchObject({ state: 'pending' });
+    expect(prOf(current(item))?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
     await pollAll();
-    expect(current(item).pr?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
+    expect(prOf(current(item))?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
     expect(texts()).toHaveLength(1);
 
     finishRerun(50, 'success');
     await pollAll();
-    expect(current(item).pr?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
+    expect(prOf(current(item))?.checks?.failing?.map((f) => f.name)).toEqual(c.kept);
     expect(texts()).toEqual([expect.anything(), c.notice]);
-    expect(current(item).pr?.checks?.state).toBe('failure');
+    expect(prOf(current(item))?.checks?.state).toBe('failure');
   });
 
   it.each([
@@ -1987,7 +2240,7 @@ describe('ci_rerun', () => {
     (fake.gh.pulls.get(7) as { head: { sha: string } }).head.sha = SHA2;
     fake.gh.checkRuns.set(SHA2, [check(90, 'test', 'success'), check(91, 'lint', 'success')]);
     await pollAll();
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA2, state: 'success' });
     gate.release();
     const outcome = await pending;
 
@@ -2007,7 +2260,7 @@ describe('ci_rerun', () => {
     if (c.started) finishRerun(50, 'failure');
     await pollAll();
     expect(texts()).toHaveLength(2);
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA2, state: 'success' });
   });
 
   it.each([
@@ -2045,7 +2298,7 @@ describe('ci_rerun', () => {
     (fake.gh.pulls.get(7) as { head: { sha: string } }).head.sha = SHA2;
     fake.gh.checkRuns.set(SHA2, [check(90, 'test', 'success'), check(91, 'lint', 'success')]);
     await pollAll();
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA2, state: 'success' });
     gate.release();
     const outcome = await pending;
 
@@ -2060,7 +2313,7 @@ describe('ci_rerun', () => {
     finishRerun(50, 'failure');
     await pollAll();
     expect(texts().filter((t) => t.includes('all 2 checks passed.'))).toHaveLength(1);
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA2, state: 'success' });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA2, state: 'success' });
   });
 
   it('drops a poll that read the replaced result while the re-run was recorded', async () => {
@@ -2076,7 +2329,7 @@ describe('ci_rerun', () => {
     gate.release();
     await polling;
     expect(texts()).toEqual([]);
-    expect(current(item).pr?.checks?.state).toBe('pending');
+    expect(prOf(current(item))?.checks?.state).toBe('pending');
 
     finishRerun(50, 'success');
     await pollAll();
@@ -2102,7 +2355,7 @@ describe('ci_rerun', () => {
     const before = fake.gh.requests.length;
     await expect(sync.ciRerun(current(item))).rejects.toThrow(c.error);
     expect(fake.gh.reruns).toEqual([]);
-    expect(current(item).pr?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
+    expect(prOf(current(item))?.checks).toMatchObject({ sha: SHA, state: 'failure', failing: [{ name: 'test' }] });
     if (c.name === 'the environment does not allow it') expect(fake.gh.requests.length).toBe(before);
     await pollAll();
     expect(texts()).toHaveLength(1);
@@ -2136,7 +2389,7 @@ describe('ci_rerun', () => {
 /* ---------- Closing keywords ---------- */
 
 describe('linking the pull request to its issue', () => {
-  const src = { source: source(12), base: { branch: 'main', sha: SHA } };
+  const src = { references: [{ ...source(12), id: 'ref_01J0000000000000000000000A', role: 'source' as const }], base: { branch: 'main', sha: SHA } };
   it.each([
     { name: 'into the default branch', item: src, defaultBranch: 'main', link: 'Closes octo/app#12' },
     {
@@ -2157,7 +2410,7 @@ describe('linking the pull request to its issue', () => {
       defaultBranch: '',
       link: 'Closes octo/app#12',
     },
-    { name: 'an item not from an issue', item: { source: null, base: src.base }, defaultBranch: 'main', link: null },
+    { name: 'an item not from an issue', item: { references: [], base: src.base }, defaultBranch: 'main', link: null },
   ])('$name', (c) => {
     expect(issueLink(c.item, c.defaultBranch)).toBe(c.link);
   });

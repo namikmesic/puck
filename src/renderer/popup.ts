@@ -19,7 +19,7 @@ import { button } from './util';
 
 export interface MenuEntry {
   label: string;
-  /** Secondary text on the right ("⌘N", "back to Backlog"). */
+  /** Secondary text on the right ("⌘N", "↵"). */
   hint?: string;
   danger?: boolean;
   /** Arm on the first click with this label; run on the second. */

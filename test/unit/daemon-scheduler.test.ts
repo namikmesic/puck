@@ -1,28 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ItemStatus } from '../../src/harness/daemon-protocol';
+import type { StepState } from '../../src/harness/daemon-protocol';
 import { nullLogger } from '../../src/daemon/log';
-import { capacityOf, pickDispatches, Scheduler, type SchedulerView, type Timers } from '../../src/daemon/scheduler';
+import { capacityOf, pickDispatches, Scheduler, type SchedulerStep, type SchedulerView, type Timers } from '../../src/daemon/scheduler';
 
-// The scheduler decides who runs. Pin its order, its limits, that one busy
-// agent never blocks another, and when it must do nothing at all.
+// The scheduler decides which steps run. Pin its order (verification first,
+// then started tickets, then new ones, each in backlog order), its limits,
+// that one busy agent never blocks another, and when it must do nothing at all.
 
-type Item = { id: string; status: ItemStatus; agent: string | null };
-const item = (id: string, agent: string | null, status: ItemStatus = 'queued'): Item => ({ id, status, agent });
+type Item = SchedulerStep;
+let order = 0;
+const item = (id: string, agent: string | null, state: StepState = 'queued', over: Partial<SchedulerStep> = {}): Item => ({
+  id,
+  itemId: `itm_${id}`,
+  kind: 'implement',
+  state,
+  agent,
+  tier: 2,
+  order: order++,
+  ...over,
+});
 
-function view(items: Item[], assignments: Record<string, number> = { impl: 1, rev: 1 }, maxWorkers = 8): SchedulerView {
-  return { items, assignments, maxWorkers };
+function view(steps: Item[], assignments: Record<string, number> = { impl: 1, rev: 1 }, maxWorkers = 8): SchedulerView {
+  return { steps, assignments, maxWorkers };
 }
 
 describe('pickDispatches', () => {
-  it('starts queued items in backlog order, up to each agent’s maxParallel', () => {
+  it('starts queued implement steps in backlog order, up to each agent’s maxParallel', () => {
     const v = view([item('a', 'impl'), item('b', 'impl'), item('c', 'impl')], { impl: 2 });
     expect(pickDispatches(v)).toEqual(['a', 'b']);
   });
 
-  it('counts running and needs-input items against the slots', () => {
+  it('counts running and needs-input implement steps against the slots', () => {
     const v = view([item('r', 'impl', 'running'), item('n', 'impl', 'needs-input'), item('q', 'impl')], { impl: 2 });
     expect(pickDispatches(v)).toEqual([]);
-    expect(capacityOf(v, false)).toEqual({ agents: { impl: { running: 2, max: 2 } }, workers: { running: 2, max: 8 }, paused: false });
+    expect(capacityOf(v, false)).toEqual({ agents: { impl: { running: 2, max: 2 } }, workers: { running: 2, max: 8 }, paused: false, verifying: 0 });
   });
 
   it('never lets a busy agent block another agent further down', () => {
@@ -37,21 +48,39 @@ describe('pickDispatches', () => {
     expect(pickDispatches(full)).toEqual([]);
   });
 
-  it('skips items without an agent, for an unassigned agent, or not queued', () => {
-    const v = view([item('a', null), item('b', 'gone'), item('c', 'impl', 'review'), item('d', 'impl', 'backlog'), item('e', 'impl')]);
+  it('skips steps without an agent, for an unassigned agent, or not queued', () => {
+    const v = view([item('a', null), item('b', 'gone'), item('c', 'impl', 'waiting'), item('d', 'impl', 'pending'), item('e', 'impl')]);
     expect(pickDispatches(v)).toEqual(['e']);
   });
 
-  it('is deterministic: the order alone decides', () => {
-    const items = [item('z', 'impl'), item('a', 'impl')];
-    expect(pickDispatches(view(items))).toEqual(['z']);
-    expect(pickDispatches(view([...items].reverse()))).toEqual(['a']);
+  it('is deterministic: tier, then order, alone decide', () => {
+    const z = item('z', 'impl', 'queued', { order: 1 });
+    const a = item('a', 'impl', 'queued', { order: 2 });
+    expect(pickDispatches(view([z, a]))).toEqual(['z']);
+    expect(pickDispatches(view([a, z]))).toEqual(['z']);
   });
 
-  it('gives a follow-up its slot back when one is free', () => {
-    // A reviewed item that got a follow-up is queued again; it competes like any other queued item.
-    const v = view([item('done', 'impl', 'review'), item('followed-up', 'impl'), item('new', 'impl')]);
-    expect(pickDispatches(v)).toEqual(['followed-up']);
+  it('starts a started ticket’s step (a fix round, a retry, a restart) before a new ticket’s', () => {
+    const v = view([item('new', 'impl', 'queued', { tier: 2, order: 0 }), item('again', 'impl', 'queued', { tier: 1, order: 5 })]);
+    expect(pickDispatches(v)).toEqual(['again']);
+  });
+
+  it('gives every freed slot to verification before any implement step', () => {
+    const v = view(
+      [item('impl1', 'impl', 'queued', { tier: 1, order: 0 }), item('rev1', 'rev', 'queued', { kind: 'review', tier: 0, order: 9 }), item('chk', null, 'queued', { kind: 'checks', tier: 0, order: 3 })],
+      { impl: 5, rev: 5 },
+      2,
+    );
+    expect(pickDispatches(v)).toEqual(['chk', 'rev1']);
+  });
+
+  it('counts a running checks step in the total only', () => {
+    const v = view([item('chk', null, 'running', { kind: 'checks', tier: 0 }), item('r', 'rev', 'running', { kind: 'review', tier: 0 }), item('q', 'impl')], { impl: 1, rev: 1 }, 3);
+    const cap = capacityOf(v, false);
+    expect(cap.workers.running).toBe(2);
+    expect(cap.verifying).toBe(2);
+    expect(cap.agents.rev?.running).toBe(1);
+    expect(pickDispatches(v)).toEqual(['q']);
   });
 });
 
@@ -86,12 +115,12 @@ describe('Scheduler', () => {
     const state = { ready: opts.ready ?? true, items };
     const dispatch = vi.fn((id: string) => {
       const it = state.items.find((i) => i.id === id);
-      if (it) it.status = 'running';
+      if (it) it.state = 'running';
     });
     const scheduler = new Scheduler({
       view: () => view(state.items),
       canRun: () => state.ready,
-      dispatch,
+      start: dispatch,
       log: nullLogger,
       timers: t.timers,
     });
@@ -145,7 +174,7 @@ describe('Scheduler', () => {
     const scheduler = new Scheduler({
       view: () => view([item('a', 'impl'), item('b', 'rev')]),
       canRun: () => true,
-      dispatch,
+      start: dispatch,
       log: nullLogger,
       timers: t.timers,
     });

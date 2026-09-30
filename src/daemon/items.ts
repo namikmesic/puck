@@ -1,44 +1,41 @@
 /**
- * Work items: the backlog that stores them. The state machine they move
- * through is `src/harness/item-transitions.ts`, re-exported here.
+ * Tickets: the backlog that holds them, in priority order. Reads come from
+ * items.json (a checkpoint of the delivery journal); every change is an
+ * event in a transaction (`src/daemon/workflow.ts`), journaled before it is
+ * applied. The ticket table is `src/harness/item-transitions.ts`.
  */
 
-import type { DaemonEvent, IssueSource, ItemPosition, WorkItem } from '../harness/daemon-protocol';
-import { ItemStateError, nextStatus, type ItemTrigger } from '../harness/item-transitions';
+import type { ItemPosition, Reference, WorkItem } from '../harness/daemon-protocol';
+import { ItemStateError } from '../harness/item-transitions';
+import { deliveryPull, sourceIssue } from '../harness/references';
 import { newId } from '../harness/ulid';
-import type { JsonStore } from './store/store';
 import type { ItemRecord, ItemsFile } from './store/items';
+import type { JsonStore } from './store/store';
+import type { Tx } from './workflow';
 
-export {
-  holdsSlot,
-  ItemStateError,
-  nextStatus,
-  SLOT_STATUSES,
-  TRANSITIONS,
-  type ItemTrigger,
-  type SlotEffect,
-  type Transition,
-} from '../harness/item-transitions';
+export { ItemStateError, nextTicket, TICKET_TRANSITIONS, type TicketTrigger } from '../harness/item-transitions';
 
 export function itemLabel(item: Pick<WorkItem, 'number'>): string {
   return `W-${item.number}`;
 }
 
-/** The client-facing shape (daemon-only fields dropped). */
-export function publicItem(item: ItemRecord): WorkItem {
-  const { requeue: _requeue, pushedSha: _pushed, ...rest } = item;
-  void _requeue;
-  void _pushed;
-  return { ...rest };
-}
-
 export interface BacklogDeps {
   store: JsonStore<ItemsFile>;
-  emit(ev: DaemonEvent): void;
   now?: () => number;
 }
 
-/** Items in priority order, persisted in items.json, with every change emitted. */
+/** The 0-based index an ItemPosition names in an order (without the ticket itself). */
+export function positionIndex(order: readonly string[], itemId: string, position: ItemPosition): number {
+  const rest = order.filter((id) => id !== itemId);
+  if (position === 'top') return 0;
+  if (position === 'bottom') return rest.length;
+  const anchor = 'before' in position ? position.before : position.after;
+  const index = rest.indexOf(anchor);
+  if (index < 0 || anchor === itemId) throw new ItemStateError('The item to place it next to is not in the backlog.');
+  return 'before' in position ? index : index + 1;
+}
+
+/** Tickets in priority order, persisted in items.json. */
 export class Backlog {
   private readonly now: () => number;
 
@@ -69,106 +66,28 @@ export class Backlog {
     return this.get(ref.trim());
   }
 
-  /** Items linked to a GitHub issue (`owner/name`, number), newest last. */
+  /** Tickets linked to a GitHub issue (`owner/name`, number), newest last. */
   byIssue(repo: string, number: number): ItemRecord[] {
     const key = repo.toLowerCase();
     return this.list()
-      .filter((i) => i.source?.number === number && i.source.repo.toLowerCase() === key)
+      .filter((i) => {
+        const src = sourceIssue(i);
+        return src?.number === number && src.repo.toLowerCase() === key;
+      })
       .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The ticket whose delivery pull request this is. */
+  byPull(repo: string, number: number): ItemRecord | null {
+    const key = repo.toLowerCase();
+    return this.list().find((i) => {
+      const pr = deliveryPull(i);
+      return pr?.number === number && pr.repo.toLowerCase() === key;
+    }) ?? null;
   }
 
   bySession(sessionId: string): ItemRecord | null {
     return this.list().find((i) => i.sessionId === sessionId) ?? null;
-  }
-
-  create(init: {
-    title: string;
-    body: string;
-    agent: string | null;
-    repo: string | null;
-    createdBy: 'user' | 'orchestrator';
-    position?: ItemPosition;
-    source?: IssueSource | null;
-  }): ItemRecord {
-    const pos = init.position;
-    if (pos && typeof pos === 'object' && !this.get('before' in pos ? pos.before : pos.after)) {
-      throw new ItemStateError('The item to place it next to is not in the backlog.');
-    }
-    const at = this.now();
-    const item: ItemRecord = {
-      id: newId('itm', at),
-      number: this.file.nextNumber,
-      title: init.title,
-      body: init.body,
-      status: init.agent ? 'queued' : 'backlog',
-      agent: init.agent,
-      repo: init.repo,
-      createdBy: init.createdBy,
-      createdAt: at,
-      updatedAt: at,
-      attempts: 0,
-      sessionId: null,
-      branch: null,
-      worktree: null,
-      base: null,
-      result: null,
-      pr: null,
-      source: init.source ?? null,
-      lastError: null,
-      cancelReason: null,
-      acceptNote: null,
-      pendingAsk: null,
-      requeue: null,
-      pushedSha: null,
-    };
-    this.file.nextNumber += 1;
-    this.file.items[item.id] = item;
-    this.file.order.push(item.id);
-    if (init.position && init.position !== 'bottom') this.place(item.id, init.position);
-    this.deps.store.commit();
-    this.upsert(item);
-    this.emitOrder();
-    return item;
-  }
-
-  /** Mutate an item (not its status) and persist. No-op when the id is already gone. */
-  patch(item: ItemRecord, change: Partial<Omit<ItemRecord, 'id' | 'number' | 'status'>>): ItemRecord {
-    if (!this.get(item.id)) return item;
-    Object.assign(item, change, { updatedAt: this.now() });
-    this.deps.store.commit();
-    this.upsert(item);
-    return item;
-  }
-
-  /**
-   * Apply a trigger through the state machine (throws ItemStateError when it
-   * is not allowed), with any field changes in the same write.
-   */
-  transition(item: ItemRecord, trigger: ItemTrigger, change: Partial<Omit<ItemRecord, 'id' | 'number' | 'status'>> = {}): ItemRecord {
-    const to = nextStatus(item.status, trigger);
-    if (to === 'removed') {
-      this.remove(item);
-      return item;
-    }
-    Object.assign(item, change, { status: to, updatedAt: this.now() });
-    this.deps.store.commit();
-    this.upsert(item);
-    return item;
-  }
-
-  private remove(item: ItemRecord): void {
-    delete this.file.items[item.id];
-    this.file.order = this.file.order.filter((id) => id !== item.id);
-    this.deps.store.commit();
-    this.deps.emit({ kind: 'item.removed', itemId: item.id });
-    this.emitOrder();
-  }
-
-  move(item: ItemRecord, position: ItemPosition): string[] {
-    this.place(item.id, position);
-    this.deps.store.commit();
-    this.emitOrder();
-    return this.order();
   }
 
   /** The 1-based position of an item in the order. */
@@ -176,26 +95,80 @@ export class Backlog {
     return this.file.order.indexOf(itemId) + 1;
   }
 
-  private place(itemId: string, position: ItemPosition): void {
-    const order = this.file.order.filter((id) => id !== itemId);
-    let at: number;
-    if (position === 'top') at = 0;
-    else if (position === 'bottom') at = order.length;
-    else {
-      const anchor = 'before' in position ? position.before : position.after;
-      const index = order.indexOf(anchor);
-      if (index < 0 || anchor === itemId) throw new ItemStateError('The item to place it next to is not in the backlog.');
-      at = 'before' in position ? index : index + 1;
+  /* ---------- Changes, as events of a transaction ---------- */
+
+  /** A new ticket in Todo; `ticket.created` carries everything needed to rebuild it. */
+  create(
+    tx: Tx,
+    init: {
+      title: string;
+      body: string;
+      agent: string | null;
+      repo: string | null;
+      createdBy: ItemRecord['createdBy'];
+      position?: ItemPosition;
+      references?: Reference[];
+    },
+  ): ItemRecord {
+    const pos = init.position;
+    if (pos && typeof pos === 'object' && !tx.item('before' in pos ? pos.before : pos.after)) {
+      throw new ItemStateError('The item to place it next to is not in the backlog.');
     }
-    order.splice(at, 0, itemId);
-    this.file.order = order;
+    const at = tx.at;
+    const item: ItemRecord = {
+      id: newId('itm', at),
+      number: tx.nextNumber(),
+      title: init.title,
+      body: init.body,
+      status: 'todo',
+      stage: null,
+      outcome: null,
+      agent: init.agent,
+      repo: init.repo,
+      createdBy: init.createdBy,
+      createdAt: at,
+      updatedAt: at,
+      closedAt: null,
+      attempts: 0,
+      sessionId: null,
+      branch: null,
+      worktree: null,
+      base: null,
+      result: null,
+      references: init.references ?? [],
+      lastError: null,
+      cancelReason: null,
+      acceptNote: null,
+      needsInput: null,
+      oldestUserAsk: null,
+      openAsks: 0,
+      userAsks: 0,
+      delivery: null,
+      requeue: null,
+      pushedSha: null,
+      workflowId: null,
+      asks: [],
+      recordFormat: 2,
+    };
+    const order = tx.order();
+    const position = init.position && init.position !== 'bottom' ? positionIndex([...order, item.id], item.id, init.position) : order.length;
+    tx.push({ kind: 'ticket.created', item, position, nextNumber: item.number + 1 });
+    return tx.item(item.id) as ItemRecord;
   }
 
-  private upsert(item: ItemRecord): void {
-    this.deps.emit({ kind: 'item.upsert', item: publicItem(item) });
+  move(tx: Tx, item: ItemRecord, position: ItemPosition): void {
+    tx.push({ kind: 'ticket.patch', itemId: item.id, change: {}, position: positionIndex(tx.order(), item.id, position) });
   }
 
-  private emitOrder(): void {
-    this.deps.emit({ kind: 'backlog.order', order: this.order() });
+  remove(tx: Tx, item: ItemRecord): void {
+    tx.push({ kind: 'ticket.removed', itemId: item.id, number: item.number, title: item.title, status: item.status, outcome: item.outcome });
+  }
+
+  reference(tx: Tx, item: ItemRecord, op: 'add' | 'update' | 'remove', reference: Reference): void {
+    tx.push({ kind: 'ticket.reference', itemId: item.id, op, reference });
+  }
+
+  nowMs(): number {
+    return this.now();
   }
 }

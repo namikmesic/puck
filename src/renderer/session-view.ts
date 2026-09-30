@@ -30,6 +30,7 @@ import type { DaemonEvent, OpResult, SessionSummary } from '../harness/daemon-pr
 import type { EntryAuthor, TranscriptEntry } from '../harness/transcript';
 import type { HarnessEvent } from '../harness/types';
 import { setAskAnswered } from './ask-card';
+import { LEGACY_READ_ONLY } from './board-model';
 import { applyEvent, initChatView, refreshDayLabels, type AssistantTurn, type Session } from './chat-view';
 import { el } from './dom';
 import type { InstanceStore } from './instance-store';
@@ -167,6 +168,8 @@ export function initSessionView(ctx: SessionViewContext) {
     answerAsk: async (turnId, askId, answers) => {
       const sessionId = turnSession.get(turnId) ?? store.ask(askId)?.sessionId;
       if (!sessionId) throw new Error('That question is no longer open.');
+      // A daemon that predates the three-column board leaves tickets read-only, their workers' questions included.
+      if (summary(sessionId)?.kind === 'worker' && (store.state()?.daemon.protocol ?? 2) < 2) throw new Error(LEGACY_READ_ONLY);
       await ctx.answerAsk(sessionId, askId, answers);
     },
     toast: ctx.toast,

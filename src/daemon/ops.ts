@@ -15,7 +15,10 @@ import {
   type OpArgs,
   type OpResult,
   type Pin,
+  type RecordKind,
+  PAGE_LIMITS,
 } from '../harness/daemon-protocol';
+import { REFERENCE_TEXT_BYTES } from '../harness/references';
 import { REPO_RE } from '../harness/env-definition';
 import { validPin } from '../harness/inbox';
 import { MAX_GRANTS } from './credentials';
@@ -98,8 +101,21 @@ const none = (args: unknown): Record<string, never> => {
 
 const itemOnly = (args: unknown): { itemId: string } => ({ itemId: id(obj(args), 'itemId') });
 
+function links(v: unknown): string[] | undefined {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.length > 20) bad('links must be a list of at most 20 links.');
+  return v.map((l: unknown) => {
+    if (typeof l !== 'string' || !l.trim()) bad('each link must be text.');
+    if (Buffer.byteLength(l, 'utf8') > REFERENCE_TEXT_BYTES) throw new OpError('limit', `A link is longer than ${REFERENCE_TEXT_BYTES} bytes.`);
+    return l;
+  });
+}
+
+const RECORD_KINDS: readonly RecordKind[] = ['rounds', 'steps', 'reviews', 'findings', 'decisions', 'trail', 'audits'];
+
 export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   'snapshot.get': none,
+  'snapshot.part': (args) => ({ cursor: text(obj(args), 'cursor', 64, true) as string }),
   'session.history': (args) => {
     const o = obj(args);
     return {
@@ -133,6 +149,7 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
       agent,
       repo,
       position: o.position === undefined ? undefined : position(o.position),
+      links: links(o.links),
     };
   },
   'item.update': (args) => {
@@ -154,7 +171,39 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   },
   'item.cancel': itemOnly,
   'item.retry': itemOnly,
-  'item.accept': itemOnly,
+  'item.accept': (args) => {
+    const o = obj(args);
+    const reason = text(o, 'reason', 4 * 1024, false);
+    return { itemId: id(o, 'itemId'), ...(reason !== undefined && reason.trim() ? { reason } : {}) };
+  },
+  'item.link': (args) => {
+    const o = obj(args);
+    const ref = text(o, 'ref', REFERENCE_TEXT_BYTES, true) as string;
+    if (!ref.trim()) bad('ref is empty.');
+    return { itemId: id(o, 'itemId'), ref };
+  },
+  'item.unlink': (args) => {
+    const o = obj(args);
+    return { itemId: id(o, 'itemId'), referenceId: id(o, 'referenceId') };
+  },
+  'item.workflow': (args) => {
+    const o = obj(args);
+    return { itemId: id(o, 'itemId'), round: int(o, 'round', 1, 1_000_000) };
+  },
+  'item.records': (args) => {
+    const o = obj(args);
+    if (typeof o.kind !== 'string' || !RECORD_KINDS.includes(o.kind as RecordKind)) bad(`kind must be one of ${RECORD_KINDS.join(', ')}.`);
+    if (o.status !== undefined && (!Array.isArray(o.status) || o.status.some((s) => typeof s !== 'string' || s.length > 32))) bad('status must be a list of statuses.');
+    return {
+      itemId: id(o, 'itemId'),
+      kind: o.kind as RecordKind,
+      round: int(o, 'round', 1, 1_000_000),
+      findingId: optId(o, 'findingId'),
+      status: o.status as string[] | undefined,
+      cursor: text(o, 'cursor', 128, false),
+      limit: int(o, 'limit', 1, PAGE_LIMITS.recordsLimit),
+    };
+  },
   'item.publish': itemOnly,
   'item.delete': itemOnly,
   'issue.import': (args) => {
@@ -227,12 +276,17 @@ export const VALIDATORS: { [O in Op]: (args: unknown) => OpArgs<O> } = {
   },
 };
 
-export type Handlers = { [O in Op]: (args: OpArgs<O>) => Promise<OpResult<O>> | OpResult<O> };
+/** What a handler knows about the connection its command came on. */
+export interface HandlerContext {
+  protocol: number;
+}
+
+export type Handlers = { [O in Op]: (args: OpArgs<O>, ctx: HandlerContext) => Promise<OpResult<O>> | OpResult<O> };
 
 /** Validate, then run the op's handler. Throws OpError for client-facing failures. */
-export async function dispatch(handlers: Handlers, op: Op, args: unknown): Promise<unknown> {
+export async function dispatch(handlers: Handlers, op: Op, args: unknown, ctx: HandlerContext = { protocol: 2 }): Promise<unknown> {
   const validate = VALIDATORS[op] as (a: unknown) => unknown;
   const parsed = validate(args);
-  const handler = handlers[op] as (a: unknown) => unknown;
-  return handler(parsed);
+  const handler = handlers[op] as (a: unknown, c: HandlerContext) => unknown;
+  return handler(parsed, ctx);
 }

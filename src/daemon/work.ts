@@ -1,36 +1,67 @@
 /**
- * Work items end to end: the operations clients and the orchestrator's
- * tools share (create, edit, reorder, assign, cancel, retry, accept,
- * follow up, delete), dispatch into a worktree and worker session, result
- * capture at every worker turn end, and worker questions.
+ * Tickets end to end: the operations clients and the orchestrator's tools
+ * share (create, edit, reorder, assign, cancel, retry, accept, follow up,
+ * link, delete), dispatch of implement steps into a worktree and worker
+ * session, result capture at every worker turn end, worker questions, and
+ * merges observed on GitHub.
  *
- * Every status change goes through the backlog in items.ts, which applies
- * the state machine in `src/harness/item-transitions.ts`. The scheduler
- * picks what to dispatch; this module does the dispatching.
+ * Every change is one journal transaction (`src/daemon/workflow.ts`): a
+ * ticket's transition through the ticket table
+ * (`src/harness/item-transitions.ts`) and every step change it causes
+ * (`src/harness/workflow.ts`) land together, before any side effect. The
+ * scheduler picks which queued implement step starts; this module starts it.
+ *
+ * Without a delivery block, an implement step that ends cleanly (or that
+ * the user stopped) leaves a manual merge step waiting: the ticket stays
+ * In progress until the user accepts it or its pull request merges on
+ * GitHub, and a message to its worker opens a new `changes` round.
  *
  * Attempts. `attempts` counts the dispatches of the current request: the
  * first dispatch and each dispatch after an error add one, and an error
- * with `attempts >= maxAttempts` fails the item. A follow-up or a retry is
+ * with `attempts >= maxAttempts` fails the ticket. A follow-up or a retry is
  * a new request and starts again at one. A daemon restart is not a failed
- * attempt: the item goes back to `queued` without a count, and its next
- * dispatch resumes the SAME worker session (the harness's saved
+ * attempt: the implement step goes back to `queued` without a count, and
+ * its next dispatch resumes the SAME worker session (the harness's saved
  * conversation) with a short continue message, so nothing starts over.
  * A worker session that never received its prompt (the restart came
  * between creating it and queueing the prompt) gets the full worker prompt.
  */
 
 import type { AskQuestion } from '../harness/types';
-import type { IssueSource, ItemPosition, WorkItem } from '../harness/daemon-protocol';
+import type { GithubIssueReference, GithubPullReference, ItemPosition, MergeObserved, Reference, Step, TicketAsk, WorkItem } from '../harness/daemon-protocol';
 import type { DaemonDefinition, DaemonRepo } from '../harness/env-definition';
+import { allows, ticketPhrase } from '../harness/item-transitions';
+import { deliveryPull, hasRoom, parseReference, referenceLabel, sameTarget } from '../harness/references';
+import { newId } from '../harness/ulid';
+import { latestAttempts, roundSteps, stepHoldsSlot, StepStateError } from '../harness/workflow';
 import type { EntryAuthor, NoticeKind, TranscriptEntry, TurnEntry } from '../harness/transcript';
+import { actor, PIPELINE, type JournalActor } from './delivery/derive';
+import { JournalError } from './delivery/journal';
 import { capBytes, type Git, GitError, itemBranch, RESULT_LIMITS } from './git';
-import { type Backlog, holdsSlot, itemLabel, ItemStateError } from './items';
+import { type Backlog, itemLabel, ItemStateError } from './items';
 import type { Logger } from './log';
 import { continuePrompt, RESTART_REASON, workerPrompt } from './prompts';
 import { PublishError, type Publisher, type PublishRequest } from './publish';
 import type { ItemRecord } from './store/items';
 import type { SessionRecord } from './store/sessions';
 import { type TurnOutcome, type Turns, TurnsError } from './turns';
+import {
+  activeImplementOf,
+  addManualMerge,
+  askFields,
+  endSteps,
+  everStarted,
+  openFirstRound,
+  openRound,
+  openRoundOf,
+  queueImplement,
+  stepMove,
+  stepUpdate,
+  ticketPatch,
+  ticketStatus,
+  type Tx,
+  type Workflow,
+} from './workflow';
 
 export type Actor = 'user' | 'orchestrator';
 
@@ -46,6 +77,7 @@ export class WorkError extends Error {
 
 export interface WorkDeps {
   backlog: Backlog;
+  workflow: Workflow;
   turns: Turns;
   git: Git;
   publisher: Publisher;
@@ -76,7 +108,7 @@ export function lastAssistantText(entry: TurnEntry | null): string {
   return capBytes(text.trim(), RESULT_LIMITS.summaryBytes);
 }
 
-function describeChanges(item: WorkItem): string {
+function describeChanges(item: WorkItem | ItemRecord): string {
   const r = item.result;
   if (!r) return 'no result';
   const commits = `${r.commits.length} commit${r.commits.length === 1 ? '' : 's'}`;
@@ -88,6 +120,17 @@ function oneLine(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
+
+function by(who: Actor | 'pipeline'): JournalActor {
+  return who === 'pipeline' ? PIPELINE : actor(who);
+}
+
+/** The issue rule counts a ticket as open until it is accepted, merged or cancelled (a failed one can be retried). */
+export function closedForIssue(item: Pick<ItemRecord, 'status' | 'outcome'>): boolean {
+  return item.status === 'done' && item.outcome !== 'failed';
+}
+
+type ResultOf = NonNullable<ItemRecord['result']>;
 
 export class Work {
   private readonly now: () => number;
@@ -175,20 +218,76 @@ export class Work {
     return `${itemLabel(item)} "${item.title}"`;
   }
 
+  private phrase(item: ItemRecord): string {
+    return ticketPhrase({ status: item.status, outcome: item.outcome });
+  }
+
+  /** The ticket's implement step that is not done, if any. */
+  activeStep(item: ItemRecord): Step | null {
+    return this.deps.workflow.activeImplement(item.id);
+  }
+
+  /** True while the ticket's implement step holds a slot (running, or waiting on its worker's question). */
+  isRunning(item: ItemRecord): boolean {
+    const step = this.activeStep(item);
+    return !!step && stepHoldsSlot(step);
+  }
+
+  /** True when the journal already holds a merge of this pull request. */
+  mergeRecorded(repo: string, number: number): boolean {
+    return this.deps.workflow.mergeRecorded(repo, number);
+  }
+
+  private begin(op: string): Tx {
+    this.journalOpen();
+    return this.deps.workflow.begin(op);
+  }
+
+  /** A failing journal (6.6) refuses a change before any of its effects, the ones outside the journal included. */
+  private journalOpen(): void {
+    if (this.deps.workflow.failing()) throw new JournalError('not-ready', 'The delivery journal is failing; see the environment log.');
+  }
+
+  /** Commit a transaction; a refused transition surfaces as `invalid-state`. */
+  private commit(tx: Tx): void {
+    this.deps.workflow.commit(tx);
+  }
+
   private guard<T>(fn: () => T): T {
     try {
       return fn();
     } catch (err) {
-      if (err instanceof ItemStateError) throw new WorkError('invalid-state', err.message);
+      if (err instanceof ItemStateError || err instanceof StepStateError) throw new WorkError('invalid-state', err.message);
       throw err;
     }
   }
 
   /* ---------- Backlog operations ---------- */
 
+  /** The related references a list of links adds (each one validated). */
+  private linksFrom(links: readonly string[], existing: Reference[]): Reference[] {
+    const out: Reference[] = [];
+    for (const text of links) {
+      const parsed = parseReference(text);
+      if (!parsed || parsed.kind === 'ticket') throw new WorkError('invalid-args', `Puck cannot read "${oneLine(text, 80)}" as a GitHub issue, pull request or https URL.`);
+      if ([...existing, ...out].some((r) => r.role === 'related' && sameTarget(r, parsed))) continue;
+      if (!hasRoom({ references: [...existing, ...out] }, 'related')) throw new WorkError('invalid-args', 'A ticket has at most 20 related links.');
+      out.push({ ...parsed, id: newId('ref', this.now()), role: 'related' } as Reference);
+    }
+    return out;
+  }
+
   create(
-    init: { title: string; body?: string; agent?: string | null; repo?: string | null; position?: ItemPosition; source?: IssueSource | null },
-    actor: Actor,
+    init: {
+      title: string;
+      body?: string;
+      agent?: string | null;
+      repo?: string | null;
+      position?: ItemPosition;
+      source?: Omit<GithubIssueReference, 'id' | 'role'> | null;
+      links?: string[];
+    },
+    who: Actor,
     opts: { silent?: boolean } = {},
   ): ItemRecord {
     const def = this.def();
@@ -196,33 +295,42 @@ export class Work {
     const repo = init.repo ?? null;
     if (agent) this.checkAgent(def, agent);
     this.checkRepo(def, repo, agent);
-    const source = init.source ?? null;
-    if (source) {
-      // One open item per issue.
-      const open = this.deps.backlog.byIssue(source.repo, source.number).find((i) => i.status !== 'done' && i.status !== 'cancelled');
-      if (open) throw new WorkError('invalid-state', `Issue ${source.repo}#${source.number} is already ${itemLabel(open)} (${open.status}).`);
+    const references: Reference[] = [];
+    if (init.source) {
+      // One open ticket per issue.
+      const open = this.deps.backlog.byIssue(init.source.repo, init.source.number).find((i) => !closedForIssue(i));
+      if (open) throw new WorkError('invalid-state', `Issue ${init.source.repo}#${init.source.number} is already ${itemLabel(open)} (${this.phrase(open)}).`);
+      references.push({ ...init.source, id: newId('ref', this.now()), role: 'source' });
     }
-    const item = this.guard(() =>
-      this.deps.backlog.create({
+    references.push(...this.linksFrom(init.links ?? [], references));
+    const item = this.guard(() => {
+      const tx = this.begin('item.create');
+      const made = this.deps.backlog.create(tx, {
         title: init.title.trim(),
         body: init.body ?? '',
         agent,
         repo,
-        createdBy: actor,
+        createdBy: who,
         position: init.position,
-        source,
-      }),
-    );
-    if (actor === 'user' && !opts.silent) {
+        references,
+      });
+      if (agent) {
+        openFirstRound(tx, made.id, 'assigned');
+        queueImplement(tx, made.id, 1, { agent, sessionId: null, purpose: 'task' });
+      }
+      this.commit(tx);
+      return this.item(made.id);
+    });
+    if (who === 'user' && !opts.silent) {
       this.deps.notify('item.created', `The user created ${this.label(item)}${agent ? `, assigned to ${agent}` : ' in the backlog'}.`, item.id);
     }
     this.deps.requestTick();
     return item;
   }
 
-  update(ref: string, change: { title?: string; body?: string; repo?: string }, actor: Actor): ItemRecord {
+  update(ref: string, change: { title?: string; body?: string; repo?: string }, who: Actor): ItemRecord {
     const item = this.item(ref);
-    if (holdsSlot(item.status)) throw new WorkError('invalid-state', `${itemLabel(item)} is running; edit it once it stops.`);
+    if (this.isRunning(item)) throw new WorkError('invalid-state', `${itemLabel(item)} is running; edit it once it stops.`);
     const def = this.def();
     if (change.repo !== undefined && change.repo !== item.repo) {
       if (item.worktree) throw new WorkError('invalid-state', `${itemLabel(item)} already has a worktree in ${item.repo ?? 'its repository'}.`);
@@ -232,35 +340,56 @@ export class Work {
     if (change.title !== undefined) patch.title = change.title.trim();
     if (change.body !== undefined) patch.body = change.body;
     if (change.repo !== undefined) patch.repo = change.repo;
-    this.deps.backlog.patch(item, patch);
-    if (actor === 'user') this.deps.notify('item.updated', `The user edited ${this.label(item)}.`, item.id);
+    const tx = this.begin('item.update');
+    ticketPatch(tx, item, patch);
+    this.commit(tx);
+    if (who === 'user') this.deps.notify('item.updated', `The user edited ${this.label(item)}.`, item.id);
     return item;
   }
 
   move(ref: string, position: ItemPosition): string[] {
     const item = this.item(ref);
-    const order = this.guard(() => this.deps.backlog.move(item, position));
+    this.guard(() => {
+      const tx = this.begin('item.move');
+      this.deps.backlog.move(tx, item, position);
+      this.commit(tx);
+    });
     this.deps.requestTick();
-    return order;
+    return this.deps.backlog.order();
   }
 
-  assign(ref: string, agent: string | null, actor: Actor): ItemRecord {
+  /** Assign or unassign a Todo ticket: its queued implement step changes, never its status. */
+  assign(ref: string, agent: string | null, who: Actor): ItemRecord {
     const item = this.item(ref);
     const def = this.def();
-    if (agent === null) {
-      this.guard(() => this.deps.backlog.transition(item, 'unassign', { agent: null }));
-    } else {
-      this.checkAgent(def, agent);
-      this.checkRepo(def, item.repo, agent);
-      if (item.sessionId) {
-        const owner = item.agent ?? this.deps.turns.get(item.sessionId)?.agent ?? null;
-        if (agent !== owner) {
-          throw new WorkError('invalid-state', `${itemLabel(item)} already has a ${owner ?? 'worker'} session; it keeps that agent.`);
+    if (item.status !== 'todo') throw new WorkError('invalid-state', `${itemLabel(item)} is ${this.phrase(item)}; only a ticket in Todo is assigned.`);
+    this.guard(() => {
+      const tx = this.begin('item.assign');
+      const active = activeImplementOf(tx.steps(item.id));
+      if (agent === null) {
+        if (!item.agent && !active) throw new ItemStateError(`${itemLabel(item)} is not assigned.`);
+        if (active) stepMove(tx, item.id, active, 'cancel', 'done', { result: 'cancelled', patch: { detail: 'Unassigned' } });
+        ticketPatch(tx, item, { agent: null });
+      } else {
+        this.checkAgent(def, agent);
+        this.checkRepo(def, item.repo, agent);
+        if (item.sessionId) {
+          const owner = item.agent ?? this.deps.turns.get(item.sessionId)?.agent ?? null;
+          if (agent !== owner) {
+            throw new WorkError('invalid-state', `${itemLabel(item)} already has a ${owner ?? 'worker'} session; it keeps that agent.`);
+          }
         }
+        if (!active || active.agent !== agent) {
+          if (active) stepMove(tx, item.id, active, 'cancel', 'done', { result: 'cancelled', patch: { detail: `Reassigned to ${agent}` } });
+          const round = openRoundOf(tx, item.id) ?? (tx.workflow(item.id)?.rounds.length ? openRound(tx, item.id, 'task', 'assigned') : openFirstRound(tx, item.id, 'assigned'));
+          const previous = roundSteps(tx.steps(item.id), round.round).find((s) => s.kind === 'implement') ?? null;
+          queueImplement(tx, item.id, round.round, { agent, sessionId: item.sessionId, purpose: 'task', retryOf: previous });
+        }
+        ticketPatch(tx, item, { agent });
       }
-      this.guard(() => this.deps.backlog.transition(item, 'assign', { agent }));
-    }
-    if (actor === 'user') {
+      this.commit(tx);
+    });
+    if (who === 'user') {
       this.deps.notify(
         'item.updated',
         agent ? `The user assigned ${this.label(item)} to ${agent}.` : `The user moved ${this.label(item)} back to the backlog.`,
@@ -271,93 +400,225 @@ export class Work {
     return item;
   }
 
-  cancel(ref: string, actor: Actor, reason?: string): ItemRecord {
+  cancel(ref: string, who: Actor, reason?: string): ItemRecord {
     const item = this.item(ref);
-    const held = holdsSlot(item.status);
+    const held = this.isRunning(item);
     const cancelReason = reason?.trim() ? reason.trim() : null;
-    this.guard(() =>
-      this.deps.backlog.transition(item, 'cancel', { pendingAsk: null, requeue: null, ...(cancelReason ? { cancelReason } : {}) }),
-    );
+    this.guard(() => {
+      const tx = this.begin('item.cancel');
+      ticketStatus(tx, item, 'cancel', {
+        change: { ...askFields([]), requeue: null, ...(cancelReason ? { cancelReason } : {}) },
+        by: by(who),
+        reason: cancelReason,
+      });
+      endSteps(tx, item.id, 'cancel');
+      this.commit(tx);
+    });
     if (item.sessionId) {
       this.deps.turns.clearQueue(item.sessionId);
       this.deps.turns.interrupt(item.sessionId, 'user');
     }
-    if (actor === 'user') this.deps.notify('item.updated', `The user cancelled ${this.label(item)}.`, item.id);
-    this.deps.log.info('item.cancel', { itemId: item.id, actor });
+    if (who === 'user') this.deps.notify('item.updated', `The user cancelled ${this.label(item)}.`, item.id);
+    this.deps.log.info('item.cancel', { itemId: item.id, actor: who });
     if (held) this.deps.slotsChanged();
     return item;
   }
 
-  retry(ref: string): ItemRecord {
+  /**
+   * A failed or cancelled ticket again: a new round with a queued implement
+   * step. A ticket that had started keeps its session and worktree and goes
+   * back to In progress; one that never started goes back to Todo.
+   */
+  retry(ref: string, who: Actor = 'user'): ItemRecord {
     const item = this.item(ref);
-    // An item unassigned before it was cancelled keeps its session but no
+    // A ticket unassigned before it was cancelled keeps its session but no
     // agent; the session's owner takes it back so the scheduler can dispatch
     // it (an owner no longer assigned in the definition just waits there).
     const agent = item.agent ?? (item.sessionId ? (this.deps.turns.get(item.sessionId)?.agent ?? null) : null);
-    this.guard(() => this.deps.backlog.transition(item, 'retry', { attempts: 0, agent, requeue: item.sessionId ? 'retry' : null }));
+    this.guard(() => {
+      const tx = this.begin('item.retry');
+      const started = everStarted(item, tx.steps(item.id));
+      ticketStatus(tx, item, 'retry', {
+        change: { attempts: 0, agent, requeue: item.sessionId ? 'retry' : null, ...askFields([]) },
+        by: by(who),
+        started,
+      });
+      if (agent) {
+        const round = tx.workflow(item.id)?.rounds.length ? openRound(tx, item.id, 'task', 'retry') : openFirstRound(tx, item.id, 'retry');
+        queueImplement(tx, item.id, round.round, { agent, sessionId: item.sessionId, purpose: 'task' });
+      }
+      this.commit(tx);
+    });
     this.deps.requestTick();
     return item;
   }
 
-  accept(ref: string, note?: string): ItemRecord {
+  /** Accept a ticket as finished: Done (accepted). Without delivery it needs no reason. */
+  accept(ref: string, note?: string, who: Actor = 'user', reason?: string): ItemRecord {
     const item = this.item(ref);
     const acceptNote = note?.trim() ? note.trim() : null;
-    const held = holdsSlot(item.status);
+    const held = this.isRunning(item);
     const sessionId = item.sessionId;
-    const stop = !!sessionId && (item.status === 'queued' || held);
-    const updated = this.guard(() =>
-      this.deps.backlog.transition(item, 'accept', {
-        lastError: null,
-        requeue: null,
-        pendingAsk: null,
-        ...(acceptNote ? { acceptNote } : {}),
-      }),
-    );
+    const stop = !!sessionId && !!this.activeStep(item);
+    this.guard(() => {
+      const tx = this.begin('item.accept');
+      ticketStatus(tx, item, 'accept', {
+        change: { lastError: null, requeue: null, ...askFields([]), ...(acceptNote ? { acceptNote } : {}) },
+        by: by(who),
+        reason: reason?.trim() || null,
+      });
+      endSteps(tx, item.id, 'accept');
+      this.commit(tx);
+    });
     if (stop && sessionId) {
       this.deps.turns.clearQueue(sessionId);
       this.deps.turns.interrupt(sessionId, 'user');
     }
     if (held) this.deps.slotsChanged();
-    return updated;
+    return item;
   }
 
   /**
-   * A follow-up for an item's worker. In review it queues the item again
-   * (the text waits in the worker's session until a slot is free); while it
-   * waits or runs the text joins the session's queue.
+   * GitHub reports the ticket's delivery pull request merged and the journal
+   * has no merge of it yet: journal `merge.observed` and move the ticket to
+   * Done (merged) from any status the ticket table allows, in one
+   * transaction. A ticket already done (merged) keeps its status, steps and
+   * closedAt. The delivery reference is rewritten only when its state is not
+   * merged or its merge commit differs; a missing stored sha and a null
+   * observed sha are the same, so a poll with no sha stamps nothing.
+   * Returns false when the merge was already recorded.
+   */
+  merged(ref: string, observed: MergeObserved, note: string): boolean {
+    const item = this.item(ref);
+    if (this.mergeRecorded(observed.repo, observed.prNumber)) return false;
+    const held = this.isRunning(item);
+    const sessionId = item.sessionId;
+    const stop = !!sessionId && !!this.activeStep(item);
+    this.guard(() => {
+      const tx = this.begin('merge.observed');
+      tx.push({ kind: 'merge.observed', ...observed });
+      const pr = deliveryPull(item);
+      const observedSha = observed.mergeCommitSha ?? null;
+      const sameCommit = pr?.state === 'merged' && (pr.mergeCommitSha ?? null) === observedSha;
+      if (pr && pr.number === observed.prNumber && !sameCommit) {
+        this.deps.backlog.reference(tx, item, 'update', { ...pr, state: 'merged', mergeCommitSha: observedSha });
+      }
+      if (allows({ status: item.status, outcome: item.outcome }, 'merged')) {
+        ticketStatus(tx, item, 'merged', {
+          change: { lastError: null, requeue: null, ...askFields([]), ...(item.status === 'done' ? {} : { acceptNote: note }) },
+          by: PIPELINE,
+          reason: note,
+        });
+        endSteps(tx, item.id, 'merged');
+      }
+      this.commit(tx);
+    });
+    if (stop && sessionId) {
+      this.deps.turns.clearQueue(sessionId);
+      this.deps.turns.interrupt(sessionId, 'user');
+    }
+    if (held) this.deps.slotsChanged();
+    this.deps.log.info('item.merged', { itemId: item.id, prNumber: observed.prNumber, initiatedBy: observed.initiatedBy });
+    return true;
+  }
+
+  /**
+   * A message for a ticket's worker. While its implement step waits or
+   * runs, the text joins the session's queue. Once the step is done and
+   * the merge step waits, it opens a `changes` round (7.6: unlimited
+   * without delivery) whose implement step continues the same session.
    */
   followUp(ref: string, text: string, author: EntryAuthor): Promise<{ queued: boolean; turnId?: string }> {
     const item = this.item(ref);
     return this.exclusive(item.id, () => {
       if (!item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has not started yet.`);
-      if (item.status === 'review') {
-        // The text is stored first; it waits in the session until a slot is free.
-        const sent = this.deps.turns.send(item.sessionId, text, author);
-        this.guard(() => this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' }));
-        this.deps.requestTick();
-        return sent;
+      const sessionId = item.sessionId;
+      const active = this.activeStep(item);
+      if (active) {
+        const tx = this.begin('item.follow-up');
+        tx.push({ kind: 'step.input', itemId: item.id, stepId: active.id, sessionId, author, text, attachment: null });
+        this.commit(tx);
+        return this.deps.turns.send(sessionId, text, author);
       }
-      if (item.status === 'queued' || holdsSlot(item.status)) return this.deps.turns.send(item.sessionId, text, author);
-      throw new WorkError('invalid-state', `${itemLabel(item)} is ${item.status}; retry it or create a new item instead.`);
+      if (item.status !== 'in-progress') {
+        throw new WorkError('invalid-state', `${itemLabel(item)} is ${this.phrase(item)}; retry it or create a new item instead.`);
+      }
+      this.guard(() => {
+        const tx = this.begin('item.follow-up');
+        const round = openRound(tx, item.id, 'changes', `A message from the ${author}`);
+        const agent = item.agent ?? this.deps.turns.get(sessionId)?.agent ?? null;
+        const step = queueImplement(tx, item.id, round.round, { agent, sessionId, purpose: 'changes' });
+        ticketPatch(tx, item, { requeue: 'follow-up', agent });
+        tx.push({ kind: 'step.input', itemId: item.id, stepId: step.id, sessionId, author, text, attachment: null });
+        this.commit(tx);
+      });
+      // The text is journaled first; it waits in the session until a slot is free.
+      const sent = this.deps.turns.send(sessionId, text, author);
+      this.deps.requestTick();
+      return sent;
     });
   }
 
-  /** Push the item's branch and open or update its pull request. Status does not change. */
-  async publish(ref: string, req: PublishRequest, actor: Actor): Promise<{ prUrl: string }> {
+  /** Add a `related` link (4.6). A link the ticket already has adds nothing. */
+  link(ref: string, text: string): ItemRecord {
+    const item = this.item(ref);
+    const [added] = this.linksFrom([text], item.references);
+    if (added) {
+      const tx = this.begin('item.link');
+      this.deps.backlog.reference(tx, item, 'add', added);
+      this.commit(tx);
+    }
+    return item;
+  }
+
+  /** A synced reference changed on GitHub (the source issue's `updated_at`, the pull request's state and CI). */
+  updateReference(ref: string, reference: Reference): void {
+    const item = this.item(ref);
+    if (!item.references.some((r) => r.id === reference.id)) return;
+    const tx = this.begin('item.reference');
+    this.deps.backlog.reference(tx, item, 'update', reference);
+    this.commit(tx);
+  }
+
+  /** Remove a `related` link; the synced ones are not the user's to remove. */
+  unlink(ref: string, referenceId: string): ItemRecord {
+    const item = this.item(ref);
+    const found = item.references.find((r) => r.id === referenceId);
+    if (!found) throw new WorkError('not-found', `${itemLabel(item)} has no link ${referenceId}.`);
+    if (found.role !== 'related') throw new WorkError('invalid-state', `${referenceLabel(found)} is ${itemLabel(item)}'s ${found.role} link; only related links are removed by hand.`);
+    const tx = this.begin('item.unlink');
+    this.deps.backlog.reference(tx, item, 'remove', found);
+    this.commit(tx);
+    return item;
+  }
+
+  /** Push the ticket's branch and open or update its pull request. Status does not change. */
+  async publish(ref: string, req: PublishRequest, who: Actor): Promise<{ prUrl: string }> {
     const item = this.item(ref);
     return this.exclusive(item.id, async () => {
       if (!this.deps.backlog.get(item.id)) throw new WorkError('not-found', `No work item ${ref}.`);
-      if (actor === 'orchestrator' && this.def().policies.publish !== 'orchestrator') {
+      if (who === 'orchestrator' && this.def().policies.publish !== 'orchestrator') {
         throw new WorkError('invalid-state', 'Publishing is manual in this environment: the user publishes from the work view.');
+      }
+      if (item.status === 'todo' || (item.status === 'in-progress' && this.activeStep(item))) {
+        throw new WorkError('invalid-state', `${itemLabel(item)} is ${this.phrase(item)}; publish it once its worker finishes.`);
       }
       let published;
       try {
-        published = await this.deps.publisher.publish(item, req, (sha) => this.deps.backlog.patch(item, { pushedSha: sha }));
+        published = await this.deps.publisher.publish(item, req, (sha) => {
+          const tx = this.begin('item.pushed');
+          ticketPatch(tx, item, { pushedSha: sha });
+          this.commit(tx);
+        });
       } catch (err) {
         if (err instanceof PublishError || err instanceof GitError) throw new WorkError('invalid-state', err.message);
         throw err;
       }
-      this.deps.backlog.patch(item, { pr: published.pr });
+      const previous = deliveryPull(item);
+      const reference: GithubPullReference = { ...published.pr, id: previous?.id ?? newId('ref', this.now()), role: 'delivery', kind: 'github-pr' };
+      const tx = this.begin('item.publish');
+      this.deps.backlog.reference(tx, item, previous ? 'update' : 'add', reference);
+      this.commit(tx);
       this.deps.notify(
         'pr.published',
         `${this.label(item)} was published: ${published.created ? 'opened' : 'updated'} ${published.pr.draft ? 'draft ' : ''}pull request ${published.pr.url}${published.link ? ` (${published.link})` : ''}`,
@@ -370,13 +631,21 @@ export class Work {
     });
   }
 
-  /** Delete an item. Its worktree goes; its branch stays. */
+  /** Delete a ticket (Todo or Done). Its worktree goes; its branch and its journal record stay. */
   async remove(ref: string): Promise<void> {
     const item = this.item(ref);
     const def = this.deps.definition();
     await this.exclusive(item.id, async () => {
       if (!this.deps.backlog.get(item.id)) return;
-      this.guard(() => this.deps.backlog.transition(item, 'delete'));
+      this.guard(() => {
+        if (!allows({ status: item.status, outcome: item.outcome }, 'delete')) {
+          throw new ItemStateError(`Cannot delete a ticket that is ${this.phrase(item)}.`);
+        }
+        const tx = this.begin('item.delete');
+        endSteps(tx, item.id, 'cancel');
+        this.deps.backlog.remove(tx, item);
+        this.commit(tx);
+      });
       if (item.sessionId) this.deps.turns.close(item.sessionId);
       if (item.worktree && def) {
         const repo = def.repos.find((r) => r.dir === item.repo);
@@ -392,25 +661,45 @@ export class Work {
 
   /* ---------- Dispatch ---------- */
 
+  private findStep(stepId: string): { item: ItemRecord; step: Step } | null {
+    for (const item of this.deps.backlog.list()) {
+      const step = this.activeStep(item);
+      if (step?.id === stepId) return { item, step };
+    }
+    return null;
+  }
+
+  private stepRunning(item: ItemRecord, stepId: string): boolean {
+    return this.deps.workflow.step(item.id, stepId)?.state === 'running';
+  }
+
   /**
-   * Start a queued item: it takes a slot now (synchronously, so the
-   * scheduler's count holds), then its worktree and session are prepared
-   * and its input starts.
+   * Start a queued implement step: it takes a slot now (synchronously, so
+   * the scheduler's count holds, and a Todo ticket moves to In progress in
+   * the same transaction), then its worktree and session are prepared and
+   * its input starts.
    */
-  dispatch(itemId: string): void {
-    const item = this.deps.backlog.get(itemId);
-    if (!item || item.status !== 'queued') return;
+  dispatch(stepId: string): void {
+    const found = this.findStep(stepId);
+    if (!found) return;
+    const { item, step } = found;
+    if (step.kind !== 'implement' || step.state !== 'queued') return;
     if (this.busy(item.id)) return;
     const reason = item.requeue;
     const attempts = reason === 'restart' ? item.attempts : reason === 'follow-up' || reason === 'retry' ? 1 : item.attempts + 1;
-    this.deps.backlog.transition(item, 'dispatch', { attempts, requeue: null, pendingAsk: null });
-    this.deps.log.info('item.dispatch', { itemId: item.id, agent: item.agent, attempts, reason });
+    const tx = this.begin('step.start');
+    const change = { attempts, requeue: null, ...askFields([]), agent: step.agent ?? item.agent };
+    if (item.status === 'todo') ticketStatus(tx, item, 'start', { change, by: PIPELINE });
+    else ticketPatch(tx, item, change);
+    stepMove(tx, item.id, step, 'start', 'running');
+    this.commit(tx);
+    this.deps.log.info('item.dispatch', { itemId: item.id, stepId, agent: step.agent, attempts, reason });
     this.deps.slotsChanged();
-    const job = this.exclusive(item.id, () => this.prepare(item, reason));
-    void this.trackPrepare(job).catch((err: unknown) => this.dispatchFailed(item, err));
+    const job = this.exclusive(item.id, () => this.prepare(item, stepId, reason));
+    void this.trackPrepare(job).catch((err: unknown) => this.dispatchFailed(item, stepId, err));
   }
 
-  private async prepare(item: ItemRecord, reason: ItemRecord['requeue']): Promise<void> {
+  private async prepare(item: ItemRecord, stepId: string, reason: ItemRecord['requeue']): Promise<void> {
     const def = this.def();
     if (!item.sessionId) {
       const repo = this.repoOf(def, item);
@@ -428,36 +717,46 @@ export class Work {
           const sha = await git.addWorktree(repo.dir, worktree, branch, baseBranch);
           return { branch: baseBranch, sha };
         });
-        if (item.status !== 'running') return; // cancelled while preparing; finally drops the unrecorded worktree
+        if (!this.stepRunning(item, stepId)) return; // cancelled while preparing; finally drops the unrecorded worktree
         const issue = this.deps.issueContext ? await this.deps.issueContext(item) : null;
-        if (item.status !== 'running') return;
-        const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id });
-        this.deps.backlog.patch(item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
-        this.deps.turns.send(
-          session.id,
-          workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base, issue }),
-          'system',
-        );
+        const step = this.deps.workflow.step(item.id, stepId);
+        if (!step || step.state !== 'running') return;
+        const session = this.deps.turns.create({ kind: 'worker', agent: agent.name, harness: agent.harness, cwd: worktree, itemId: item.id, stepId });
+        const prompt = workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: worktree, branch, base, issue });
+        const tx = this.begin('step.session');
+        ticketPatch(tx, item, { repo: repo.dir, branch, worktree, base, sessionId: session.id });
+        stepUpdate(tx, item.id, step, { sessionId: session.id });
+        tx.push({ kind: 'step.input', itemId: item.id, stepId, sessionId: session.id, author: 'system', text: prompt, attachment: null });
+        this.commit(tx);
+        this.deps.turns.send(session.id, prompt, 'system');
       } finally {
         if (!item.worktree) await this.dropUnrecordedWorktree(item, repo.dir, worktree);
       }
       return;
     }
     // Later dispatches reuse the worktree and the session.
-    if (item.status !== 'running') return;
-    const session = this.deps.turns.get(item.sessionId);
-    if (session && session.turns === 0 && this.deps.turns.queueLength(item.sessionId) === 0) {
+    const step = this.deps.workflow.step(item.id, stepId);
+    if (!step || step.state !== 'running') return;
+    const sessionId = item.sessionId;
+    this.deps.turns.bindStep(sessionId, stepId);
+    if (step.sessionId !== sessionId) {
+      const tx = this.begin('step.session');
+      stepUpdate(tx, item.id, step, { sessionId });
+      this.commit(tx);
+    }
+    const session = this.deps.turns.get(sessionId);
+    if (session && session.turns === 0 && this.deps.turns.queueLength(sessionId) === 0) {
       // A session that started no turn and has nothing queued never saw the
       // item, e.g. a shutdown or upgrade caught the first prepare between
       // creating the session and queueing its prompt.
       const repo = this.repoOf(def, item);
       if (!item.worktree || !item.branch || !item.base) throw new Error(`${itemLabel(item)} has a worker session but no worktree.`);
       this.deps.turns.send(
-        item.sessionId,
+        sessionId,
         workerPrompt({ number: item.number, title: item.title, body: item.body, github: repo.github, cwd: item.worktree, branch: item.branch, base: item.base }),
         'system',
       );
-    } else if (this.deps.turns.queueLength(item.sessionId) === 0) {
+    } else if (this.deps.turns.queueLength(sessionId) === 0) {
       const why =
         reason === 'restart'
           ? RESTART_REASON
@@ -466,9 +765,9 @@ export class Work {
               ? `it failed: ${oneLine(item.lastError, 300)}`
               : 'it was cancelled'
             : oneLine(item.lastError ?? 'an error', 300);
-      this.deps.turns.send(item.sessionId, continuePrompt(item.number, why), 'system');
+      this.deps.turns.send(sessionId, continuePrompt(item.number, why), 'system');
     } else {
-      this.deps.turns.kick(item.sessionId);
+      this.deps.turns.kick(sessionId);
     }
   }
 
@@ -479,27 +778,37 @@ export class Work {
   }
 
   /** Preparing a dispatch failed: count it like a failed turn. */
-  private dispatchFailed(item: ItemRecord, err: unknown): void {
+  private dispatchFailed(item: ItemRecord, stepId: string, err: unknown): void {
     const message = oneLine(err instanceof Error ? err.message : String(err), 500);
     this.deps.log.error('item.dispatch-failed', err, { itemId: item.id });
-    if (item.status !== 'running') return;
-    // Shutting down: the item stays running on disk and boot requeues it.
+    const step = this.deps.workflow.step(item.id, stepId);
+    if (!step || step.state !== 'running') return;
+    // Shutting down: the step stays running on disk and boot requeues it.
     if (err instanceof TurnsError && err.code === 'not-ready') return;
-    this.failAttempt(item, message);
+    if (err instanceof JournalError) return;
+    this.failAttempt(item, step, message);
     this.deps.slotsChanged();
   }
 
-  private failAttempt(item: ItemRecord, message: string): void {
+  private failAttempt(item: ItemRecord, step: Step, message: string, tx: Tx = this.begin('step.error')): void {
     const max = this.deps.definition()?.limits.maxAttempts ?? 1;
-    if (item.attempts >= max) {
-      this.deps.backlog.transition(item, 'error-final', { lastError: message, pendingAsk: null });
+    const final = item.attempts >= max;
+    if (final) {
+      stepMove(tx, item.id, step, 'error-final', 'done', { result: 'failed', patch: { detail: oneLine(message, 150) } });
+      ticketStatus(tx, item, 'fail', { change: { lastError: message, ...askFields([]) }, by: PIPELINE, reason: message });
+      endSteps(tx, item.id, 'fail');
+    } else {
+      stepMove(tx, item.id, step, 'error', 'queued');
+      ticketPatch(tx, item, { lastError: message, ...askFields([]), requeue: 'error' });
+    }
+    this.commit(tx);
+    if (final) {
       this.deps.notify(
         'item.failed',
         `${this.label(item)} (${item.agent ?? 'unassigned'}) failed after ${item.attempts} attempt${item.attempts === 1 ? '' : 's'}: ${oneLine(message, 400)}`,
         item.id,
       );
     } else {
-      this.deps.backlog.transition(item, 'error', { lastError: message, pendingAsk: null, requeue: 'error' });
       this.deps.notify(
         'item.requeued',
         `${this.label(item)} (${item.agent ?? 'unassigned'}) was requeued after attempt ${item.attempts} of ${max}: ${oneLine(message, 400)}`,
@@ -510,28 +819,41 @@ export class Work {
 
   /* ---------- Turn ends ---------- */
 
-  /** Worker sessions start only while their item holds a slot and no reprovision is in progress. */
+  /** Worker sessions start only while their implement step holds a slot and no reprovision is in progress. */
   canStart(session: SessionRecord): boolean {
     if (session.kind !== 'worker') return true;
     if (this.deps.reprovisioning()) return false;
     const item = session.itemId ? this.deps.backlog.get(session.itemId) : null;
-    return !!item && holdsSlot(item.status) && item.sessionId === session.id;
+    if (!item || item.sessionId !== session.id) return false;
+    const step = this.activeStep(item);
+    return !!step && stepHoldsSlot(step) && step.sessionId === session.id;
   }
 
   async workerTurnEnded(session: SessionRecord, outcome: TurnOutcome): Promise<void> {
     const item = session.itemId ? this.deps.backlog.get(session.itemId) : null;
     if (!item || item.sessionId !== session.id) return;
-    // Shutdown or upgrade: the item stays running on disk; boot requeues it.
+    // Shutdown or upgrade: the step stays running on disk; boot requeues it.
     if (outcome.interrupted === 'restart') return;
-    if (!holdsSlot(item.status)) return; // cancelled meanwhile
+    if (!this.isRunning(item)) return; // cancelled meanwhile
     const result = await this.capture(item, outcome);
-    if (!holdsSlot(item.status)) return;
+    const step = this.activeStep(item);
+    if (!step || !stepHoldsSlot(step)) return;
+    const work = { head: result.head, commits: result.commits.length, summary: capBytes(result.summary, 2048) };
+    const queued = this.deps.turns.queueLength(session.id) > 0;
+    const tx = this.begin('step.end');
     if (outcome.interrupted === 'user') {
-      this.deps.backlog.transition(item, 'interrupt', { result: { ...result, interrupted: true }, pendingAsk: null });
-      if (this.deps.turns.queueLength(session.id) > 0) {
-        // A follow-up already queued runs next, the same as one sent in review.
-        this.deps.backlog.transition(item, 'follow-up', { requeue: 'follow-up' });
+      stepMove(tx, item.id, step, 'cancel', 'done', { result: 'cancelled', patch: { detail: 'Stopped by the user', work } });
+      ticketPatch(tx, item, { result: { ...result, interrupted: true }, ...askFields([]) });
+      if (queued) {
+        // A follow-up already queued runs next, the same as one sent after the stop.
+        const round = openRound(tx, item.id, 'changes', 'A message queued before the stop');
+        queueImplement(tx, item.id, round.round, { agent: step.agent, sessionId: session.id, purpose: 'changes' });
+        ticketPatch(tx, item, { requeue: 'follow-up' });
       } else {
+        addManualMerge(tx, item.id, step.round);
+      }
+      this.commit(tx);
+      if (!queued) {
         this.deps.notify(
           'item.review',
           `${this.label(item)} (${item.agent ?? ''}) was interrupted by the user and is ready for review: ${describeChanges(item)}.`,
@@ -539,29 +861,34 @@ export class Work {
         );
       }
     } else if (outcome.error) {
-      this.deps.backlog.patch(item, { result });
-      this.failAttempt(item, outcome.error);
-    } else if (this.deps.turns.queueLength(session.id) > 0) {
+      ticketPatch(tx, item, { result });
+      this.failAttempt(item, step, outcome.error, tx);
+    } else if (queued) {
       // A follow-up arrived during the turn: it runs next, in the same slot.
-      this.deps.backlog.patch(item, { result });
+      ticketPatch(tx, item, { result });
+      this.commit(tx);
       return;
     } else {
-      this.deps.backlog.transition(item, 'finish', { result, lastError: null, pendingAsk: null });
+      stepMove(tx, item.id, step, 'finish', 'done', { result: 'passed', patch: { work } });
+      ticketPatch(tx, item, { result, lastError: null, ...askFields([]) });
+      addManualMerge(tx, item.id, step.round);
+      this.commit(tx);
       const summary = result.summary ? ` Summary: ${oneLine(result.summary, 600)}` : '';
       this.deps.notify('item.review', `${this.label(item)} (${item.agent ?? ''}) is ready for review: ${describeChanges(item)}.${summary}`, item.id);
     }
     this.deps.slotsChanged();
   }
 
-  private async capture(item: ItemRecord, outcome: TurnOutcome): Promise<NonNullable<WorkItem['result']>> {
+  private async capture(item: ItemRecord, outcome: TurnOutcome): Promise<ResultOf> {
     const summary = lastAssistantText(outcome.entry);
-    const empty = {
+    const empty: ResultOf = {
       summary,
       commits: [],
       diffStat: { files: 0, insertions: 0, deletions: 0, text: '' },
       uncommitted: [],
       interrupted: false,
       endedAt: this.now(),
+      head: '',
     };
     const def = this.deps.definition();
     if (!item.worktree || !item.base || !def) return empty;
@@ -571,7 +898,7 @@ export class Work {
     const baseSha = item.base.sha;
     try {
       const captured = await this.deps.git.serial(repo.dir, () => this.deps.git.capture(worktree, baseSha));
-      return { ...empty, commits: captured.commits, diffStat: captured.diffStat, uncommitted: captured.uncommitted };
+      return { ...empty, commits: captured.commits, diffStat: captured.diffStat, uncommitted: captured.uncommitted, head: captured.head };
     } catch (err) {
       this.deps.log.warn('item.capture-failed', { itemId: item.id, detail: (err as Error).message });
       return item.result ? { ...item.result, summary: summary || item.result.summary, endedAt: this.now() } : empty;
@@ -581,15 +908,19 @@ export class Work {
   /* ---------- Restart ---------- */
 
   /**
-   * Boot: items a restart caught running (or waiting on a question) go back
-   * to `queued` without counting an attempt; their next dispatch resumes
-   * the same session. Returns them.
+   * Boot: implement steps a restart caught running (or waiting on a
+   * question) go back to `queued` without counting an attempt; their next
+   * dispatch resumes the same session. Returns their tickets.
    */
   reconcile(): ItemRecord[] {
     const requeued: ItemRecord[] = [];
     for (const item of this.deps.backlog.list()) {
-      if (!holdsSlot(item.status)) continue;
-      this.deps.backlog.transition(item, 'restart', { requeue: 'restart', pendingAsk: null });
+      const step = this.activeStep(item);
+      if (!step || !stepHoldsSlot(step)) continue;
+      const tx = this.begin('boot.restart');
+      stepMove(tx, item.id, step, 'restart', 'queued');
+      ticketPatch(tx, item, { requeue: 'restart', ...askFields([]) });
+      this.commit(tx);
       requeued.push(item);
     }
     return requeued;
@@ -597,13 +928,19 @@ export class Work {
 
   /* ---------- Worker questions ---------- */
 
-  /** A worker asked: its item waits in needs-input, and the question goes where the policy says. */
+  /** A worker asked: its implement step waits in needs-input, and the question goes where the policy says. */
   routeAsk(session: SessionRecord, askId: string, questions: AskQuestion[]): 'user' | 'orchestrator' {
     if (session.kind !== 'worker') return 'user';
     const item = session.itemId ? this.deps.backlog.get(session.itemId) : null;
-    if (!item || item.status !== 'running') return 'user';
+    const step = item ? this.activeStep(item) : null;
+    if (!item || !step || (step.state !== 'running' && step.state !== 'needs-input')) return 'user';
     const routedTo = this.deps.definition()?.policies.asks === 'user' ? 'user' : 'orchestrator';
-    this.deps.backlog.transition(item, 'ask', { pendingAsk: { askId, routedTo } });
+    const tx = this.begin('step.ask');
+    const round = tx.workflow(item.id)?.rounds.find((r) => r.round === step.round);
+    if (step.state === 'running') stepMove(tx, item.id, step, 'ask', 'needs-input');
+    const ask: TicketAsk = { askId, kind: 'question', roundId: round?.roundId ?? '', stepId: step.id, routedTo, since: tx.at };
+    ticketPatch(tx, item, askFields([...item.asks, ask]));
+    this.commit(tx);
     if (routedTo === 'orchestrator') {
       const asked = questions
         .map((q) => {
@@ -622,33 +959,47 @@ export class Work {
 
   askClosed(session: SessionRecord, askId: string): void {
     const item = session.itemId ? this.deps.backlog.get(session.itemId) : null;
-    if (!item || item.pendingAsk?.askId !== askId || item.status !== 'needs-input') return;
-    this.deps.backlog.transition(item, 'answer', { pendingAsk: null });
+    if (!item || !item.asks.some((a) => a.askId === askId)) return;
+    const asks = item.asks.filter((a) => a.askId !== askId);
+    const tx = this.begin('step.answer');
+    const step = activeImplementOf(tx.steps(item.id));
+    if (step?.state === 'needs-input' && !asks.some((a) => a.stepId === step.id)) stepMove(tx, item.id, step, 'answer', 'running');
+    ticketPatch(tx, item, askFields(asks));
+    this.commit(tx);
+  }
+
+  private oldestQuestion(item: ItemRecord, routedTo?: 'user' | 'orchestrator'): TicketAsk | null {
+    return item.asks.find((a) => a.kind === 'question' && (!routedTo || a.routedTo === routedTo)) ?? null;
   }
 
   answerWorker(ref: string, answers: Record<string, string>): void {
+    this.journalOpen();
     const item = this.item(ref);
-    const ask = item.pendingAsk;
-    if (item.status !== 'needs-input' || !ask || !item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
+    const ask = this.oldestQuestion(item);
+    if (!ask || !item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
     if (!this.deps.turns.answer(item.sessionId, ask.askId, answers, 'orchestrator')) {
       throw new WorkError('invalid-state', `The question from ${itemLabel(item)} is no longer open.`);
     }
   }
 
   escalate(ref: string, note: string): void {
+    this.journalOpen();
     const item = this.item(ref);
-    const ask = item.pendingAsk;
-    if (item.status !== 'needs-input' || !ask) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
+    const ask = this.oldestQuestion(item, 'orchestrator') ?? this.oldestQuestion(item);
+    if (!ask) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
+    // The route is journaled first; the note and the live route follow only once it is recorded.
+    this.routeToUser(item, ask.askId);
     this.deps.turns.annotateAsk(ask.askId, note);
-    this.routeToUser(item);
     this.deps.log.info('item.escalated', { itemId: item.id });
   }
 
-  private routeToUser(item: ItemRecord): void {
-    const ask = item.pendingAsk;
+  private routeToUser(item: ItemRecord, askId: string): void {
+    const ask = item.asks.find((a) => a.askId === askId);
     if (!ask || ask.routedTo === 'user') return;
-    this.deps.turns.routeAsk(ask.askId, 'user');
-    this.deps.backlog.patch(item, { pendingAsk: { askId: ask.askId, routedTo: 'user' } });
+    const tx = this.begin('ask.routed');
+    ticketPatch(tx, item, askFields(item.asks.map((a) => (a.askId === askId ? { ...a, routedTo: 'user' as const } : a))));
+    this.commit(tx);
+    this.deps.turns.routeAsk(askId, 'user');
   }
 
   /**
@@ -659,8 +1010,45 @@ export class Work {
     for (const notice of outcome.notices) {
       if (notice.kind !== 'item.needs-input' || !notice.itemId) continue;
       const item = this.deps.backlog.get(notice.itemId);
-      if (item?.status === 'needs-input' && item.pendingAsk?.routedTo === 'orchestrator') this.routeToUser(item);
+      if (!item) continue;
+      for (const ask of item.asks.filter((a) => a.routedTo === 'orchestrator')) this.routeToUser(item, ask.askId);
     }
+  }
+
+  /* ---------- Boot recovery ---------- */
+
+  /**
+   * Boot, after the journal is rolled forward: every implement step that is
+   * not done gets back any `step.input` its session lacks (a crash between
+   * the journal and the session store). `inputs` are the journaled inputs
+   * per step, oldest first.
+   */
+  requeueInputs(inputs: ReadonlyMap<string, { at: number; sessionId: string; author: EntryAuthor; text: string }[]>): number {
+    let sent = 0;
+    const have = new Map<string, string[]>();
+    for (const item of this.deps.backlog.list()) {
+      for (const step of latestAttempts(this.deps.workflow.steps(item.id))) {
+        if (step.kind !== 'implement' || step.state === 'done') continue;
+        const wanted = inputs.get(step.id) ?? [];
+        for (const input of wanted) {
+          if (!this.deps.turns.get(input.sessionId)) continue;
+          let texts = have.get(input.sessionId);
+          if (!texts) {
+            texts = this.deps.turns.inputTexts(input.sessionId, wanted[0]?.at ?? input.at);
+            have.set(input.sessionId, texts);
+          }
+          const at = texts.indexOf(input.text);
+          if (at >= 0) {
+            texts.splice(at, 1);
+            continue;
+          }
+          this.deps.turns.send(input.sessionId, input.text, input.author);
+          sent += 1;
+          this.deps.log.info('journal.input-requeued', { itemId: item.id, stepId: step.id });
+        }
+      }
+    }
+    return sent;
   }
 
   /* ---------- Reading a worker ---------- */

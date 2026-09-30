@@ -21,7 +21,7 @@
 import type { HarnessEvent, AskQuestion, TurnStats } from './types';
 import type { TranscriptEntry, UserEntry, NoticeEntry } from './transcript';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** The daemon serves PROTOCOL_VERSION and the one before it. */
 export function protocolSupported(version: unknown): boolean {
@@ -35,7 +35,7 @@ export function protocolSupported(version: unknown): boolean {
 
 /** Wire limits and timings shared by both ends. */
 export const WIRE_LIMITS = {
-  /** One frame (one line of UTF-8 JSON). Larger results are paged. */
+  /** One frame (one line of UTF-8 JSON). The frame guard is in `src/daemon/server.ts`. */
   maxFrameBytes: 1024 * 1024,
   /** The client must send `hello` within this long after connecting. */
   helloTimeoutMs: 5_000,
@@ -153,7 +153,102 @@ export interface SessionSummary {
   autoWakePaused?: boolean;
 }
 
-export type ItemStatus = 'backlog' | 'queued' | 'running' | 'needs-input' | 'review' | 'done' | 'failed' | 'cancelled';
+/**
+ * A ticket's place on the board. Todo: no implement step has started. In
+ * progress: a step started and the workflow is not finished. Done: the
+ * workflow finished, and `outcome` says how. `docs/delivery-workflow-spec.md`
+ * (4.1) has the model; `src/harness/item-transitions.ts` the ticket table.
+ */
+export type ItemStatus = 'todo' | 'in-progress' | 'done';
+export type ItemOutcome = 'merged' | 'accepted' | 'failed' | 'cancelled';
+
+/** A ticket's steps, grouped in rounds; the step machine is `src/harness/workflow.ts`. */
+export type StepKind = 'decompose' | 'implement' | 'checks' | 'review' | 'publish' | 'ci' | 'merge';
+export type StepState = 'pending' | 'queued' | 'running' | 'needs-input' | 'waiting' | 'done';
+export type StepResult = 'passed' | 'failed' | 'inconclusive' | 'skipped' | 'cancelled' | 'superseded';
+export type ImplementPurpose = 'task' | 'fix' | 'changes' | 'integrate';
+export type Gate = 'pending' | 'clear' | 'blocked' | 'inconclusive';
+
+export interface Step {
+  /** `stp_<ulid>`. */
+  id: string;
+  kind: StepKind;
+  /** 1-based. */
+  round: number;
+  state: StepState;
+  /** Set exactly when `state` is `done`. */
+  result: StepResult | null;
+  /** Implement and review steps. */
+  agent: string | null;
+  sessionId: string | null;
+  /** Checks, review and ci steps: their review record (a later phase). */
+  reviewId: string | null;
+  /** Implement steps from a plan (a later phase). */
+  task: { id: string; title: string; branch: string | null; worktree: string | null } | null;
+  /** Implement only. */
+  purpose: ImplementPurpose | null;
+  /** Readiness group within the round (`src/harness/workflow.ts`). */
+  group: number;
+  /** A sequential task's predecessor step. */
+  after: string | null;
+  /** Every attempt of one logical step shares it: the first attempt's id. */
+  logicalId: string;
+  attempt: number;
+  /** The attempt this one replaces. */
+  retryOf: string | null;
+  /** Implement: what it produced (summary ≤ 2 KB). */
+  work: { head: string; commits: number; summary: string } | null;
+  queuedAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** ≤ 160 bytes: "Stopped by the user", "waiting for a slot since 14:02". */
+  detail: string;
+  /** Synthesized by the format-2 migration. */
+  legacy?: true;
+}
+
+export interface RoundInfo {
+  round: number;
+  /** `rnd_<ulid>`. */
+  roundId: string;
+  /** Why the round opened. */
+  purpose: ImplementPurpose;
+  /** The commit verified in this round, once its implement steps are done. */
+  headSha: string | null;
+  gate: Gate;
+  /** The gate at settlement; never changes. */
+  settledGate: Gate | null;
+  outcome: 'open' | 'settled' | 'superseded' | 'cancelled';
+  startedAt: number;
+  settledAt: number | null;
+}
+
+/** One step as the card and the ticket summary show it. */
+export interface StepSummary {
+  id: string;
+  kind: StepKind;
+  state: StepState;
+  result: StepResult | null;
+  /** Implement and review steps: the agent name the card row shows. */
+  agent: string | null;
+  /** ≤ 160 bytes. */
+  detail: string;
+}
+
+/** The current round, bounded (at most 6 KiB serialized). */
+export interface WorkflowSummary {
+  round: number;
+  /** 0 when rounds are unlimited (an environment without delivery). */
+  roundsAllowed: number;
+  gate: Gate;
+  headSha: string | null;
+  /** The current round only, in step order, the latest attempt of each, at most 24. */
+  steps: StepSummary[];
+  obligations: number;
+  /** Open and needs-evidence findings, any severity. */
+  openFindings: number;
+  policy: { merge: 'auto' | 'ask' | 'manual'; require: 'all-clear' | 'any-clear' | null; panel: string[] };
+}
 
 export interface ItemResult {
   summary: string;
@@ -162,9 +257,11 @@ export interface ItemResult {
   uncommitted: string[];
   interrupted: boolean;
   endedAt: number;
+  /** The captured head of the ticket's branch ('' when it was never captured). */
+  head: string;
 }
 
-/** The GitHub issue a work item came from (intake by label, or an import). */
+/** Protocol 1: the GitHub issue a work item came from (intake by label, or an import). */
 export interface IssueSource {
   kind: 'github-issue';
   /** `owner/name`. */
@@ -224,6 +321,7 @@ export interface PullView {
   reviewRounds: { used: number; max: number };
 }
 
+/** Protocol 1: an item's pull request. */
 export interface PullRequestRef {
   number: number;
   url: string;
@@ -234,12 +332,101 @@ export interface PullRequestRef {
   checks?: PullChecks | null;
 }
 
+export type ReferenceRole = 'source' | 'delivery' | 'related' | 'followup-of' | 'followup';
+
+/**
+ * A ticket's links (`src/harness/references.ts` has the rules and the two
+ * accessors). At most one `source` issue and one `delivery` pull request,
+ * the one Puck pushes, watches and merges; `related` links are display-only.
+ */
+export type Reference =
+  | { id: string; role: 'source' | 'related'; kind: 'github-issue'; repo: string; number: number; url: string; updatedAt: number; title?: string }
+  | {
+      id: string;
+      role: 'delivery' | 'related';
+      kind: 'github-pr';
+      repo: string;
+      number: number;
+      url: string;
+      draft: boolean;
+      lastPushedSha: string;
+      state?: 'open' | 'closed' | 'merged';
+      checks?: PullChecks | null;
+      mergeCommitSha?: string | null;
+    }
+  | { id: string; role: 'followup-of' | 'followup'; kind: 'ticket'; itemId: string; number: number; findingIds: string[] }
+  | { id: string; role: 'related'; kind: 'url'; url: string; label: string | null };
+
+export type GithubPullReference = Extract<Reference, { kind: 'github-pr' }>;
+export type GithubIssueReference = Extract<Reference, { kind: 'github-issue' }>;
+
+/** An open ask of a ticket: a worker's question, or a decision (a later phase). */
+export interface TicketAsk {
+  askId: string;
+  kind: 'question' | 'decision';
+  roundId: string;
+  stepId: string | null;
+  routedTo: 'orchestrator' | 'user';
+  since: number;
+}
+
+/** A work item: a ticket. The protocol keeps the `item.*` op names and this type's name. */
 export interface WorkItem {
   id: string;
   number: number;
   title: string;
   body: string;
   status: ItemStatus;
+  /** The kind of the ticket's current step; null in todo and done. */
+  stage: StepKind | null;
+  /** Set exactly when status is done. */
+  outcome: ItemOutcome | null;
+  /** The ticket's agent: its implement step's, or the one assigned. */
+  agent: string | null;
+  repo: string | null;
+  createdBy: 'user' | 'orchestrator' | 'pipeline';
+  createdAt: number;
+  updatedAt: number;
+  /** When the ticket last entered done. */
+  closedAt: number | null;
+  /** The dispatches of the current request on the ticket branch's lane. */
+  attempts: number;
+  sessionId: string | null;
+  branch: string | null;
+  worktree: string | null;
+  base: { branch: string; sha: string } | null;
+  result: ItemResult | null;
+  /** Replaces protocol 1's `source` and `pr`. */
+  references: Reference[];
+  lastError: string | null;
+  /** Why the item was cancelled, when the canceller gave one. */
+  cancelReason: string | null;
+  /** Note recorded when the item was accepted. */
+  acceptNote: string | null;
+  /** The oldest open ask, whoever it is routed to. */
+  needsInput: TicketAsk | null;
+  /** The oldest ask routed to the user. */
+  oldestUserAsk: Omit<TicketAsk, 'routedTo'> | null;
+  /** Every open ask of the ticket. */
+  openAsks: number;
+  /** Those routed to the user: what the card badge and the Board tab count. */
+  userAsks: number;
+  /** A ticket's own workflow override: a later phase; always null in this version. */
+  delivery: null;
+  /** Null in done, and in todo without steps. */
+  workflow: WorkflowSummary | null;
+}
+
+/** Protocol 1's statuses: what a protocol-1 connection sees. */
+export type ItemStatusV1 = 'backlog' | 'queued' | 'running' | 'needs-input' | 'review' | 'done' | 'failed' | 'cancelled';
+
+/** Protocol 1's work item. */
+export interface WorkItemV1 {
+  id: string;
+  number: number;
+  title: string;
+  body: string;
+  status: ItemStatusV1;
   agent: string | null;
   repo: string | null;
   createdBy: 'user' | 'orchestrator';
@@ -250,14 +437,11 @@ export interface WorkItem {
   branch: string | null;
   worktree: string | null;
   base: { branch: string; sha: string } | null;
-  result: ItemResult | null;
+  result: Omit<ItemResult, 'head'> | null;
   pr: PullRequestRef | null;
-  /** The GitHub issue this item works on, when it came from one. */
   source: IssueSource | null;
   lastError: string | null;
-  /** Why the item was cancelled, when the canceller gave one. */
   cancelReason: string | null;
-  /** Note recorded when the item was accepted. */
   acceptNote: string | null;
   pendingAsk: { askId: string; routedTo: 'orchestrator' | 'user' } | null;
 }
@@ -268,6 +452,8 @@ export interface Capacity {
   agents: Record<string, { running: number; max: number }>;
   workers: { running: number; max: number };
   paused: boolean;
+  /** Checks and review steps holding a slot (a later phase); absent from older daemons. */
+  verifying?: number;
 }
 
 /** A turn still streaming when the snapshot was taken (recorded dialect). */
@@ -287,6 +473,19 @@ export interface OpenAsk {
   note?: string;
 }
 
+/** An open decision's ask (the decision machinery is a later phase; none are open in this version). */
+export interface OpenDecision {
+  itemId: string;
+  askId: string;
+  roundId: string;
+  stepId: string | null;
+  kind: string;
+  routedTo: 'orchestrator' | 'user';
+  question: string;
+  options: { value: string; label: string; needsReason: boolean; override: boolean }[];
+  since: number;
+}
+
 /** Everything a client needs to render an environment, except transcripts. */
 export interface Snapshot {
   envId: string;
@@ -304,15 +503,70 @@ export interface Snapshot {
   capacity: Capacity;
   inflight: InflightTurn[];
   asks: OpenAsk[];
+  decisions: OpenDecision[];
   /** The definition's repositories (`owner/name` and their directory); absent from older daemons. */
   repos?: { github: string; dir: string }[];
+}
+
+/** The collections of a snapshot that grow; protocol 2 sends them in parts (`snapshot.part`). */
+export const SNAPSHOT_COLLECTIONS = ['items', 'order', 'sessions', 'inflight', 'asks', 'decisions'] as const;
+export type SnapshotCollection = (typeof SNAPSHOT_COLLECTIONS)[number];
+
+/** Protocol 2's `snapshot.get`: the bounded fields; the collections follow through `snapshot.part`. */
+export type SnapshotHead = Omit<Snapshot, SnapshotCollection> & { partsCursor: string | null };
+
+/** One part of a frozen snapshot: whole records of one collection, below 512 KiB. */
+export interface SnapshotPart {
+  collection: SnapshotCollection;
+  records: unknown[];
+  partsCursor: string | null;
+}
+
+/** Protocol 1's snapshot, sent whole. */
+export interface SnapshotV1 extends Omit<Snapshot, 'items' | 'decisions'> {
+  items: WorkItemV1[];
+}
+
+/** Paging limits of the growing reads. */
+export const PAGE_LIMITS = {
+  /** One page of any paged op, serialized. */
+  pageBytes: 512 * 1024,
+  /** Steps `item.workflow` returns for its round before the rest go to `item.records`. */
+  workflowSteps: 64,
+  recordsLimit: 100,
+  /** How long a frozen snapshot outlives its last request. */
+  snapshotTtlMs: 120_000,
+} as const;
+
+export type RecordKind = 'rounds' | 'steps' | 'reviews' | 'findings' | 'decisions' | 'trail' | 'audits';
+
+/** A snapshot from its head, before any part has arrived. */
+export function snapshotFromHead(head: SnapshotHead): Snapshot {
+  const { partsCursor: _cursor, ...rest } = head;
+  void _cursor;
+  return { ...rest, items: [], order: [], sessions: [], inflight: [], asks: [], decisions: [] };
+}
+
+/** Add one part's records. An in-flight turn cut across parts continues under the same turnId: its events join. */
+export function addSnapshotPart(snapshot: Snapshot, part: SnapshotPart): void {
+  if (!(SNAPSHOT_COLLECTIONS as readonly string[]).includes(part.collection) || !Array.isArray(part.records)) return;
+  if (part.collection === 'inflight') {
+    for (const record of part.records as InflightTurn[]) {
+      const last = snapshot.inflight[snapshot.inflight.length - 1];
+      if (last && last.turnId === record.turnId && last.sessionId === record.sessionId) last.events.push(...record.events);
+      else snapshot.inflight.push({ ...record, events: [...record.events] });
+    }
+    return;
+  }
+  (snapshot[part.collection] as unknown[]).push(...part.records);
 }
 
 /* ---------- Commands ---------- */
 
 /** Every command: its args and its result. */
 export interface OpMap {
-  'snapshot.get': { args: Record<string, never>; result: Snapshot };
+  /** Protocol 2: the bounded fields and a cursor; the collections follow through `snapshot.part`. */
+  'snapshot.get': { args: Record<string, never>; result: SnapshotHead };
   'session.history': {
     args: { sessionId: string; before?: number; limit?: number };
     /**
@@ -328,8 +582,9 @@ export interface OpMap {
     args: { sessionId: string; askId: string; answers: Record<string, string> | null };
     result: Record<string, never>;
   };
+  'snapshot.part': { args: { cursor: string }; result: SnapshotPart };
   'item.create': {
-    args: { title: string; body?: string; agent?: string; repo?: string; position?: ItemPosition };
+    args: { title: string; body?: string; agent?: string; repo?: string; position?: ItemPosition; links?: string[] };
     result: WorkItem;
   };
   'item.update': { args: { itemId: string; title?: string; body?: string; repo?: string }; result: WorkItem };
@@ -337,7 +592,32 @@ export interface OpMap {
   'item.assign': { args: { itemId: string; agent: string | null }; result: WorkItem };
   'item.cancel': { args: { itemId: string }; result: WorkItem };
   'item.retry': { args: { itemId: string }; result: WorkItem };
-  'item.accept': { args: { itemId: string }; result: WorkItem };
+  'item.accept': { args: { itemId: string; reason?: string }; result: WorkItem };
+  /** Add a `related` link: a GitHub issue or pull request (`owner/name#12`, a github.com URL) or an https URL. */
+  'item.link': { args: { itemId: string; ref: string }; result: WorkItem };
+  /** Remove a `related` link. */
+  'item.unlink': { args: { itemId: string; referenceId: string }; result: WorkItem };
+  /** One round of a ticket's workflow (the newest by default), with the latest attempt of each step. */
+  'item.workflow': {
+    args: { itemId: string; round?: number };
+    result: {
+      roundsTotal: number;
+      /** Null for a ticket without a workflow. */
+      round: RoundInfo | null;
+      steps: Step[];
+      /** More steps of this round through `item.records`. */
+      stepsCursor: string | null;
+      /** Reviews and decisions arrive with later phases. */
+      reviews: unknown[];
+      decisions: unknown[];
+      findingsTotal: number;
+    };
+  };
+  /** Every growing collection of a ticket, paged at a stable boundary. */
+  'item.records': {
+    args: { itemId: string; kind: RecordKind; round?: number; findingId?: string; status?: string[]; cursor?: string; limit?: number };
+    result: { records: unknown[]; nextCursor: string | null };
+  };
   'item.publish': { args: { itemId: string }; result: { prUrl: string } };
   'item.delete': { args: { itemId: string }; result: Record<string, never> };
   /** Import a GitHub issue of one of the environment's repositories as a work item. */
@@ -372,11 +652,14 @@ export interface OpMap {
 export type Op = keyof OpMap;
 export type OpArgs<O extends Op> = OpMap[O]['args'];
 export type OpResult<O extends Op> = OpMap[O]['result'];
+/** What the app's client returns: `snapshot.get` assembled from its parts. */
+export type ClientResult<O extends Op> = O extends 'snapshot.get' ? Snapshot : OpResult<O>;
 
 // A record keyed by Op keeps this list total: a new op without an entry
 // here fails to compile.
 const OP_TABLE: Record<Op, true> = {
   'snapshot.get': true,
+  'snapshot.part': true,
   'session.history': true,
   'chat.send': true,
   'session.interrupt': true,
@@ -388,6 +671,10 @@ const OP_TABLE: Record<Op, true> = {
   'item.cancel': true,
   'item.retry': true,
   'item.accept': true,
+  'item.link': true,
+  'item.unlink': true,
+  'item.workflow': true,
+  'item.records': true,
   'item.publish': true,
   'item.delete': true,
   'issue.import': true,
@@ -417,6 +704,7 @@ export function isOp(value: unknown): value is Op {
  */
 export type RendererOp =
   | 'snapshot.get'
+  | 'snapshot.part'
   | 'session.history'
   | 'chat.send'
   | 'session.interrupt'
@@ -433,6 +721,7 @@ export const RENDERER_OPS: readonly RendererOp[] = OPS.filter(
     op.startsWith('item.') ||
     [
       'snapshot.get',
+      'snapshot.part',
       'session.history',
       'chat.send',
       'session.interrupt',
@@ -477,7 +766,39 @@ export type DaemonEvent =
   | { kind: 'item.removed'; itemId: string }
   | { kind: 'backlog.order'; order: string[] }
   | ({ kind: 'capacity' } & Capacity)
-  | { kind: 'daemon.upgrading'; mode: 'drain' | 'now' };
+  | { kind: 'daemon.upgrading'; mode: 'drain' | 'now' }
+  /* Journaled first (src/daemon/delivery/journal.ts), then emitted. */
+  | { kind: 'step.changed'; itemId: string; step: Step; from: StepState | null; trigger: string }
+  | { kind: 'round.opened'; itemId: string; roundId: string; round: number; purpose: ImplementPurpose; reason: string }
+  | {
+      kind: 'round.settled';
+      itemId: string;
+      roundId: string;
+      round: number;
+      gate: Gate;
+      outcome: 'settled' | 'superseded' | 'cancelled';
+      obligations: string[];
+    }
+  | { kind: 'ticket.removed'; itemId: string; number: number; title: string; status: ItemStatus; outcome: ItemOutcome | null }
+  | { kind: 'ticket.reference'; itemId: string; op: 'add' | 'update' | 'remove'; reference: Reference }
+  | ({ kind: 'merge.observed' } & MergeObserved);
+
+/** A merge of a ticket's delivery pull request, as the daemon saw it on GitHub. */
+export interface MergeObserved {
+  itemId: string;
+  repo: string;
+  prNumber: number;
+  prHeadSha: string;
+  prCommits: number;
+  mergeCommitSha: string | null;
+  mergeParents: string[];
+  mergedAt: number;
+  mergedBy: string | null;
+  method: 'squash' | 'merge' | 'rebase' | null;
+  initiatedBy: 'puck' | 'external' | 'unknown';
+  reviewedHeadSha: string | null;
+  reviewed: boolean;
+}
 
 export type DaemonEventKind = DaemonEvent['kind'];
 
@@ -498,6 +819,12 @@ const EVENT_KINDS: Record<DaemonEventKind, true> = {
   'backlog.order': true,
   capacity: true,
   'daemon.upgrading': true,
+  'step.changed': true,
+  'round.opened': true,
+  'round.settled': true,
+  'ticket.removed': true,
+  'ticket.reference': true,
+  'merge.observed': true,
 };
 
 /** Clients apply only kinds they know; anything newer is skipped, never an error. */

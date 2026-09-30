@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Snapshot } from '../../src/harness/daemon-protocol';
+import type { Snapshot, WorkItemV1 } from '../../src/harness/daemon-protocol';
 import type { TranscriptEntry } from '../../src/harness/transcript';
-import { attachClient, docker, startEnv, untilSnapshot, waitReady, type Env } from './helpers';
+import { attachClient, docker, finished, implementing, startEnv, untilSnapshot, waitReady, type Env } from './helpers';
 
 // Scenario 5: restart. `docker restart` while an item runs. The restart is
 // not a failed attempt: after boot the item is requeued without a count,
@@ -27,7 +27,7 @@ describe('Docker scenario 5: restart', () => {
       body: ["!exec printf 'start\\n' > start.txt && git add start.txt && git commit -qm Start && echo ok", '!sleep 120000'].join('\n'),
       agent: 'implementer',
     });
-    const running = (await untilSnapshot(a, (s) => s.items[0]?.status === 'running' && s.inflight.some((t) => t.sessionId === s.items[0].sessionId))).items[0];
+    const running = (await untilSnapshot(a, (s) => implementing(s.items[0]) && s.inflight.some((t) => t.sessionId === s.items[0].sessionId))).items[0];
     const sessionId = running.sessionId as string;
     // Let the worker's commit land before the restart.
     await a.untilEvent('turn.event', (ev) => ev.sessionId === sessionId && ev.event.kind === 'tool-end', 60_000);
@@ -37,23 +37,34 @@ describe('Docker scenario 5: restart', () => {
     await docker(['restart', '-t', '30', env.container], { timeoutMs: 120_000 });
 
     const b = await waitReady(env.container);
-    const done = (await untilSnapshot(b, (s) => s.items[0]?.status === 'review', 90_000)).items[0];
+    const done = (await untilSnapshot(b, (s) => finished(s.items[0]), 90_000)).items[0];
     expect(done.attempts).toBe(1);
+    // One round, one implement step: the restart resumed it rather than starting another attempt.
+    expect(done.workflow?.round).toBe(1);
+    expect(done.workflow?.steps.map((s) => [s.kind, s.state, s.result])).toEqual([
+      ['decompose', 'done', 'skipped'],
+      ['implement', 'done', 'passed'],
+      ['merge', 'waiting', null],
+    ]);
     expect(done.sessionId).toBe(sessionId);
     expect(done.result?.commits.map((c) => c.subject)).toEqual(['Start']);
     const snap = await b.cmd<Snapshot>('snapshot.get');
     expect(snap.sessions.filter((s) => s.kind === 'worker').map((s) => s.id)).toEqual([sessionId]);
     b.close();
 
-    // Replayed from before the restart: the item went back to queued with its attempt count unchanged.
-    const c = attachClient(env.container);
+    // Replayed from before the restart to an app that predates protocol 2, in its own statuses:
+    // the item went back to queued with its attempt count unchanged, with no gap across the format boundary.
+    const c = attachClient(env.container, { protocol: 1 });
     expect((await c.hello(cursor)).replay).toBe('events');
-    await c.untilEvent('item.upsert', (ev) => ev.item.status === 'review');
+    const v1 = (item: unknown): WorkItemV1 => item as WorkItemV1;
+    await c.untilEvent('item.upsert', (ev) => v1(ev.item).status === 'review');
     const statuses = c
       .events()
-      .flatMap((f) => (f.ev.kind === 'item.upsert' ? [[f.ev.item.status, f.ev.item.attempts] as const] : []));
+      .flatMap((f) => (f.ev.kind === 'item.upsert' ? [[v1(f.ev.item).status, v1(f.ev.item).attempts] as const] : []));
     expect(statuses).toContainEqual(['queued', 1]);
     expect(statuses.every(([, attempts]) => attempts === 1)).toBe(true);
+    const seqs = c.events().map((f) => f.seq);
+    expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => cursor + 1 + i));
 
     // The worker conversation continued: its resumed turn got the continue message, not the work item from the start.
     const worker = await c.cmd<{ entries: TranscriptEntry[] }>('session.history', { sessionId });

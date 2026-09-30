@@ -1,33 +1,44 @@
 /**
- * Work detail: one work item in the side sheet over the Chat or Board view.
+ * Work detail: one ticket in the side sheet over the Chat or Board view.
  *
- * - Header: `W-12`, the status, Close (Esc also closes), the title, and
- *   the agent, `repo@branch`, attempts and the pull request.
- * - Actions by status, as the item state machine allows: running → Stop;
- *   review → Accept, Request changes (focuses the composer), Publish
- *   (always offered to the user); failed and cancelled → Retry; Cancel and
- *   Delete wherever allowed. Delete, and cancelling running work, arm on
+ * - Header: `W-12`, the status (and a Done ticket's outcome), Close (Esc
+ *   also closes), the title, and the agent, `repo@branch`, attempts and the
+ *   delivery pull request.
+ * - Actions, as the ticket table allows: its worker running → Stop; its
+ *   worker finished (the merge step waits) → Accept, Request changes
+ *   (focuses the composer: a message opens a new round), Publish (always
+ *   offered to the user); failed and cancelled → Retry; Cancel and Delete
+ *   wherever allowed. Delete, and cancelling a started ticket, arm on
  *   first click.
  * - Tabs: Conversation (the worker's thread and a follow-up composer),
  *   Changes (summary, commits, diff stat, uncommitted files, the pull
  *   request with its CI checks and review feedback, "Compare on GitHub"),
+ *   Workflow (the ticket's rounds and steps from `item.workflow`, newest
+ *   first, reloaded as its steps change, and its references with Add link),
  *   Details (editable title and body when not running, the agent and repo
  *   pickers, timestamps, creator, last error). The repo picker shows no
  *   repository until one is saved, and is disabled once a worktree exists.
- *   Once an item has a session, the agent picker offers only that agent,
+ *   Once a ticket has a session, the agent picker offers only that agent,
  *   and Unassign is not offered. Assign enables only for an agent the
- *   item can take, and follows the picker as it changes.
- * - A pending question shows a banner: "Waiting on the orchestrator" with
- *   "Answer myself", or the question card when it is routed to the user.
- *   On the Conversation tab, where the thread already shows the card, the
- *   banner is one line that scrolls to it.
+ *   ticket can take, and follows the picker as it changes.
+ * - An open question shows a banner: the question card when one is routed
+ *   to the user (the oldest such), else "Waiting on the orchestrator" with
+ *   "Answer myself". On the Conversation tab, where the thread already
+ *   shows the card, the banner is one line that scrolls to it.
+ * - A daemon that predates the three-column board: the sheet is read-only.
+ *   The title and description show that daemon's sentence, and a question
+ *   names who is waiting without offering an answer. A running ticket on a
+ *   current daemon still says the title and description are read-only
+ *   while it runs.
  *
  * Context in, controller out; no DOM lookups.
  */
 
-import type { ItemStatus, OpArgs, OpResult, PullView, RendererOp, WorkItem } from '../harness/daemon-protocol';
+import type { ClientResult, OpArgs, OpResult, PullView, Reference, RendererOp, RoundInfo, Step, WorkItem } from '../harness/daemon-protocol';
+import { allows } from '../harness/item-transitions';
+import { deliveryPull, referenceLabel, sourceIssue } from '../harness/references';
 import { askCard } from './ask-card';
-import { assignable, canUnassign } from './board-model';
+import { activeImplement, assignable, canUnassign, isRunning, LEGACY_READ_ONLY } from './board-model';
 import { armDelete, conceal, el } from './dom';
 import { fmtTime, relTime } from './format';
 import type { InstanceStore } from './instance-store';
@@ -40,21 +51,24 @@ import { button, errText } from './util';
 export type ItemAction = 'stop' | 'accept' | 'request-changes' | 'publish' | 'retry' | 'cancel' | 'delete';
 
 /**
- * The header actions per status. Each one the daemon's state machine
- * decides maps to a trigger it allows from that status (a unit test holds
- * this table to the daemon's transitions); Stop interrupts the running
- * turn, and Publish is always the user's to press on work in review.
+ * The header actions of a ticket. Each one the daemon decides maps to a
+ * trigger the ticket table allows from its status and outcome (a unit test
+ * holds this to the table); Stop interrupts the running turn, and Publish
+ * is always the user's to press once the worker finished.
  */
-export const ITEM_ACTIONS: Record<ItemStatus, readonly ItemAction[]> = {
-  backlog: ['cancel', 'delete'],
-  queued: ['cancel'],
-  running: ['stop', 'cancel'],
-  'needs-input': ['cancel'],
-  review: ['accept', 'request-changes', 'publish', 'cancel'],
-  done: ['delete'],
-  failed: ['retry', 'delete'],
-  cancelled: ['retry', 'delete'],
-};
+export function itemActions(item: Pick<WorkItem, 'status' | 'outcome' | 'workflow'>): ItemAction[] {
+  const state = { status: item.status, outcome: item.outcome };
+  const out: ItemAction[] = [];
+  const step = activeImplement(item);
+  if (item.status === 'in-progress') {
+    if (step?.state === 'running') out.push('stop');
+    if (!step) out.push('accept', 'request-changes', 'publish');
+  }
+  if (allows(state, 'retry')) out.push('retry');
+  if (allows(state, 'cancel')) out.push('cancel');
+  if (allows(state, 'delete')) out.push('delete');
+  return out;
+}
 
 const ACTION_LABEL: Record<ItemAction, string> = {
   stop: 'Stop',
@@ -66,34 +80,39 @@ const ACTION_LABEL: Record<ItemAction, string> = {
   delete: 'Delete',
 };
 
-const STATUS_LABEL: Record<ItemStatus, string> = {
-  backlog: 'Backlog',
-  queued: 'Ready',
-  running: 'Running',
-  'needs-input': 'Needs input',
-  review: 'In review',
-  done: 'Done',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+/** The header's status word: "Todo", "In progress", "Done · merged". */
+export function statusLabel(item: Pick<WorkItem, 'status' | 'outcome'>): string {
+  if (item.status === 'todo') return 'Todo';
+  if (item.status === 'in-progress') return 'In progress';
+  return item.outcome ? `Done · ${item.outcome}` : 'Done';
+}
+
+export function statusTone(item: Pick<WorkItem, 'status' | 'outcome' | 'userAsks' | 'workflow'>): 'busy' | 'ask' | 'on' | 'bad' | 'off' {
+  if (item.userAsks > 0) return 'ask';
+  if (item.status === 'in-progress') return isRunning(item) ? 'busy' : 'on';
+  if (item.status === 'done') return item.outcome === 'failed' ? 'bad' : item.outcome === 'cancelled' ? 'off' : 'on';
+  return 'off';
+}
+
+const STEP_KIND: Record<Step['kind'], string> = {
+  decompose: 'Plan',
+  implement: 'Implement',
+  checks: 'Checks',
+  review: 'Review',
+  publish: 'Publish',
+  ci: 'CI',
+  merge: 'Merge',
 };
 
-/** Which statuses the item's title and body may be edited in. */
-const EDITABLE: ReadonlySet<ItemStatus> = new Set(['backlog', 'queued', 'review', 'failed', 'cancelled', 'done']);
-
-export function statusTone(status: ItemStatus): 'busy' | 'ask' | 'on' | 'bad' | 'off' {
-  switch (status) {
-    case 'running':
-      return 'busy';
-    case 'needs-input':
-      return 'ask';
-    case 'review':
-    case 'done':
-      return 'on';
-    case 'failed':
-      return 'bad';
-    default:
-      return 'off';
+/** A step row's words. A finished step shows its detail when it has one ("Accepted", "Merged on GitHub"); otherwise its result ("Passed", "Cancelled"). */
+export function stepWords(step: Pick<Step, 'kind' | 'state' | 'result' | 'detail'>): string {
+  if (step.state === 'done') {
+    if (step.detail) return step.detail;
+    return step.result ? step.result[0].toUpperCase() + step.result.slice(1) : 'Done';
   }
+  if (step.kind === 'merge' && step.state === 'waiting') return 'Waiting for you to accept or merge';
+  const words: Record<string, string> = { pending: 'Pending', queued: 'Queued for a slot', running: 'Running', 'needs-input': 'Waiting on a question', waiting: 'Waiting' };
+  return words[step.state] ?? step.state;
 }
 
 /** Encode a git ref for a GitHub path. Slashes stay, so `puck/W-1` and `release/1` are branch paths. */
@@ -101,7 +120,7 @@ const encodeRef = (ref: string): string => ref.split('/').map(encodeURIComponent
 
 /** `https://github.com/{owner/name}/compare/{base}...{branch}` once the branch is published. */
 export function compareUrl(item: WorkItem, github: string | null): string | null {
-  if (!item.pr || !item.branch || !item.base || !github) return null;
+  if (!deliveryPull(item) || !item.branch || !item.base || !github) return null;
   return `https://github.com/${github}/compare/${encodeRef(item.base.branch)}...${encodeRef(item.branch)}`;
 }
 
@@ -121,6 +140,7 @@ export interface WorkDetailElements {
   /** Composer area (hidden when the item has no session). */
   composerZone: HTMLElement;
   changes: HTMLElement;
+  workflow: HTMLElement;
   details: HTMLElement;
 }
 
@@ -128,7 +148,7 @@ export interface WorkDetailContext {
   els: WorkDetailElements;
   store: InstanceStore;
   sessions: SessionView;
-  daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<OpResult<K>>;
+  daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<ClientResult<K>>;
   openExternal(url: string): void;
   say(text: string): void;
   /** Close the sheet (Close, and after Delete). */
@@ -145,11 +165,13 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   let tab: WorkTab = 'conversation';
   let mountedSession: string | null = null;
   let pull: { itemId: string; key: string; view: PullView | null; error: string | null; loading: boolean } | null = null;
+  type RoundView = OpResult<'item.workflow'>;
+  let flow: { itemId: string; key: string; current: RoundView | null; older: Map<number, RoundView | 'loading'>; error: string | null } | null = null;
   let answering = false;
   /** The thread has no card for the question (not loaded): answer in the banner instead. */
   let inline = false;
   /** What each part was last built from: an unrelated event does not rebuild it (and lose typing or a selection). */
-  const built = { actions: '', banner: '', changes: '', details: '' };
+  const built = { actions: '', banner: '', changes: '', workflow: '', details: '' };
 
   els.close.addEventListener('click', () => ctx.close());
   for (const b of els.tabs.querySelectorAll<HTMLButtonElement>('[data-tab]')) {
@@ -201,12 +223,17 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     }
   }
 
+  /** True while the environment's daemon predates protocol 2: everything is read-only. */
+  function readOnly(): boolean {
+    return (store.state()?.daemon.protocol ?? 2) < 2;
+  }
+
   function renderHeader(it: WorkItem): void {
     els.id.textContent = `W-${it.number}`;
     els.title.textContent = it.title;
-    els.status.className = `wd-status tone-${statusTone(it.status)}`;
+    els.status.className = `wd-status tone-${statusTone(it)}`;
     els.status.textContent = '';
-    els.status.append(el('span', 'dot'), document.createTextNode(STATUS_LABEL[it.status]));
+    els.status.append(el('span', 'dot'), document.createTextNode(statusLabel(it)));
     els.meta.textContent = '';
     const agent = el('span', `wd-agent${it.agent ? '' : ' none'}`);
     if (it.agent) agent.appendChild(el('span', 'bd-agent-mark', it.agent[0]?.toUpperCase() ?? '?'));
@@ -220,33 +247,42 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       els.meta.appendChild(branch);
     }
     if (it.attempts > 1) els.meta.appendChild(el('span', 'wd-attempts', `Attempt ${it.attempts}`));
-    if (it.pr) {
-      const url = it.pr.url;
-      const pr = button('wd-pr', `#${it.pr.number}${it.pr.state && it.pr.state !== 'open' ? ` ${it.pr.state}` : it.pr.draft ? ' draft' : ''}`);
+    const prRef = deliveryPull(it);
+    if (prRef) {
+      const url = prRef.url;
+      const pr = button('wd-pr', `#${prRef.number}${prRef.state && prRef.state !== 'open' ? ` ${prRef.state}` : prRef.draft ? ' draft' : ''}`);
       pr.prepend(statusIcon('pr'));
-      pr.title = `Open pull request #${it.pr.number} on GitHub`;
+      pr.title = `Open pull request #${prRef.number} on GitHub`;
       pr.addEventListener('click', () => ctx.openExternal(url));
       els.meta.appendChild(pr);
     }
-    const actionsKey = JSON.stringify([it.id, it.status, it.sessionId]);
+    const actions = readOnly() ? [] : itemActions(it);
+    const actionsKey = JSON.stringify([it.id, it.status, it.outcome, it.sessionId, actions]);
     if (built.actions === actionsKey) return;
     built.actions = actionsKey;
     els.actions.textContent = '';
-    for (const action of ITEM_ACTIONS[it.status]) {
-      const primary = action === 'accept' || (action === 'retry' && it.status === 'failed');
+    for (const action of actions) {
+      const primary = action === 'accept' || (action === 'retry' && it.outcome === 'failed');
       const b = button(primary ? 'btn-primary small' : action === 'delete' || action === 'cancel' ? 'btn-ghost danger' : 'btn-ghost', ACTION_LABEL[action]);
       b.dataset.action = action;
       const run = (): Promise<void> => act(it, action);
-      if (action === 'delete' || (action === 'cancel' && (it.status === 'running' || it.status === 'needs-input' || it.status === 'review'))) armDelete(b, run);
+      if (action === 'delete' || (action === 'cancel' && it.status === 'in-progress')) armDelete(b, run);
       else b.addEventListener('click', () => void run());
       els.actions.appendChild(b);
     }
   }
 
+  /** The question the banner shows: the oldest routed to the user, else the oldest routed to the orchestrator. */
+  function pendingOf(it: WorkItem): { askId: string; routedTo: 'user' | 'orchestrator' } | null {
+    if (it.oldestUserAsk?.kind === 'question') return { askId: it.oldestUserAsk.askId, routedTo: 'user' };
+    if (it.needsInput?.kind === 'question') return { askId: it.needsInput.askId, routedTo: it.needsInput.routedTo };
+    return null;
+  }
+
   function renderBanner(it: WorkItem): void {
-    const pending = it.pendingAsk;
+    const pending = pendingOf(it);
     const ask = pending ? store.ask(pending.askId) : undefined;
-    const key = JSON.stringify([it.id, pending, answering, inline, !!ask, tab]);
+    const key = JSON.stringify([it.id, pending, answering, inline, !!ask, tab, readOnly()]);
     if (built.banner === key) return;
     built.banner = key;
     els.banner.textContent = '';
@@ -256,8 +292,17 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       inline = false;
       return;
     }
+    // An older daemon's tickets are read-only: the question shows, and nothing answers or takes it over from here.
+    if (readOnly()) {
+      answering = false;
+      inline = false;
+      const who = pending.routedTo === 'orchestrator' ? 'the orchestrator' : 'you';
+      els.banner.appendChild(el('span', 'wd-banner-text', `${it.agent ?? 'The worker'} is waiting on ${who} to answer a question. ${LEGACY_READ_ONLY}`));
+      return;
+    }
     const submit = async (answers: Record<string, string> | null): Promise<void> => {
       if (!it.sessionId) return;
+      if (readOnly()) throw new Error(LEGACY_READ_ONLY);
       try {
         await ctx.daemon('ask.answer', { sessionId: it.sessionId, askId: pending.askId, answers });
         answering = false;
@@ -337,11 +382,12 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   }
 
   function pullKey(it: WorkItem): string {
-    return JSON.stringify([it.pr?.number, it.pr?.lastPushedSha, it.pr?.state, it.pr?.checks?.state, it.pr?.checks?.sha, it.updatedAt]);
+    const pr = deliveryPull(it);
+    return JSON.stringify([pr?.number, pr?.lastPushedSha, pr?.state, pr?.checks?.state, pr?.checks?.sha, it.updatedAt]);
   }
 
   function loadPull(it: WorkItem): void {
-    if (!it.pr) {
+    if (!deliveryPull(it)) {
       pull = null;
       return;
     }
@@ -365,14 +411,15 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   }
 
   function renderChanges(it: WorkItem, force = false): void {
-    const key = JSON.stringify([it.id, it.status, it.result?.endedAt, it.pr, it.branch, pull?.view, pull?.error]);
+    const pr = deliveryPull(it);
+    const key = JSON.stringify([it.id, it.status, it.result?.endedAt, pr, it.branch, pull?.view, pull?.error]);
     if (!force && built.changes === key) return;
     built.changes = key;
     const host = els.changes;
     host.textContent = '';
     const r = it.result;
-    if (!r && !it.pr) {
-      host.appendChild(el('p', 'wd-empty', it.status === 'running' ? 'The worker is still at it; changes show when it finishes.' : 'No changes yet.'));
+    if (!r && !pr) {
+      host.appendChild(el('p', 'wd-empty', isRunning(it) ? 'The worker is still at it; changes show when it finishes.' : 'No changes yet.'));
       return;
     }
     if (r?.summary) {
@@ -401,11 +448,11 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
       host.appendChild(s);
     }
-    if (it.pr) renderPull(it, host);
+    if (pr) renderPull(it, host);
   }
 
   function renderPull(it: WorkItem, host: HTMLElement): void {
-    const pr = it.pr;
+    const pr = deliveryPull(it);
     if (!pr) return;
     const view = pull?.itemId === it.id ? pull.view : null;
     const s = section('Pull request');
@@ -474,7 +521,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
 
   function renderDetails(it: WorkItem): void {
     const knownAgent = it.agent ?? (it.sessionId ? (store.session(it.sessionId)?.agent ?? null) : null);
-    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos, knownAgent]);
+    const legacy = readOnly();
+    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos, knownAgent, legacy]);
     if (built.details === key) return;
     built.details = key;
     const host = els.details;
@@ -487,7 +535,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     host.dataset.item = it.id;
     host.dataset.dirty = dirty ? '1' : '0';
 
-    const editable = EDITABLE.has(it.status);
+    const editable = !isRunning(it) && !legacy;
     const form = el('div', 'wd-form config-form');
     const title = el('input', 'wd-title-input');
     title.dataset.field = 'title';
@@ -522,7 +570,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
     });
     form.append(el('label', 'wd-label', 'Title'), title, el('label', 'wd-label', 'Description'), body);
-    if (!editable) form.appendChild(el('p', 'wd-note', 'The title and description are read-only while the item runs.'));
+    if (!editable) form.appendChild(el('p', 'wd-note', legacy ? LEGACY_READ_ONLY : 'The title and description are read-only while the item runs.'));
     else {
       const row = el('div', 'wd-row');
       row.appendChild(save);
@@ -556,7 +604,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       pick.value = it.agent ?? '';
     }
     const savedAgent = it.sessionId ? (knownAgent ?? '') : (it.agent ?? '');
-    const canChangeAgent = it.sessionId ? choices.length > 0 : it.status === 'backlog' || it.status === 'queued';
+    const canChangeAgent = !readOnly() && (it.sessionId ? choices.length > 0 : it.status === 'todo');
     pick.disabled = !canChangeAgent;
     const row = el('div', 'wd-row');
     row.appendChild(pick);
@@ -581,7 +629,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
     });
     row.appendChild(assignBtn);
-    if (canUnassign(it)) {
+    if (canUnassign(it) && !readOnly()) {
       const un = button('btn-ghost', 'Unassign');
       un.dataset.action = 'unassign';
       un.addEventListener('click', async () => {
@@ -611,7 +659,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
         repo.appendChild(o);
       }
       repo.value = savedRepo;
-      repo.disabled = !!it.worktree || (it.status !== 'backlog' && it.status !== 'queued');
+      repo.disabled = !!it.worktree || it.status !== 'todo' || readOnly();
       repo.addEventListener('change', async () => {
         if (!repo.value) {
           repo.value = savedRepo;
@@ -633,15 +681,241 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       facts.append(el('dt', '', k), el('dd', '', v));
     };
     const day = new Date(it.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-    fact('Created', `${day}, ${fmtTime(it.createdAt)} by ${it.createdBy === 'orchestrator' ? 'the orchestrator' : 'you'}`);
+    fact('Created', `${day}, ${fmtTime(it.createdAt)} by ${it.createdBy === 'orchestrator' ? 'the orchestrator' : it.createdBy === 'pipeline' ? 'Puck' : 'you'}`);
     fact('Updated', relTime(it.updatedAt));
-    if (it.source) fact('Issue', `${it.source.repo}#${it.source.number}`);
+    if (it.closedAt) fact('Closed', relTime(it.closedAt));
+    const src = sourceIssue(it);
+    if (src) fact('Issue', `${src.repo}#${src.number}`);
     if (it.lastError) fact('Last error', it.lastError);
     if (it.cancelReason) fact('Cancelled', it.cancelReason);
-    if (it.acceptNote) fact('Accepted', it.acceptNote);
+    if (it.acceptNote) fact(it.outcome === 'merged' ? 'Merged' : 'Accepted', it.acceptNote);
     host.appendChild(facts);
-    if (it.source) host.appendChild(linkButton('Open the issue', it.source.url));
+    if (src) host.appendChild(linkButton('Open the issue', src.url));
     if (focused) host.querySelector<HTMLElement>(`[data-field="${focused}"]`)?.focus();
+  }
+
+  /* ---------- Workflow ---------- */
+
+  function flowKey(it: WorkItem): string {
+    return JSON.stringify([it.id, it.status, it.outcome, it.workflow, it.updatedAt]);
+  }
+
+  /** Read the current round on open and whenever the ticket's steps change (the key-and-rebuild pattern of loadPull). */
+  function loadFlow(it: WorkItem): void {
+    const key = flowKey(it);
+    if (flow && flow.itemId === it.id && flow.key === key) return;
+    const mine: NonNullable<typeof flow> = {
+      itemId: it.id,
+      key,
+      current: flow?.itemId === it.id ? flow.current : null,
+      older: flow?.itemId === it.id ? flow.older : new Map(),
+      error: null,
+    };
+    flow = mine;
+    ctx
+      .daemon('item.workflow', { itemId: it.id })
+      .then((view) => {
+        mine.current = view;
+      })
+      .catch((err: unknown) => {
+        mine.error = errText(err);
+      })
+      .finally(() => {
+        const now = item();
+        if (flow === mine && tab === 'workflow' && now) renderWorkflow(now);
+      });
+  }
+
+  function loadRound(it: WorkItem, round: number): void {
+    const mine = flow;
+    if (!mine || mine.itemId !== it.id || mine.older.has(round)) return;
+    mine.older.set(round, 'loading');
+    ctx
+      .daemon('item.workflow', { itemId: it.id, round })
+      .then((view) => mine.older.set(round, view))
+      .catch(() => mine.older.delete(round))
+      .finally(() => {
+        const now = item();
+        if (flow === mine && tab === 'workflow' && now) renderWorkflow(now, true);
+      });
+  }
+
+  function duration(step: Step): string {
+    if (!step.startedAt) return '';
+    const end = step.finishedAt ?? Date.now();
+    const s = Math.max(0, Math.round((end - step.startedAt) / 1000));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86_400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86_400)}d ${Math.floor((s % 86_400) / 3600)}h`;
+  }
+
+  function stepRow(it: WorkItem, step: Step): HTMLElement {
+    const li = el('li', `wd-step state-${step.state}${step.result ? ` result-${step.result}` : ''}`);
+    li.dataset.step = step.id;
+    li.appendChild(el('span', `wd-step-glyph ${step.state === 'done' ? `result-${step.result ?? 'done'}` : `state-${step.state}`}`));
+    const main = el('div', 'wd-step-main');
+    const head = el('div', 'wd-step-head');
+    head.appendChild(el('span', 'wd-step-kind', STEP_KIND[step.kind]));
+    if (step.agent) head.appendChild(el('span', 'wd-step-agent', step.agent));
+    if (step.attempt > 1) head.appendChild(el('span', 'wd-step-attempt', `attempt ${step.attempt}`));
+    const took = duration(step);
+    if (took) head.appendChild(el('span', 'wd-step-time', took));
+    main.appendChild(head);
+    main.appendChild(el('div', 'wd-step-detail', stepWords(step)));
+    if (step.kind === 'implement' && step.work) {
+      main.appendChild(el('div', 'wd-step-work', `${step.work.commits} commit${step.work.commits === 1 ? '' : 's'}${step.work.head ? ` · ${step.work.head.slice(0, 7)}` : ''}`));
+    }
+    if (step.kind === 'implement' && step.sessionId && step.sessionId === it.sessionId) {
+      const open = button('btn-ghost small', 'Open conversation');
+      open.addEventListener('click', () => ctx.onTab('conversation'));
+      main.appendChild(open);
+    }
+    li.appendChild(main);
+    return li;
+  }
+
+  function roundBlock(it: WorkItem, round: RoundInfo, steps: Step[], open: boolean): HTMLElement {
+    const box = el('details', 'wd-round');
+    box.open = open;
+    const summary = el('summary', 'wd-round-head');
+    const head = round.headSha ? ` · commit ${round.headSha.slice(0, 7)}` : '';
+    const state = round.outcome === 'open' ? 'open' : round.outcome;
+    summary.appendChild(el('span', 'wd-round-title', `Round ${round.round}${head}`));
+    summary.appendChild(el('span', 'wd-round-state', state));
+    box.appendChild(summary);
+    const list = el('ol', 'wd-steps');
+    for (const step of steps.filter((s) => !(s.kind === 'decompose' && s.result === 'skipped'))) list.appendChild(stepRow(it, step));
+    if (!list.childElementCount) list.appendChild(el('li', 'wd-empty', 'No steps in this round.'));
+    box.appendChild(list);
+    return box;
+  }
+
+  function nextLine(it: WorkItem): string {
+    if (it.status === 'done') return it.outcome === 'merged' ? 'Merged on GitHub.' : it.outcome === 'accepted' ? 'Accepted.' : it.outcome === 'failed' ? 'Failed. Retry it to run a new round.' : 'Cancelled. Retry it to run a new round.';
+    if (it.userAsks > 0) return `${it.agent ?? 'The worker'} is waiting on your answer.`;
+    const step = activeImplement(it);
+    if (step?.state === 'queued') return `Queued for ${step.agent ?? 'an agent'}; it starts when a slot is free.`;
+    if (step) return `${step.agent ?? 'The worker'} is working on it.`;
+    if (it.workflow?.steps.some((s) => s.kind === 'merge' && s.state === 'waiting')) {
+      return 'Finished: accept it, publish and merge its pull request, or send the worker a message to start another round.';
+    }
+    return '';
+  }
+
+  function renderReferences(it: WorkItem, host: HTMLElement): void {
+    const s = section('References');
+    const list = el('ul', 'wd-refs');
+    const label = (r: Reference): string => {
+      if (r.role === 'source') return 'Source issue';
+      if (r.role === 'delivery') return 'Pull request';
+      if (r.role === 'followup-of') return 'Follow-up of';
+      if (r.role === 'followup') return 'Follow-up';
+      return 'Related';
+    };
+    for (const r of it.references) {
+      const li = el('li', `wd-ref role-${r.role}`);
+      li.appendChild(el('span', 'wd-ref-role', label(r)));
+      if ('url' in r) {
+        const open = button('wd-ref-link', referenceLabel(r));
+        open.title = r.url;
+        open.addEventListener('click', () => ctx.openExternal(r.url));
+        li.appendChild(open);
+      } else li.appendChild(el('span', 'wd-ref-link', referenceLabel(r)));
+      if (r.role === 'related' && !readOnly()) {
+        const remove = button('icon-btn wd-ref-remove');
+        remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>';
+        remove.setAttribute('aria-label', `Remove the link ${referenceLabel(r)}`);
+        remove.addEventListener('click', async () => {
+          try {
+            await ctx.daemon('item.unlink', { itemId: it.id, referenceId: r.id });
+          } catch (err) {
+            ctx.say(errText(err));
+          }
+        });
+        li.appendChild(remove);
+      }
+      list.appendChild(li);
+    }
+    if (!it.references.length) list.appendChild(el('li', 'wd-empty', 'No links. Add an issue, a pull request or a URL.'));
+    s.appendChild(list);
+    if (!readOnly()) {
+      const row = el('form', 'wd-row wd-ref-add');
+      const input = el('input', 'wd-ref-input');
+      input.placeholder = 'owner/name#12, a GitHub link, or an https URL';
+      input.setAttribute('aria-label', 'Add link');
+      const add = button('btn-ghost', 'Add link');
+      add.type = 'submit';
+      row.append(input, add);
+      row.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const ref = input.value.trim();
+        if (!ref) return;
+        add.disabled = true;
+        try {
+          await ctx.daemon('item.link', { itemId: it.id, ref });
+          input.value = '';
+          ctx.say('');
+        } catch (err) {
+          ctx.say(errText(err));
+        } finally {
+          add.disabled = false;
+        }
+      });
+      s.appendChild(row);
+    }
+    host.appendChild(s);
+  }
+
+  function renderWorkflow(it: WorkItem, force = false): void {
+    const current = flow?.itemId === it.id ? flow.current : null;
+    const key = JSON.stringify([it.id, it.status, it.outcome, it.references, it.userAsks, current, flow?.error, [...(flow?.older ?? new Map()).entries()], readOnly()]);
+    if (!force && built.workflow === key) return;
+    built.workflow = key;
+    const host = els.workflow;
+    const openRounds = new Set([...host.querySelectorAll<HTMLDetailsElement>('details.wd-round[open]')].map((d) => d.dataset.round));
+    host.textContent = '';
+    const head = section('Workflow');
+    head.appendChild(
+      el(
+        'p',
+        'wd-flow-policy',
+        'This environment has no delivery block: finished work waits for you to accept or merge. Add delivery: to its environment definition in the Puck home to run checks and a review panel.',
+      ),
+    );
+    const next = nextLine(it);
+    if (next) head.appendChild(el('p', 'wd-flow-next', next));
+    host.appendChild(head);
+    if (flow?.itemId === it.id && flow.error && !current) host.appendChild(el('p', 'wd-empty', `Couldn't read the workflow: ${flow.error}`));
+    else if (!current) host.appendChild(el('p', 'wd-empty', 'Loading…'));
+    else if (!current.round) host.appendChild(el('p', 'wd-empty', 'Nothing has started. Assign an agent, or plan the ticket.'));
+    else {
+      const rounds = el('div', 'wd-rounds');
+      const latest = roundBlock(it, current.round, current.steps, true);
+      latest.dataset.round = String(current.round.round);
+      rounds.appendChild(latest);
+      for (let r = current.round.round - 1; r >= 1; r--) {
+        const got = flow?.older.get(r);
+        if (got && got !== 'loading' && got.round) {
+          const block = roundBlock(it, got.round, got.steps, openRounds.has(String(r)));
+          block.dataset.round = String(r);
+          rounds.appendChild(block);
+          continue;
+        }
+        const stub = el('details', 'wd-round');
+        stub.dataset.round = String(r);
+        const sum = el('summary', 'wd-round-head');
+        sum.appendChild(el('span', 'wd-round-title', `Round ${r}`));
+        stub.appendChild(sum);
+        stub.appendChild(el('p', 'wd-empty', got === 'loading' ? 'Loading…' : ''));
+        stub.addEventListener('toggle', () => {
+          if (stub.open) loadRound(it, r);
+        });
+        rounds.appendChild(stub);
+      }
+      host.appendChild(rounds);
+    }
+    renderReferences(it, host);
   }
 
   function render(): void {
@@ -665,6 +939,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     }
     conceal(els.conversation, tab !== 'conversation');
     conceal(els.changes, tab !== 'changes');
+    conceal(els.workflow, tab !== 'workflow');
     conceal(els.details, tab !== 'details');
     renderHeader(it);
     renderBanner(it);
@@ -672,6 +947,9 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     else if (tab === 'changes') {
       loadPull(it);
       renderChanges(it);
+    } else if (tab === 'workflow') {
+      loadFlow(it);
+      renderWorkflow(it);
     } else renderDetails(it);
   }
 
@@ -681,7 +959,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
         answering = false;
         inline = false;
         els.details.dataset.dirty = '0';
-        built.actions = built.banner = built.changes = built.details = '';
+        built.actions = built.banner = built.changes = built.workflow = built.details = '';
+        flow = null;
       }
       itemId = next;
       tab = nextTab;
@@ -692,7 +971,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     reset(): void {
       mountedSession = null;
       pull = null;
-      built.banner = built.changes = built.details = '';
+      flow = null;
+      built.banner = built.changes = built.workflow = built.details = '';
     },
     itemId: (): string | null => itemId,
     sessionId: (): string | null => item()?.sessionId ?? null,

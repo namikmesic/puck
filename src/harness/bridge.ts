@@ -12,7 +12,7 @@ import type { DefinitionChange, DefinitionListing, DefinitionRefs, PinSpec, Upda
 import type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
 
 export type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
-import type { DaemonEvent, InstanceState, OpArgs, OpResult, Pin, RendererOp, Snapshot } from './daemon-protocol';
+import type { ClientResult, DaemonEvent, InstanceState, OpArgs, Pin, RendererOp, Snapshot } from './daemon-protocol';
 import type { InstanceStage } from './runner-protocol';
 
 export type {
@@ -365,7 +365,7 @@ export interface PuckBridge {
   instanceUpgradeDaemon(envId: string, mode: 'drain' | 'now'): Promise<void>;
   onInstanceEvent(cb: (e: InstanceEvent) => void): void;
   /** A command to an environment's daemon (renderer allowlist only). */
-  daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>>;
+  daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<ClientResult<K>>;
   onDaemonEvent(cb: (e: DaemonEventPayload) => void): void;
 
   /** GitHub App installations the signed-in user can reach. */

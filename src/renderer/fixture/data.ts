@@ -1,6 +1,10 @@
 /**
  * Seeded data for the fixture harness (see ./index.ts): one environment
- * with a work item in every state, two repositories, a multi-day
+ * with a ticket in every place of the three columns (seeded in protocol
+ * 1's eight statuses and mapped with `upgradeV1Item`, the app's own
+ * fallback mapping), a failed and a cancelled ticket behind the Done
+ * filter, a question for the user, and a ticket with an older question
+ * for the orchestrator and a newer one for the user; two repositories, a multi-day
  * orchestrator conversation with step cards, answered and open questions
  * and notices, and short worker threads. Times are relative to `now`, so
  * the day dividers read Today, Yesterday and earlier days whenever it
@@ -8,7 +12,8 @@
  */
 
 import type { InstanceInfo } from '../../harness/bridge';
-import type { Capacity, OpenAsk, PullView, SessionSummary, Snapshot, WorkItem } from '../../harness/daemon-protocol';
+import type { Capacity, OpenAsk, PullView, SessionSummary, Snapshot, WorkItem, WorkItemV1 } from '../../harness/daemon-protocol';
+import { upgradeV1Item } from '../../harness/workflow';
 import type { TranscriptEntry } from '../../harness/transcript';
 import type { AskQuestion, HarnessEvent } from '../../harness/types';
 
@@ -73,8 +78,8 @@ function instances(scenario: Scenario): InstanceInfo[] {
   return [main, other];
 }
 
-function item(over: Partial<WorkItem> & Pick<WorkItem, 'number' | 'title' | 'status'>, now: number): WorkItem {
-  return {
+function item(over: Partial<WorkItemV1> & Pick<WorkItemV1, 'number' | 'title' | 'status'>, now: number): WorkItem {
+  return upgradeV1Item({
     id: `itm_${String(over.number).padStart(2, '0')}`,
     body: '',
     agent: null,
@@ -95,7 +100,7 @@ function item(over: Partial<WorkItem> & Pick<WorkItem, 'number' | 'title' | 'sta
     acceptNote: null,
     pendingAsk: null,
     ...over,
-  };
+  });
 }
 
 function result(ins: number, del: number, files: number, commits: string[], summary: string, endedAt: number) {
@@ -132,10 +137,25 @@ function items(now: number): WorkItem[] {
     item({ number: 14, title: 'Add a health check endpoint', status: 'done', agent: 'implementer', repo: 'api', attempts: 1, sessionId: 'ses_w14', acceptNote: 'Accepted by the orchestrator', updatedAt: at(now, 3, 17, 30), result: result(48, 2, 2, ['feat: GET /healthz'], 'Added `GET /healthz` with a database ping.', at(now, 3, 17, 20)) }, now),
     item({ number: 15, title: 'Cache avatar images at the edge', status: 'review', agent: 'implementer', repo: 'web', attempts: 2, sessionId: 'ses_w15', branch: 'puck/W-15-avatar-cache', base, updatedAt: now - 2 * HOUR, pr: { number: 47, url: 'https://github.com/acme/web/pull/47', draft: true, lastPushedSha: 'dec0de9', state: 'open', checks: { sha: 'dec0de9', state: 'failure', failing: [{ name: 'e2e (chromium)', url: 'https://github.com/acme/web/actions/runs/1', summary: 'avatar.spec.ts: expected 200, got 304' }] } }, result: result(88, 20, 4, ['perf: cache avatars for a day', 'fix: vary on accept'], 'Avatars now carry `Cache-Control: public, max-age=86400`.', now - 2 * HOUR - 5 * MIN) }, now),
     item({ number: 16, title: 'Retry flaky webhook deliveries', status: 'review', agent: 'implementer', repo: 'api', attempts: 1, sessionId: 'ses_w16', branch: 'puck/W-16-webhook-retry', base, updatedAt: now - 3 * HOUR, result: result(12, 3, 1, ['fix: back off webhook retries'], 'Exponential backoff with jitter, capped at 5 tries.', now - 3 * HOUR - 2 * MIN) }, now),
+    mixed(item({ number: 17, title: 'Split the invoice PDF renderer into a worker', status: 'needs-input', agent: 'implementer', repo: 'api', attempts: 1, sessionId: 'ses_w17', branch: 'puck/W-17-invoice-worker', base, pendingAsk: { askId: 'ask_w17a', routedTo: 'orchestrator' }, updatedAt: now - 40 * MIN }, now), now),
   ];
 }
 
-const ORDER = [9, 11, 10, 6, 7, 8, 3, 4, 5, 2, 15, 16, 1, 14, 12, 13];
+/** An older question routed to the orchestrator and a newer one routed to the user: the card counts the user's. */
+function mixed(it: WorkItem, now: number): WorkItem {
+  const older = it.needsInput;
+  if (!older) return it;
+  const newer = { ...older, askId: 'ask_w17b', since: now - 12 * MIN };
+  return {
+    ...it,
+    needsInput: { ...older, since: now - 40 * MIN },
+    oldestUserAsk: { askId: newer.askId, kind: newer.kind, roundId: newer.roundId, stepId: newer.stepId, since: newer.since },
+    openAsks: 2,
+    userAsks: 1,
+  };
+}
+
+const ORDER = [9, 11, 10, 6, 7, 8, 3, 4, 17, 5, 2, 15, 16, 1, 14, 12, 13];
 
 function session(over: Partial<SessionSummary> & Pick<SessionSummary, 'id' | 'kind' | 'agent'>, now: number): SessionSummary {
   return {
@@ -185,6 +205,30 @@ const W4_Q: AskQuestion[] = [
       { label: "Default to 'system'", description: 'Matches what the app shows today.' },
       { label: "Default to 'light'", description: 'Matches the old server default.' },
       { label: 'Leave them null', description: 'Handle null in the reader instead.' },
+    ],
+  },
+];
+
+const W17_ORCH_Q: AskQuestion[] = [
+  {
+    question: 'Should the worker queue live in the API process or its own service?',
+    header: 'Design',
+    multiSelect: false,
+    options: [
+      { label: 'In process', description: 'A bounded in-memory queue.' },
+      { label: 'Own service', description: 'A separate deployment.' },
+    ],
+  },
+];
+
+const W17_USER_Q: AskQuestion[] = [
+  {
+    question: 'May the renderer drop support for the legacy invoice template?',
+    header: 'Scope',
+    multiSelect: false,
+    options: [
+      { label: 'Yes, drop it', description: 'Nobody has used it since March.' },
+      { label: 'Keep it', description: 'Render it through the old path.' },
     ],
   },
 ];
@@ -295,10 +339,10 @@ function orchestratorLog(now: number, openAsk: boolean): TranscriptEntry[] {
     done('t10', 'PR #44 approved by @dana; PR #47 draft with failing e2e.', d0(13)),
     text(
       "Here's where the launch stands:\n\n" +
-        '- **In review:** W-2 (rate limiting, PR #44 approved), W-15 (avatar caching, e2e failing), W-16 (webhook retries).\n' +
-        '- **Running:** W-3 is on its second attempt at the login redirect loop.\n' +
+        '- **Finished, waiting on you to accept or merge:** W-2 (rate limiting, PR #44 approved), W-15 (avatar caching, e2e failing), W-16 (webhook retries).\n' +
+        '- **In progress:** W-3 is on its second attempt at the login redirect loop.\n' +
         '- **Waiting on you:** W-4 asks how to fill null themes.\n' +
-        '- **Ready:** W-6, W-7 and W-8 start as agents free up.\n\n',
+        '- **Todo:** W-6, W-7 and W-8 start as agents free up.\n\n',
       d0(13),
     ),
   ];
@@ -390,6 +434,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): FixtureWorld {
       ['ses_w3', 3, 'implementer', 'running'],
       ['ses_w4', 4, 'implementer', 'running'],
       ['ses_w5', 5, 'reviewer', 'running'],
+      ['ses_w17', 17, 'implementer', 'running'],
       ['ses_w2', 2, 'implementer', 'idle'],
       ['ses_w15', 15, 'implementer', 'idle'],
       ['ses_w16', 16, 'implementer', 'idle'],
@@ -410,6 +455,8 @@ export function buildWorld(scenario: Scenario, now = Date.now()): FixtureWorld {
       { sessionId: ORCH, turnId: 'trn_05', askId: 'ask_orch', questions: W7_Q, routedTo: 'user' },
       { sessionId: 'ses_w4', turnId: `trn_${t4}`, askId: 'ask_w4', questions: W4_Q, routedTo: 'user' },
       { sessionId: 'ses_w5', turnId: `trn_${t5}`, askId: 'ask_w5', questions: W5_Q, routedTo: 'orchestrator' },
+      { sessionId: 'ses_w17', turnId: 'trn_w17', askId: 'ask_w17a', questions: W17_ORCH_Q, routedTo: 'orchestrator' },
+      { sessionId: 'ses_w17', turnId: 'trn_w17', askId: 'ask_w17b', questions: W17_USER_Q, routedTo: 'user' },
     );
 
     pulls.set('itm_02', {
@@ -441,7 +488,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): FixtureWorld {
   const snapshot: Snapshot = {
     envId: ENV_ID,
     name: 'acme-launch',
-    daemon: { version: '0.1.0', build: '207bdf1c0353', protocol: 1 },
+    daemon: { version: '0.1.0', build: '207bdf1c0353', protocol: 2 },
     head: 1000,
     instance: {
       status: scenario === 'provisioning' ? 'provisioning' : 'ready',
@@ -457,6 +504,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): FixtureWorld {
     capacity,
     inflight,
     asks,
+    decisions: [],
     repos: [
       { github: 'acme/web', dir: 'web' },
       { github: 'acme/api', dir: 'api' },

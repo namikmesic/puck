@@ -15,8 +15,10 @@ export class JsonStore<T> {
     readonly file: string,
     defaults: () => T,
     normalize: (raw: unknown) => T = (raw) => raw as T,
+    opts: { skipRead?: boolean } = {},
   ) {
-    const raw = readJsonFile<unknown>(file);
+    // skipRead: the caller found the file unreadable and starts from the defaults (a checkpoint rebuilt from its journal).
+    const raw = opts.skipRead ? null : readJsonFile<unknown>(file);
     this.value = raw === null ? defaults() : normalize(raw);
   }
 

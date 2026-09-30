@@ -66,6 +66,7 @@ function setup(since: number | null, opts: { idleMs?: number; open?: () => Promi
   const events: { seq: number; ev: DaemonEvent }[] = [];
   const snapshots: Snapshot[] = [];
   const states: [AttachState, string][] = [];
+  const welcomes: number[] = [];
   const client = new DaemonClient({
     envId: 'env_x',
     open:
@@ -80,11 +81,12 @@ function setup(since: number | null, opts: { idleMs?: number; open?: () => Promi
     onEvent: (seq, _at, e) => events.push({ seq, ev: e }),
     onSnapshot: (s) => snapshots.push(s),
     onState: (s, d) => states.push([s, d]),
+    onWelcome: (d) => welcomes.push(d.protocol),
     client: { app: 'puck', build: 't' },
     timing: { pingMs: 10, idleMs: opts.idleMs ?? 10_000, backoffMs: [5, 10] },
   });
   running.push(client);
-  return { client, channels, cursor, events, snapshots, states };
+  return { client, channels, cursor, events, snapshots, states, welcomes };
 }
 
 describe('daemon client', () => {
@@ -144,7 +146,7 @@ describe('daemon client', () => {
     client.start();
     await until(() => channels.length === 1 && channels[0].sent.length > 0);
     const c = channels[0];
-    expect(c.sent[0]).toEqual({ t: 'hello', protocol: 1, client: { app: 'puck', build: 't' }, since: 5 });
+    expect(c.sent[0]).toEqual({ t: 'hello', protocol: 2, client: { app: 'puck', build: 't' }, since: 5 });
     c.frame(welcome('events', 8));
     c.frame(ev(5, status)); // overlap: already applied
     c.frame(ev(6, status));
@@ -237,6 +239,68 @@ describe('daemon client', () => {
     expect(states.at(-1)?.[1]).toMatch(/update Puck/);
     await new Promise((r) => setTimeout(r, 40));
     expect(channels).toHaveLength(1);
+  });
+
+  it('falls back to protocol 1 against a daemon that predates protocol 2, maps its tickets up, and tries protocol 2 again next time', async () => {
+    const { client, channels, snapshots, events, welcomes } = setup(null);
+    client.start();
+    await until(() => channels.length === 1 && channels[0].sent.length > 0);
+    expect(channels[0].sent[0]).toMatchObject({ t: 'hello', protocol: 2 });
+    // An old daemon: protocol 2 is refused, and the client says hello again at once with protocol 1.
+    channels[0].frame({ t: 'error', code: 'protocol-mismatch', message: 'This daemon speaks protocol 1 (and 0); the client sent 2.' });
+    await until(() => channels.length === 2 && channels[1].sent.length > 0);
+    expect(channels[1].sent[0]).toMatchObject({ t: 'hello', protocol: 1 });
+    const oldItem = { id: 'itm_1', number: 1, title: 'T', body: '', status: 'review', agent: 'implementer', repo: null, createdBy: 'user', createdAt: 1, updatedAt: 2, attempts: 1, sessionId: 's', branch: null, worktree: null, base: null, result: null, pr: { number: 4, url: 'https://github.com/octo/web/pull/4', draft: false, lastPushedSha: 'x' }, source: null, lastError: null, cancelReason: null, acceptNote: null, pendingAsk: null };
+    channels[1].onFrame = (f) => {
+      if (f.op === 'snapshot.get') channels[1].frame({ t: 'res', id: f.id, ok: true, result: { ...snap({ head: 4 }), decisions: undefined, items: [oldItem] } });
+      if (f.op === 'item.accept') channels[1].frame({ t: 'res', id: f.id, ok: true, result: { ...oldItem, status: 'done' } });
+    };
+    channels[1].frame(welcome('resync', 4, 1));
+    await until(() => snapshots.length === 1);
+    expect(client.attachState).toBe('attached');
+    expect(client.protocolVersion).toBe(1);
+    expect(welcomes).toEqual([1]);
+    expect(snapshots[0]?.items[0]).toMatchObject({ status: 'in-progress', stage: 'merge', references: [{ role: 'delivery', number: 4 }] });
+    expect(snapshots[0]?.decisions).toEqual([]);
+    channels[1].frame(ev(5, { kind: 'item.upsert', item: { ...oldItem, status: 'failed' } }));
+    expect(events.at(-1)?.ev).toMatchObject({ kind: 'item.upsert', item: { status: 'done', outcome: 'failed' } });
+    // Results that carry a ticket are mapped up too; the daemon update still goes through (a protocol-1 op).
+    await expect(client.cmd('item.accept', { itemId: 'itm_1' })).resolves.toMatchObject({ status: 'done', outcome: 'accepted' });
+    channels[1].drop();
+    await until(() => channels.length === 3 && channels[2].sent.length > 0);
+    expect(channels[2].sent[0]).toMatchObject({ t: 'hello', protocol: 2 });
+  });
+
+  it('reads a protocol-2 snapshot part by part from one head before applying it, holding live events', async () => {
+    const { client, channels, snapshots, events } = setup(null);
+    client.start();
+    await until(() => channels.length === 1);
+    const c = channels[0];
+    const head = { ...snap({ head: 20 }), items: undefined, order: undefined, sessions: undefined, inflight: undefined, asks: undefined, decisions: undefined, partsCursor: 'snp_A.0' };
+    const parts: Record<string, unknown> = {
+      'snp_A.0': { collection: 'order', records: ['itm_1', 'itm_2'], partsCursor: 'snp_A.1' },
+      'snp_A.1': { collection: 'inflight', records: [{ sessionId: 's', turnId: 't', startedAt: 1, events: [{ kind: 'text-delta', text: 'a' }] }], partsCursor: 'snp_A.2' },
+      'snp_A.2': { collection: 'inflight', records: [{ sessionId: 's', turnId: 't', startedAt: 1, events: [{ kind: 'text-delta', text: 'b' }] }], partsCursor: null },
+    };
+    const asked: string[] = [];
+    c.onFrame = (f) => {
+      if (f.op === 'snapshot.get') {
+        c.frame(ev(21, status)); // a live event while the parts are read: held
+        c.frame({ t: 'res', id: f.id, ok: true, result: head });
+      }
+      if (f.op === 'snapshot.part') {
+        const cursor = (f.args as { cursor: string }).cursor;
+        asked.push(cursor);
+        c.frame({ t: 'res', id: f.id, ok: true, result: parts[cursor] });
+      }
+    };
+    c.frame(welcome('resync', 20, 2));
+    await until(() => snapshots.length === 1);
+    expect(asked).toEqual(['snp_A.0', 'snp_A.1', 'snp_A.2']);
+    expect(snapshots[0]).toMatchObject({ head: 20, order: ['itm_1', 'itm_2'], items: [], sessions: [], asks: [], decisions: [] });
+    expect(snapshots[0]?.inflight).toEqual([{ sessionId: 's', turnId: 't', startedAt: 1, events: [{ kind: 'text-delta', text: 'a' }, { kind: 'text-delta', text: 'b' }] }]);
+    await until(() => events.length === 1);
+    expect(events[0]?.seq).toBe(21);
   });
 
   it('detaching closes the channel and never reconnects', async () => {

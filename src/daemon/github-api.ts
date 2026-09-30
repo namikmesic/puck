@@ -78,6 +78,11 @@ export interface GhPullState {
   state: 'open' | 'closed';
   merged?: boolean;
   merged_at: string | null;
+  /** Once merged: the commit the merge made (or, before it, GitHub's test merge). */
+  merge_commit_sha?: string | null;
+  merged_by?: GhUserRef | null;
+  /** How many commits the pull request carries. */
+  commits?: number;
   draft?: boolean;
   html_url: string;
   head: { sha: string; ref: string };

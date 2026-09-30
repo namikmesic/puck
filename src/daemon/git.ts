@@ -151,6 +151,14 @@ export class Git {
     return this.asRoot(this.mirrorDir(dir), github, ['fetch', '--prune', 'origin']).then(() => undefined);
   }
 
+  /** A commit's parents as the mirror knows them (after a fetch); [] when it does not have the commit. */
+  async commitParents(dir: string, github: string, sha: string): Promise<string[]> {
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) return [];
+    await this.fetchMirror(dir, github);
+    const r = await this.asRoot(this.mirrorDir(dir), github, ['rev-list', '--parents', '-n', '1', '--end-of-options', sha], QUICK_MS);
+    return r.stdout.trim().split(/\s+/).slice(1).filter((p) => /^[0-9a-f]{40,64}$/.test(p));
+  }
+
   /** Bring a branch from a bundle file (under /puck/state) into the mirror. */
   fetchBundle(dir: string, github: string, bundle: string, branch: string): Promise<void> {
     if (!pushable(branch)) return Promise.reject(new GitError(`Refusing to take ${branch}: only puck/* branches are published.`));

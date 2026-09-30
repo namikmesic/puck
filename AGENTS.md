@@ -66,6 +66,7 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
   Stores of the 0.0.1 chat app (`puck-agents.json`, `puck-environments.json`, `puck-resume.json`, `puck-convos*`, `env-secrets-*.bin`) are ignored, never read or deleted.
   Everything about the work (backlog, sessions, transcripts, events) lives in the daemon's stores under `/puck/state`, with a `formatVersion` and ordered migrations on boot; the same rule applies there.
   See `src/harness/transcript.ts` for the transcript format and its append-only rule.
+  Tickets and their workflows live in the append-only delivery journal (`src/daemon/delivery/journal.ts`); those migrations never rewrite it.
 - **Per-agent provider options** are schema-driven.
   Adding one is a single `ProviderOption` descriptor in the provider module (`configOptions`).
   An agent definition's `options:` are checked strictly against that schema (`checkSettings` in `src/harness/options.ts`), and the generated JSON Schema follows it.

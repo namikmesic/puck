@@ -1,17 +1,18 @@
 /**
- * The dev-only fixture harness: its seeded world covers every item state
- * and the chat states worth a screenshot, and its item commands follow the
- * daemon's state machine.
+ * The dev-only fixture harness: its seeded world covers every place of
+ * the three columns and the chat states worth a screenshot, and its ticket
+ * commands follow the daemon's ticket table.
  */
 
 import { describe, expect, it } from 'vitest';
-import { nextStatus, type ItemTrigger } from '../../src/harness/item-transitions';
+import { nextTicket, type TicketState, type TicketTrigger } from '../../src/harness/item-transitions';
 import type { DaemonEventPayload, PuckBridge } from '../../src/harness/bridge';
-import type { ItemStatus, WorkItem } from '../../src/harness/daemon-protocol';
+import type { WorkItem } from '../../src/harness/daemon-protocol';
+import { statusV1 } from '../../src/harness/workflow';
 import { buildWorld, ENV_ID, ORCH } from '../../src/renderer/fixture/data';
 import { fixtureBridge, fixtureScenario } from '../../src/renderer/fixture';
 
-const COMMANDS = ['assign', 'unassign', 'cancel', 'accept', 'retry', 'delete'] as const satisfies readonly ItemTrigger[];
+const COMMANDS = ['assign', 'unassign', 'cancel', 'accept', 'retry', 'delete'] as const;
 
 async function runCommand(bridge: PuckBridge, itemId: string, command: (typeof COMMANDS)[number]): Promise<unknown> {
   switch (command) {
@@ -31,9 +32,13 @@ async function runCommand(bridge: PuckBridge, itemId: string, command: (typeof C
 }
 
 describe('fixture harness', () => {
-  it('seeds every item state, several repositories and a multi-day chat', () => {
+  it('seeds every place, a failed ticket, a question for you and a mixed-routing ticket, several repositories and a multi-day chat', () => {
     const { snapshot, transcripts } = buildWorld('full', new Date(2026, 8, 29, 15, 0).getTime());
-    expect(new Set(snapshot.items.map((i) => i.status))).toEqual(new Set(['backlog', 'queued', 'running', 'needs-input', 'review', 'done', 'failed', 'cancelled']));
+    expect(new Set(snapshot.items.map((i) => i.status))).toEqual(new Set(['todo', 'in-progress', 'done']));
+    expect(new Set(snapshot.items.map((i) => statusV1(i)))).toEqual(new Set(['backlog', 'queued', 'running', 'needs-input', 'review', 'done', 'failed', 'cancelled']));
+    expect(new Set(snapshot.items.map((i) => i.outcome).filter(Boolean))).toEqual(new Set(['merged', 'accepted', 'failed', 'cancelled']));
+    expect(snapshot.items.some((i) => i.userAsks > 0 && i.needsInput?.routedTo === 'orchestrator')).toBe(true);
+    expect(snapshot.decisions).toEqual([]);
     expect(new Set(snapshot.items.map((i) => i.repo).filter(Boolean))).toEqual(new Set(['web', 'api']));
     expect(snapshot.repos).toHaveLength(2);
     const log = transcripts.get(ORCH) ?? [];
@@ -52,11 +57,16 @@ describe('fixture harness', () => {
     for (const it of items) {
       for (const command of COMMANDS) {
         const bridge = fixtureBridge('full');
-        let expected: ItemStatus | 'removed' | Error;
-        try {
-          expected = nextStatus(it.status, command);
-        } catch (err) {
-          expected = err instanceof Error ? err : new Error(String(err));
+        const state: TicketState = { status: it.status, outcome: it.outcome };
+        let expected: TicketState | 'removed' | Error;
+        if (command === 'assign' || command === 'unassign') {
+          expected = it.status === 'todo' ? state : new Error('only a ticket in Todo is assigned');
+        } else {
+          try {
+            expected = nextTicket(state, command as TicketTrigger, !!it.sessionId);
+          } catch (err) {
+            expected = err instanceof Error ? err : new Error(String(err));
+          }
         }
         if (expected instanceof Error) {
           await expect(runCommand(bridge, it.id, command), `${command} from ${it.status}`).rejects.toThrow(expected.message);
@@ -69,7 +79,7 @@ describe('fixture harness', () => {
           continue;
         }
         const updated = (await runCommand(bridge, it.id, command)) as WorkItem;
-        expect(updated.status, `${command} from ${it.status}`).toBe(expected);
+        expect({ status: updated.status, outcome: updated.outcome }, `${command} from ${it.status}`).toEqual(expected);
       }
     }
   });
@@ -80,8 +90,8 @@ describe('fixture harness', () => {
     bridge.onDaemonEvent((e) => seen.push(e));
     await bridge.daemon(ENV_ID, 'item.assign', { itemId: 'itm_09', agent: 'implementer' });
     const ev = seen.at(-1);
-    expect(ev && 'ev' in ev && ev.ev.kind === 'item.upsert' && ev.ev.item.status).toBe('queued');
-    await expect(bridge.daemon(ENV_ID, 'item.delete', { itemId: 'itm_03' })).rejects.toThrow('Cannot delete an item that is running.');
+    expect(ev && 'ev' in ev && ev.ev.kind === 'item.upsert' && statusV1(ev.ev.item)).toBe('queued');
+    await expect(bridge.daemon(ENV_ID, 'item.delete', { itemId: 'itm_03' })).rejects.toThrow('Cannot delete a ticket that is in progress.');
     await expect(bridge.githubRepos()).rejects.toThrow('not available in the fixture harness');
     expect(fixtureScenario('#fixture=empty')).toBe('empty');
     expect(fixtureScenario('#fixture=nonsense')).toBe('full');

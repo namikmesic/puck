@@ -86,12 +86,15 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
     number: 4,
     title: 'Fix login redirect',
     body: '',
-    status: 'review',
+    status: 'in-progress',
+    stage: 'merge',
+    outcome: null,
     agent: 'implementer',
     repo: 'app',
     createdBy: 'user',
     createdAt: 1,
     updatedAt: 1,
+    closedAt: null,
     attempts: 1,
     sessionId: 'ses_01J0000000000000000000000A',
     branch: 'puck/W-4-fix-login-redirect',
@@ -104,15 +107,22 @@ function reviewItem(over: Partial<ItemRecord> = {}): ItemRecord {
       uncommitted: [],
       interrupted: false,
       endedAt: 1,
+      head: HEAD1,
     },
-    pr: null,
-    source: null,
+    references: [],
     lastError: null,
     cancelReason: null,
     acceptNote: null,
-    pendingAsk: null,
+    needsInput: null,
+    oldestUserAsk: null,
+    openAsks: 0,
+    userAsks: 0,
+    delivery: null,
     requeue: null,
     pushedSha: null,
+    workflowId: null,
+    asks: [],
+    recordFormat: 2,
     ...over,
   };
 }
@@ -135,7 +145,7 @@ describe('publishing', () => {
     let pushed: string | null = null;
     const out = await publisher().publish(item, {}, (sha) => (pushed = sha));
     expect(pushed).toBe(HEAD1);
-    expect(out).toEqual({ pr: { number: 7, url: 'https://github.com/octo/app/pull/7', draft: true, lastPushedSha: HEAD1 }, created: true });
+    expect(out).toEqual({ pr: { repo: 'octo/app', number: 7, url: 'https://github.com/octo/app/pull/7', draft: true, lastPushedSha: HEAD1 }, created: true });
 
     const worktree = defined(item.worktree);
     const mirror = path.join(root.paths.mirrors, 'app.git');
@@ -197,6 +207,8 @@ describe('publishing', () => {
 
   it('closes the issue on the default branch or when that branch cannot be determined, and refs any other base', async () => {
     const source = {
+      id: 'ref_01J0000000000000000000000A',
+      role: 'source' as const,
       kind: 'github-issue' as const,
       repo: 'octo/app',
       number: 12,
@@ -209,25 +221,25 @@ describe('publishing', () => {
         : undefined;
     const bodyOf = () => String((requests.find((r) => r.method === 'POST')?.body as { body?: string } | undefined)?.body ?? '');
 
-    const onDefault = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'main' })).publish(reviewItem({ source }));
+    const onDefault = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'main' })).publish(reviewItem({ references: [source] }));
     expect(onDefault.link).toBe('Closes octo/app#12');
     expect(bodyOf()).toContain('Closes octo/app#12');
 
     requests = [];
     pulls = [];
-    const otherBase = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'develop' })).publish(reviewItem({ source }));
+    const otherBase = await publisher(1_000, undefined, repo({ full_name: 'octo/app', default_branch: 'develop' })).publish(reviewItem({ references: [source] }));
     expect(otherBase.link).toBe('Refs octo/app#12');
     expect(bodyOf()).toContain('Merging this pull request will not close the issue');
     expect(bodyOf()).not.toContain('Closes octo/app#12');
 
     requests = [];
     pulls = [];
-    const unknown = await publisher(1_000, undefined, repo({ full_name: 'octo/app' })).publish(reviewItem({ source }));
+    const unknown = await publisher(1_000, undefined, repo({ full_name: 'octo/app' })).publish(reviewItem({ references: [source] }));
     expect(unknown.link).toBe('Closes octo/app#12');
 
     requests = [];
     pulls = [];
-    const down = await publisher(1_000, undefined, repo({ message: 'no' }, 500)).publish(reviewItem({ source }));
+    const down = await publisher(1_000, undefined, repo({ message: 'no' }, 500)).publish(reviewItem({ references: [source] }));
     expect(down.link).toBe('Closes octo/app#12');
     expect(bodyOf()).toContain('Closes octo/app#12');
   });
@@ -235,7 +247,7 @@ describe('publishing', () => {
   it('opens a draft pull request the first time and updates it after a follow-up, leased on the last push', async () => {
     const item = reviewItem();
     const first = await publisher().publish(item, {}, (sha) => (item.pushedSha = sha));
-    item.pr = first.pr;
+    item.references = [{ ...first.pr, id: 'ref_01J0000000000000000000000B', role: 'delivery', kind: 'github-pr' }];
     expect(requests.map((r) => r.method)).toEqual(['GET', 'POST']);
     expect(requests[0].url).toBe('https://api.test/repos/octo/app/pulls?head=octo%3Apuck%2FW-4-fix-login-redirect&state=open&per_page=100');
     expect(requests[1].body).toEqual({
@@ -260,13 +272,12 @@ describe('publishing', () => {
     expect(push.argv).toContain(`--force-with-lease=refs/heads/puck/W-4-fix-login-redirect:${HEAD1}`);
   });
 
-  it('refuses uncommitted work, an empty branch, and items not in review, before touching the mirror', async () => {
+  it('refuses uncommitted work and an empty branch before touching the mirror (Work refuses a worker still running)', async () => {
     dirty = ' M src/a.ts\n?? notes.txt\n';
     await expect(publisher().publish(reviewItem())).rejects.toThrow(/uncommitted changes \(2 files\)/);
     dirty = '';
     commits = '';
     await expect(publisher().publish(reviewItem())).rejects.toThrow(/no commits beyond main/);
-    await expect(publisher().publish(reviewItem({ status: 'running' }))).rejects.toThrow(/running; publish it once it is in review/);
     expect(calls.some((c) => c.opts.uid === undefined)).toBe(false);
     expect(requests).toEqual([]);
   });

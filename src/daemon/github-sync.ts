@@ -16,10 +16,19 @@
  *     dispatch and edited in place. Its hidden marker names the
  *     environment and the item, so a comment whose id was never recorded
  *     (a crash right after creating it) is found again, not duplicated.
- *   - Published pull requests: merged moves the item to done from any
- *     status that is not already done (a follow-up in flight stops), and
- *     the accept note records the status it came from; closed without
- *     merging only tells the orchestrator.
+ *   - Published pull requests: a merge is recorded from GitHub's state,
+ *     whoever made it: every read of a ticket's delivery pull request (each
+ *     poll, and once at boot for every ticket whose merge the journal does
+ *     not hold) that finds it merged while the journal has no
+ *     `merge.observed` for it journals one, with the merge commit, and
+ *     moves the ticket to Done (merged) from any status the ticket table
+ *     allows (a follow-up in flight stops). It compares with the journal,
+ *     not with this module's cached pull request state, so a crash between
+ *     the cache write and the journal, a lost poll or a restart still
+ *     records the merge exactly once. A ticket already done (merged) gets
+ *     that row and no notice; its status, steps and closedAt stay, and its
+ *     delivery reference changes only when the state or merge commit differs.
+ *     Closed without merging only tells the orchestrator.
  *   - CI on the pull request's head: check runs, commit statuses and the
  *     redacted log tails of failed workflow jobs. Check names and summaries
  *     are redacted the same way. A success or failure is a notice, and the
@@ -67,7 +76,20 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { IssueHit, IssueSource, ItemPosition, PullChecks, PullFeedback, PullView, WorkItem } from '../harness/daemon-protocol';
+import type {
+  GithubIssueReference,
+  GithubPullReference,
+  IssueHit,
+  ItemPosition,
+  MergeObserved,
+  PullChecks,
+  PullFeedback,
+  PullView,
+  Reference,
+  WorkItem,
+} from '../harness/daemon-protocol';
+import { ticketPhrase } from '../harness/item-transitions';
+import { deliveryPull, sourceIssue } from '../harness/references';
 import type { GitHubPolicies } from '../harness/definitions/types';
 import { GitHubApiError, GitHubRateLimitError } from '../harness/github';
 import { redact } from '../harness/redact';
@@ -80,6 +102,7 @@ import {
   type GhCombinedStatus,
   type GhIssue,
   type GhJob,
+  type GhPullState,
   type GhReview,
   type GhReviewComment,
   type GitHubApi,
@@ -87,14 +110,14 @@ import {
   issueRef,
   NoGrantError,
 } from './github-api';
-import { type Backlog, holdsSlot, itemLabel } from './items';
+import { type Backlog, itemLabel } from './items';
 import type { Logger } from './log';
 import { ciFixPrompt, issueContext, reviewPrompt, type IssueComment } from './prompts';
 import { realTimers, type Timers } from './scheduler';
 import { ciOutcome, emptySync, type CiWatch, type Feedback, type GithubFile, type ItemSync } from './store/github';
 import type { ItemRecord } from './store/items';
 import type { JsonStore } from './store/store';
-import { WorkError, type Actor } from './work';
+import { closedForIssue, WorkError, type Actor } from './work';
 
 export const POLL = {
   intakeMs: 5 * 60_000,
@@ -129,20 +152,32 @@ export const LIMITS = {
 
 /** Repository permissions that may write. Anything else, including a permission that could not be read, is not trusted. */
 const WRITE_PERMISSIONS: ReadonlySet<string> = new Set(['admin', 'maintain', 'write']);
-const CLOSED: ReadonlySet<WorkItem['status']> = new Set(['done', 'cancelled']);
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
 
 /** The Work operations the workflow drives (implemented by Work). */
 export interface SyncWork {
   create(
-    init: { title: string; body?: string; agent?: string | null; repo?: string | null; position?: ItemPosition; source?: IssueSource | null },
+    init: {
+      title: string;
+      body?: string;
+      agent?: string | null;
+      repo?: string | null;
+      position?: ItemPosition;
+      source?: Omit<GithubIssueReference, 'id' | 'role'> | null;
+    },
     actor: Actor,
     opts?: { silent?: boolean },
   ): ItemRecord;
   update(ref: string, change: { title?: string; body?: string }, actor: Actor): ItemRecord;
   cancel(ref: string, actor: Actor, reason?: string): ItemRecord;
-  accept(ref: string, note?: string): ItemRecord;
   followUp(ref: string, text: string, author: EntryAuthor): Promise<unknown>;
+  /** A synced reference changed (the source issue's `updated_at`, the pull request's state and CI). */
+  updateReference(ref: string, reference: Reference): void;
+  /** Journal a merge and move the ticket to Done (merged); false when the journal already holds it. */
+  merged(ref: string, observed: MergeObserved, note: string): boolean;
+  mergeRecorded(repo: string, number: number): boolean;
+  /** The ticket's implement step holds a slot. */
+  isRunning(item: ItemRecord): boolean;
 }
 
 export interface GithubSyncDeps {
@@ -155,6 +190,8 @@ export interface GithubSyncDeps {
   notify(kind: NoticeKind, text: string, itemId?: string): void;
   /** True while the environment is ready and taking input. */
   canRun(): boolean;
+  /** The parents of a merge commit, read from the mirror after a fetch (best effort). */
+  mergeParents?(item: ItemRecord, sha: string): Promise<string[]>;
   log: Logger;
   now?: () => number;
   timers?: Timers;
@@ -188,22 +225,32 @@ function forGitHub(text: string, max: number): string {
   return oneLine(text.replace(/<!--|-->/g, ''), max);
 }
 
+/** The words of a ticket's place for its issue comment. */
+function statusWords(item: ItemRecord): string {
+  const pr = deliveryPull(item);
+  if (item.status === 'todo') return item.agent ? 'queued' : 'in Todo';
+  if (item.status === 'in-progress') {
+    if (item.userAsks > 0 || item.openAsks > 0) return 'waiting for an answer';
+    if (item.stage === 'merge') return pr ? `in progress, finished — PR #${pr.number}` : 'in progress, finished';
+    return 'in progress';
+  }
+  switch (item.outcome) {
+    case 'merged':
+      return pr ? `done — PR #${pr.number} merged` : 'done — merged';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      // Inline code, so a reason cannot @-mention anyone or render markup on the issue.
+      return item.cancelReason ? `cancelled: \`${forGitHub(item.cancelReason.replace(/`/g, "'"), 200)}\`` : 'cancelled';
+    default:
+      return 'done';
+  }
+}
+
 /** The status line of an item's issue comment; null before its first dispatch. */
 export function statusText(item: ItemRecord, envName: string): string | null {
   if (!item.sessionId && item.attempts === 0) return null;
-  const pr = item.pr;
-  const states: Record<WorkItem['status'], string> = {
-    backlog: 'in the backlog',
-    queued: 'queued',
-    running: 'running',
-    'needs-input': 'waiting for an answer',
-    review: pr ? `review — PR #${pr.number}` : 'review',
-    done: pr?.state === 'merged' ? `done — PR #${pr.number} merged` : 'done',
-    failed: 'failed',
-    // Inline code, so a reason cannot @-mention anyone or render markup on the issue.
-    cancelled: item.cancelReason ? `cancelled: \`${forGitHub(item.cancelReason.replace(/`/g, "'"), 200)}\`` : 'cancelled',
-  };
-  return `Puck · ${itemLabel(item)} · ${item.agent ?? 'unassigned'} · environment ${envName} — ${states[item.status]}`;
+  return `Puck · ${itemLabel(item)} · ${item.agent ?? 'unassigned'} · environment ${envName} — ${statusWords(item)}`;
 }
 
 export function labelNames(issue: Pick<GhIssue, 'labels'>): string[] {
@@ -422,7 +469,7 @@ export class GithubSync {
       if (this.repoOf(item)?.github.toLowerCase() !== key) continue;
       const hit =
         number === undefined ||
-        (kind === 'issue' ? item.source?.number === number : item.pr?.number === number);
+        (kind === 'issue' ? sourceIssue(item)?.number === number : deliveryPull(item)?.number === number);
       if (!hit) continue;
       if (kind === 'issue') this.last.delete(`issue:${item.id}`);
       if (kind === 'pull') this.last.delete(`pull:${item.id}`);
@@ -441,7 +488,7 @@ export class GithubSync {
   /** An item changed: write its issue's status comment if the status line moved. */
   itemChanged(item: WorkItem): void {
     const def = this.deps.definition();
-    if (!item.source || !def?.policies.github.statusComment) return;
+    if (!sourceIssue(item) || !def?.policies.github.statusComment) return;
     const record = this.deps.backlog.get(item.id);
     if (!record) return;
     const text = statusText(record, def.name);
@@ -479,14 +526,15 @@ export class GithubSync {
       if (this.now() < this.blockedUntil) return;
       const repo = this.repoOf(item);
       if (!repo) continue;
-      if (item.source && !CLOSED.has(item.status)) await this.step(`issue:${item.id}`, POLL.issueMs, () => this.pollIssue(item.id));
+      const pr = deliveryPull(item);
+      if (sourceIssue(item) && !closedForIssue(item)) await this.step(`issue:${item.id}`, POLL.issueMs, () => this.pollIssue(item.id));
       const s = this.deps.store.get().items[item.id];
-      if (item.pr && this.watchesPull(item, s)) await this.step(`pull:${item.id}`, POLL.pullMs, () => this.pollPull(item.id));
+      if (pr && this.watchesPull(item, s)) await this.step(`pull:${item.id}`, POLL.pullMs, () => this.pollPull(item.id));
       const ci = this.deps.store.get().items[item.id]?.ci;
-      if (item.pr && ci && s?.prState === 'open' && this.ciOpen(ci) && this.watchesPull(item, s)) {
+      if (pr && ci && s?.prState === 'open' && this.ciOpen(ci) && this.watchesPull(item, s)) {
         await this.step(`checks:${item.id}`, POLL.checksMs, () => this.pollChecks(item.id));
       }
-      if (item.source && gh.statusComment) {
+      if (sourceIssue(item) && gh.statusComment) {
         try {
           await this.writeStatus(item.id);
         } catch (err) {
@@ -496,9 +544,16 @@ export class GithubSync {
     }
   }
 
+  /**
+   * A pull request is read until its merge is in the journal (whatever the
+   * cache says: a crash may have come between the two), and not once a
+   * closed ticket's pull request was closed without merging.
+   */
   private watchesPull(item: ItemRecord, s: ItemSync | undefined): boolean {
-    if (s?.prState === 'merged') return false;
-    return !(CLOSED.has(item.status) && s?.prState === 'closed');
+    const pr = deliveryPull(item);
+    if (!pr) return false;
+    if (this.deps.work.mergeRecorded(pr.repo, pr.number)) return false;
+    return !(closedForIssue(item) && s?.prState === 'closed');
   }
 
   private async step(key: string, interval: number, fn: () => Promise<void>): Promise<void> {
@@ -554,10 +609,11 @@ export class GithubSync {
     this.deps.store.commit();
   }
 
-  private repoOf(item: Pick<ItemRecord, 'repo' | 'source'>): DaemonRepo | null {
+  private repoOf(item: Pick<ItemRecord, 'repo' | 'references'>): DaemonRepo | null {
     const def = this.deps.definition();
     if (!def) return null;
-    if (item.source) return def.repos.find((r) => r.github.toLowerCase() === item.source?.repo.toLowerCase()) ?? null;
+    const src = sourceIssue(item);
+    if (src) return def.repos.find((r) => r.github.toLowerCase() === src.repo.toLowerCase()) ?? null;
     const dir = item.repo ?? (def.repos.length === 1 ? def.repos[0].dir : null);
     return def.repos.find((r) => r.dir === dir) ?? null;
   }
@@ -583,12 +639,13 @@ export class GithubSync {
     return result;
   }
 
-  /** Patch the public pull request fields (no event when nothing changed). */
+  /** Patch the delivery pull request's public fields (no event when nothing changed). */
   private patchPr(item: ItemRecord, change: { state?: 'open' | 'closed' | 'merged'; checks?: PullChecks | null }): void {
-    if (!item.pr) return;
-    const next = { ...item.pr, ...change };
-    if (JSON.stringify(next) === JSON.stringify(item.pr)) return;
-    this.deps.backlog.patch(item, { pr: next });
+    const pr = deliveryPull(item);
+    if (!pr) return;
+    const next: GithubPullReference = { ...pr, ...change };
+    if (JSON.stringify(next) === JSON.stringify(pr)) return;
+    this.deps.work.updateReference(item.id, next);
   }
 
   /* ---------- Intake and import ---------- */
@@ -617,7 +674,7 @@ export class GithubSync {
     const agent = opts.agent ?? fromLabels.agent;
     const ref = issueRef(repo.github, issue.number);
     const title = oneLine(issue.title ?? '', LIMITS.titleChars) || `Issue ${ref}`;
-    const source: IssueSource = {
+    const source: Omit<GithubIssueReference, 'id' | 'role'> = {
       kind: 'github-issue',
       repo: repo.github,
       number: issue.number,
@@ -651,7 +708,7 @@ export class GithubSync {
     if (!repo) throw new WorkError('invalid-args', `${repoRef} is not a repository of this environment (${def.repos.map((r) => r.github).join(', ')}).`);
     const ref = issueRef(repo.github, number);
     const open = this.openIssueItem(repo.github, number);
-    if (open) throw new WorkError('invalid-state', `Issue ${ref} is already ${itemLabel(open)} (${open.status}).`);
+    if (open) throw new WorkError('invalid-state', `Issue ${ref} is already ${itemLabel(open)} (${ticketPhrase(open)}).`);
     let issue: GhIssue;
     try {
       issue = (await this.deps.api.issue(repo.github, number)).data;
@@ -699,7 +756,7 @@ export class GithubSync {
           state: String(issue.state ?? ''),
           labels: labelNames(issue),
           url: issue.html_url,
-          item: linked ? `${itemLabel(linked)} (${linked.status})` : null,
+          item: linked ? `${itemLabel(linked)} (${ticketPhrase(linked)})` : null,
         });
       }
     }
@@ -707,12 +764,12 @@ export class GithubSync {
   }
 
   private openIssueItem(repo: string, number: number): ItemRecord | undefined {
-    return this.deps.backlog.byIssue(repo, number).find((i) => !CLOSED.has(i.status));
+    return this.deps.backlog.byIssue(repo, number).find((i) => !closedForIssue(i));
   }
 
   /** The worker prompt's issue section, fetched fresh at first dispatch. */
   async issueContext(item: ItemRecord): Promise<string | null> {
-    const src = item.source;
+    const src = sourceIssue(item);
     if (!src) return null;
     const ref = issueRef(src.repo, src.number);
     let comments: IssueComment[] | null;
@@ -744,14 +801,14 @@ export class GithubSync {
 
   private async pollIssue(itemId: string): Promise<void> {
     let item = this.deps.backlog.get(itemId);
-    const src = item?.source;
-    if (!item || !src || CLOSED.has(item.status)) return;
+    const src = item ? sourceIssue(item) : null;
+    if (!item || !src || closedForIssue(item)) return;
     const s = this.syncOf(item.id);
     const ref = issueRef(src.repo, src.number);
     const { data: issue, changed } = await this.deps.api.issue(src.repo, src.number);
     if (changed && issue && typeof issue === 'object') {
       if (issue.state === 'closed') {
-        const notStarted = item.status === 'backlog' || (item.status === 'queued' && !item.sessionId);
+        const notStarted = item.status === 'todo' && !item.sessionId;
         if (notStarted) {
           this.deps.work.cancel(item.id, 'orchestrator', 'The issue was closed on GitHub.');
           this.deps.notify('issue.closed', `Issue ${ref} was closed on GitHub, so ${this.label(item)} was cancelled.`, item.id);
@@ -759,7 +816,7 @@ export class GithubSync {
           s.issueClosedNotified = true;
           this.deps.notify(
             'issue.closed',
-            `Issue ${ref} was closed on GitHub while ${this.label(item)} is ${item.status}. Decide whether to finish, cancel or keep it.`,
+            `Issue ${ref} was closed on GitHub while ${this.label(item)} is ${ticketPhrase(item)}. Decide whether to finish, cancel or keep it.`,
             item.id,
           );
         }
@@ -768,12 +825,12 @@ export class GithubSync {
       if (!item) return;
       const hash = issueHash(issue);
       if (s.issueHash === null) s.issueHash = hash;
-      else if (hash !== s.issueHash && !CLOSED.has(item.status)) {
+      else if (hash !== s.issueHash && !closedForIssue(item)) {
         s.issueHash = hash;
-        if (holdsSlot(item.status)) {
+        if (this.deps.work.isRunning(item)) {
           this.deps.notify(
             'issue.updated',
-            `Issue ${ref} was edited on GitHub while ${this.label(item)} is ${item.status}; its worker keeps the text it started with. Use work_request_changes if the change matters.`,
+            `Issue ${ref} was edited on GitHub while ${this.label(item)} is running; its worker keeps the text it started with. Use work_request_changes if the change matters.`,
             item.id,
           );
         } else {
@@ -783,11 +840,11 @@ export class GithubSync {
         }
       }
       const updatedAt = parseTime(issue.updated_at, src.updatedAt);
-      if (updatedAt !== src.updatedAt) this.deps.backlog.patch(item, { source: { ...src, updatedAt } });
+      if (updatedAt !== src.updatedAt) this.deps.work.updateReference(item.id, { ...src, updatedAt });
       this.save();
     }
     item = this.deps.backlog.get(itemId);
-    if (!item || CLOSED.has(item.status)) return;
+    if (!item || closedForIssue(item)) return;
     const createdAt = item.createdAt;
     const { data: comments } = await this.deps.api.issueComments(src.repo, src.number, createdAt);
     const list = Array.isArray(comments) ? comments : [];
@@ -831,7 +888,7 @@ export class GithubSync {
   private async writeStatusNow(itemId: string): Promise<void> {
     const def = this.deps.definition();
     const item = this.deps.backlog.get(itemId);
-    const src = item?.source;
+    const src = item ? sourceIssue(item) : null;
     if (!def || !item || !src || !def.policies.github.statusComment) return;
     const text = statusText(item, def.name);
     const s = this.syncOf(item.id);
@@ -871,9 +928,9 @@ export class GithubSync {
   async published(itemId: string): Promise<void> {
     const item = this.deps.backlog.get(itemId);
     const repo = item ? this.repoOf(item) : null;
-    if (!item?.pr || !repo) return;
+    const pr = item ? deliveryPull(item) : null;
+    if (!item || !pr || !repo) return;
     const s = this.syncOf(item.id);
-    const pr = item.pr;
     // The same pull request's same head published again (a body or title
     // update) keeps its CI watch, so its result is not reported, or fixed, a second time.
     const kept = s.prNumber === pr.number && s.ci && s.ci.sha === pr.lastPushedSha ? s.ci : null;
@@ -916,8 +973,8 @@ export class GithubSync {
   private async pollPull(itemId: string): Promise<void> {
     const item = this.deps.backlog.get(itemId);
     const repo = item ? this.repoOf(item) : null;
-    if (!item?.pr || !repo) return;
-    const pr = item.pr;
+    const pr = item ? deliveryPull(item) : null;
+    if (!item || !pr || !repo) return;
     const s = this.syncOf(item.id);
     if (s.prNumber !== pr.number) {
       const replaced = s.prNumber !== null;
@@ -946,29 +1003,50 @@ export class GithubSync {
       if (state !== s.prState) {
         s.prState = state;
         this.save();
-        this.patchPr(item, { state });
-        if (state === 'merged') {
-          const from = item.status;
-          if (from !== 'done') {
-            const during = from === 'queued' || holdsSlot(from) ? ' during a follow-up' : '';
-            this.deps.work.accept(item.id, `Pull request #${pr.number} was merged on GitHub${during}; it was ${from}.`);
-            this.deps.notify(
-              'pr.merged',
-              `${this.label(item)}: pull request #${pr.number} was merged on GitHub${during}, so the item is done; it was ${from}.`,
-              item.id,
-            );
-          } else {
-            this.deps.notify('pr.merged', `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is done.`, item.id);
-          }
-        } else if (state === 'closed') {
-          this.deps.notify('pr.closed', `${this.label(item)}: pull request #${pr.number} was closed without merging; the item stays ${item.status}.`, item.id);
+        if (state !== 'merged') this.patchPr(item, { state });
+        if (state === 'closed') {
+          this.deps.notify('pr.closed', `${this.label(item)}: pull request #${pr.number} was closed without merging; the item stays ${ticketPhrase(item)}.`, item.id);
         }
       }
+      // Compared with the journal, not the cache: the state above may have been saved before a crash.
+      if (state === 'merged') await this.observeMerge(item, pr, pull);
       if (state === 'open') await this.pollFeedback(item, repo, pr.number);
     } else if (s.prState === 'open') {
       await this.pollFeedback(item, repo, pr.number);
     }
     this.save();
+  }
+
+  /** GitHub says merged and the journal has no merge of this pull request: record it, once. */
+  private async observeMerge(item: ItemRecord, pr: GithubPullReference, pull: GhPullState): Promise<void> {
+    if (this.deps.work.mergeRecorded(pr.repo, pr.number)) return;
+    const mergeCommitSha = typeof pull.merge_commit_sha === 'string' && pull.merge_commit_sha ? pull.merge_commit_sha : null;
+    const parents = mergeCommitSha && this.deps.mergeParents ? await this.deps.mergeParents(item, mergeCommitSha).catch(() => []) : [];
+    if (this.deps.work.mergeRecorded(pr.repo, pr.number) || !this.deps.backlog.get(item.id)) return;
+    const observed: MergeObserved = {
+      itemId: item.id,
+      repo: pr.repo,
+      prNumber: pr.number,
+      prHeadSha: pull.head?.sha ?? pr.lastPushedSha,
+      prCommits: typeof pull.commits === 'number' ? pull.commits : 0,
+      mergeCommitSha,
+      mergeParents: parents,
+      mergedAt: parseTime(pull.merged_at ?? null, this.now()),
+      mergedBy: pull.merged_by?.login ?? null,
+      // Puck makes no merge call without delivery, so every merge is someone else's.
+      method: null,
+      initiatedBy: 'external',
+      reviewedHeadSha: null,
+      reviewed: false,
+    };
+    const from = ticketPhrase(item);
+    const during = this.deps.work.isRunning(item) || (item.status === 'in-progress' && item.stage === 'implement') ? ' during a follow-up' : '';
+    // Already done (merged): the orchestrator needs no notice. Status, steps and closedAt stay;
+    // merged() rewrites the delivery reference only when its state or merge commit differs.
+    const wasMerged = item.status === 'done' && item.outcome === 'merged';
+    if (!this.deps.work.merged(item.id, observed, `Pull request #${pr.number} was merged on GitHub${during}; it was ${from}.`)) return;
+    if (wasMerged) return;
+    this.deps.notify('pr.merged', `${this.label(item)}: pull request #${pr.number} was merged on GitHub${during}, so the item is done; it was ${from}.`, item.id);
   }
 
   private async pollFeedback(item: ItemRecord, repo: DaemonRepo, number: number): Promise<void> {
@@ -1051,7 +1129,7 @@ export class GithubSync {
   /** New feedback from people with write access: a notice, and with `address` a follow-up to the worker. */
   private reviewReceived(item: ItemRecord, passed: Feedback[]): void {
     const def = this.deps.definition();
-    const pr = item.pr;
+    const pr = deliveryPull(item);
     if (!def || !pr) return;
     const s = this.syncOf(item.id);
     const byAuthor = new Map<string, Feedback[]>();
@@ -1069,7 +1147,7 @@ export class GithubSync {
     const actionable = passed.filter((f) => !(f.kind === 'review' && (f.state === 'APPROVED' || !f.body.trim())));
     let extra = ' Read it with pr_read.';
     if (def.policies.github.reviews === 'address' && actionable.length) {
-      const open = item.status === 'review' || item.status === 'queued' || holdsSlot(item.status);
+      const open = item.status === 'in-progress';
       if (s.reviewRounds >= MAX_REVIEW_ROUNDS) {
         extra = ` The automatic review rounds (${MAX_REVIEW_ROUNDS}) are used up; read it with pr_read and decide.`;
       } else if (open && item.sessionId) {
@@ -1105,7 +1183,7 @@ export class GithubSync {
     const repo = item ? this.repoOf(item) : null;
     const s = this.deps.store.get().items[itemId];
     const ci = s?.ci;
-    if (!item?.pr || !repo || !ci || !this.ciOpen(ci)) return;
+    if (!item || !deliveryPull(item) || !repo || !ci || !this.ciOpen(ci)) return;
     // A re-run recorded while this poll waits assigns `superseded` a new
     // array (recordRerun), and what this poll read may be the result that
     // re-run replaced.
@@ -1198,7 +1276,7 @@ export class GithubSync {
 
   private ciSettled(item: ItemRecord, ci: CiWatch, passed: number): void {
     const def = this.deps.definition();
-    const pr = item.pr;
+    const pr = deliveryPull(item);
     if (!def || !pr) return;
     const s = this.syncOf(item.id);
     const gh = def.policies.github;
@@ -1210,7 +1288,7 @@ export class GithubSync {
       const names = ci.failing.map((f) => f.name);
       const shown = names.slice(0, 6).join(', ') + (names.length > 6 ? `, and ${names.length - 6} more` : '');
       let extra = ' Read them with ci_read.';
-      const canFollowUp = !!item.sessionId && (item.status === 'review' || item.status === 'queued' || holdsSlot(item.status));
+      const canFollowUp = !!item.sessionId && item.status === 'in-progress';
       if (gh.ci === 'fix' && !ci.fixSent) {
         if (s.ciFixAttempts >= gh.maxCiFixAttempts) {
           extra = ` The automatic fix attempts (${gh.maxCiFixAttempts}) are used up; read them with ci_read and decide.`;
@@ -1232,10 +1310,11 @@ export class GithubSync {
 
   /* ---------- Tool reads ---------- */
 
-  private pullOf(ref: ItemRecord): { pr: NonNullable<ItemRecord['pr']>; s: ItemSync; repo: DaemonRepo } {
+  private pullOf(ref: ItemRecord): { pr: GithubPullReference; s: ItemSync; repo: DaemonRepo } {
     const repo = this.repoOf(ref);
-    if (!ref.pr || !repo) throw new WorkError('invalid-state', `${itemLabel(ref)} has no pull request yet.`);
-    return { pr: ref.pr, s: this.syncOf(ref.id), repo };
+    const pr = deliveryPull(ref);
+    if (!pr || !repo) throw new WorkError('invalid-state', `${itemLabel(ref)} has no pull request yet.`);
+    return { pr, s: this.syncOf(ref.id), repo };
   }
 
   /** CI on an item's pull request, with the log tails of failed jobs (untrusted output). */

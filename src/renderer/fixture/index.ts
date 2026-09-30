@@ -9,17 +9,19 @@
  * contains it. Scenarios (`data.ts`): full (an item in every state, a
  * multi-day chat), empty, provisioning and unreachable.
  *
- * Item commands move the seeded items through the shared state machine
- * (`src/harness/item-transitions.ts`) and stream the same events back
- * (`item.upsert`, `item.removed`, `backlog.order`), so the board, menus
- * and drag and drop can be exercised. `chat.send` echoes a short
+ * Item commands move the seeded tickets through the shared ticket table
+ * (`src/harness/item-transitions.ts`), with a workflow summary that
+ * mimics the daemon's steps, and stream the same events back
+ * (`item.upsert`, `item.removed`, `backlog.order`), so the board, menus,
+ * the Done filter and drag and drop can be exercised. `chat.send` echoes a short
  * orchestrator turn. Anything a fixture cannot do rejects with a sentence
  * saying so.
  */
 
 import type { DaemonEventPayload, InstanceEvent, ProviderInfo, PuckBridge, RunnerEvent, RunnersState } from '../../harness/bridge';
-import type { DaemonEvent, ItemPosition, OpArgs, OpResult, RendererOp, WorkItem } from '../../harness/daemon-protocol';
-import { nextStatus, type ItemTrigger } from '../../harness/item-transitions';
+import type { ClientResult, DaemonEvent, ItemPosition, OpArgs, RendererOp, StepSummary, WorkflowSummary, WorkItem } from '../../harness/daemon-protocol';
+import { nextTicket, type TicketTrigger } from '../../harness/item-transitions';
+import { deliveryPull } from '../../harness/references';
 import { buildWorld, ENV_ID, ORCH, SCENARIOS, type Scenario } from './data';
 
 const PAGE = 14;
@@ -96,10 +98,34 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
     return { ...it };
   }
 
-  function move(it: WorkItem, trigger: ItemTrigger, patch: Partial<WorkItem> = {}): WorkItem {
-    const to = nextStatus(it.status, trigger);
-    if (to === 'removed') throw new Error(`Cannot ${trigger} an item that is ${it.status}.`);
-    return change(it, { ...patch, status: to });
+  const NO_ASKS = { needsInput: null, oldestUserAsk: null, openAsks: 0, userAsks: 0 } as const;
+
+  /** A one-step workflow summary, the way the daemon shows a round's implement step. */
+  function implementFlow(it: WorkItem, state: StepSummary['state'], round = 1): WorkflowSummary {
+    return {
+      round,
+      roundsAllowed: 0,
+      gate: 'pending',
+      headSha: null,
+      steps: [{ id: `stp_fx_${it.number}_${round}`, kind: 'implement', state, result: null, agent: it.agent, detail: '' }],
+      obligations: 0,
+      openFindings: 0,
+      policy: { merge: 'manual', require: null, panel: [] },
+    };
+  }
+
+  function move(it: WorkItem, trigger: TicketTrigger, patch: Partial<WorkItem> = {}): WorkItem {
+    const to = nextTicket({ status: it.status, outcome: it.outcome }, trigger, !!it.sessionId);
+    if (to === 'removed') throw new Error(`Cannot ${trigger} this ticket here.`);
+    const done = to.status === 'done';
+    return change(it, {
+      ...patch,
+      status: to.status,
+      outcome: to.outcome,
+      stage: to.status === 'in-progress' ? 'implement' : null,
+      closedAt: done ? Date.now() : null,
+      ...(done ? { workflow: null, ...NO_ASKS } : {}),
+    });
   }
 
   function place(itemId: string, position: ItemPosition): void {
@@ -123,26 +149,31 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
       number,
       title,
       body: '',
-      status: extra.agent ? 'queued' : 'backlog',
+      status: 'todo',
+      stage: null,
+      outcome: null,
       agent: null,
       repo: null,
       createdBy: 'user',
       createdAt: now,
       updatedAt: now,
+      closedAt: null,
       attempts: 0,
       sessionId: null,
       branch: null,
       worktree: null,
       base: null,
       result: null,
-      pr: null,
-      source: null,
+      references: [],
       lastError: null,
       cancelReason: null,
       acceptNote: null,
-      pendingAsk: null,
+      ...NO_ASKS,
+      delivery: null,
+      workflow: null,
       ...extra,
     };
+    if (it.agent) it.workflow = implementFlow(it, 'queued');
     snap.items.push(it);
     emit({ kind: 'item.upsert', item: { ...it } });
     place(it.id, position);
@@ -162,11 +193,11 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
     }, 700);
   }
 
-  async function daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>> {
+  async function daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<ClientResult<K>> {
     if (envId !== ENV_ID) throw new Error('The fixture has one environment.');
     if (scenario === 'unreachable') throw new Error("Can't reach build-box.");
     const a = args as Record<string, unknown>;
-    const out = (value: unknown): OpResult<K> => value as OpResult<K>;
+    const out = (value: unknown): ClientResult<K> => value as ClientResult<K>;
     switch (op) {
       case 'snapshot.get':
         return out(structuredClone(snap));
@@ -186,8 +217,11 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
         const ask = snap.asks.find((x) => x.askId === a.askId);
         snap.asks = snap.asks.filter((x) => x.askId !== a.askId);
         emit({ kind: 'ask.closed', sessionId: String(a.sessionId), askId: String(a.askId), answers: (a.answers as Record<string, string> | null) ?? null, by: 'user' });
-        const it = snap.items.find((i) => i.pendingAsk?.askId === a.askId);
-        if (it) change(it, { status: 'running', pendingAsk: null });
+        const it = snap.items.find((i) => i.oldestUserAsk?.askId === a.askId || i.needsInput?.askId === a.askId);
+        if (it) {
+          const left = it.openAsks - 1;
+          change(it, left > 0 && it.needsInput?.askId !== a.askId ? { oldestUserAsk: null, openAsks: left, userAsks: 0 } : { ...NO_ASKS, workflow: implementFlow(it, 'running', it.workflow?.round ?? 1) });
+        }
         if (ask?.sessionId === ORCH) {
           emit({ kind: 'turn.event', sessionId: ORCH, turnId: ask.turnId, event: { kind: 'text-delta', text: '\n\nThanks — I will hold W-7 until W-2 merges.', ts: Date.now() } });
         }
@@ -209,24 +243,75 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
         return out({ order: [...snap.order] });
       case 'item.assign': {
         const it = find(String(a.itemId));
-        return out(a.agent ? move(it, 'assign', { agent: String(a.agent) }) : move(it, 'unassign', { agent: null }));
+        if (it.status !== 'todo') throw new Error(`W-${it.number} is not in Todo; only a ticket in Todo is assigned.`);
+        const agent = a.agent ? String(a.agent) : null;
+        return out(change(it, { agent, workflow: agent ? implementFlow({ ...it, agent }, 'queued') : null }));
       }
       case 'item.cancel':
-        return out(move(find(String(a.itemId)), 'cancel', { pendingAsk: null, cancelReason: 'Cancelled by you.' }));
+        return out(move(find(String(a.itemId)), 'cancel', { cancelReason: 'Cancelled by you.' }));
       case 'item.accept':
-        return out(move(find(String(a.itemId)), 'accept', { pendingAsk: null, acceptNote: 'Accepted by you.' }));
-      case 'item.retry':
-        return out(move(find(String(a.itemId)), 'retry', { attempts: 0, lastError: null }));
+        return out(move(find(String(a.itemId)), 'accept', { acceptNote: 'Accepted by you.' }));
+      case 'item.retry': {
+        const it = find(String(a.itemId));
+        const moved = move(it, 'retry', { attempts: 0, lastError: null });
+        return out(change(it, { workflow: moved.agent ? implementFlow(moved, 'queued', (it.workflow?.round ?? 1) + 1) : null }));
+      }
       case 'item.publish': {
         const it = find(String(a.itemId));
         const repo = it.repo === 'api' ? 'acme/api' : 'acme/web';
-        const pr = { number: 50 + it.number, url: `https://github.com/${repo}/pull/${50 + it.number}`, draft: false, lastPushedSha: 'feedf00', state: 'open' as const, checks: null };
-        change(it, { pr });
+        const pr = {
+          id: `ref_fx_${it.number}_d`,
+          role: 'delivery' as const,
+          kind: 'github-pr' as const,
+          repo,
+          number: 50 + it.number,
+          url: `https://github.com/${repo}/pull/${50 + it.number}`,
+          draft: false,
+          lastPushedSha: 'feedf00',
+          state: 'open' as const,
+          checks: null,
+        };
+        change(it, { references: [...it.references.filter((r) => r.id !== deliveryPull(it)?.id), pr] });
         return out({ prUrl: pr.url });
+      }
+      case 'item.workflow': {
+        const it = find(String(a.itemId));
+        const wf = it.workflow;
+        if (!wf) return out({ roundsTotal: 0, round: null, steps: [], stepsCursor: null, reviews: [], decisions: [], findingsTotal: 0 });
+        const round = { round: wf.round, roundId: `rnd_fx_${it.number}_${wf.round}`, purpose: 'task' as const, headSha: it.result?.commits[0]?.sha ?? null, gate: wf.gate, settledGate: null, outcome: 'open' as const, startedAt: it.createdAt, settledAt: null };
+        const steps = wf.steps.map((s) => ({
+          ...s,
+          round: wf.round,
+          sessionId: s.kind === 'implement' ? it.sessionId : null,
+          reviewId: null,
+          task: null,
+          purpose: s.kind === 'implement' ? ('task' as const) : null,
+          group: s.kind === 'merge' ? 7 : 1,
+          after: null,
+          logicalId: s.id,
+          attempt: 1,
+          retryOf: null,
+          work: s.kind === 'implement' && it.result ? { head: it.result.commits[0]?.sha ?? '', commits: it.result.commits.length, summary: it.result.summary } : null,
+          queuedAt: it.createdAt,
+          startedAt: it.sessionId ? it.createdAt : null,
+          finishedAt: s.state === 'done' ? it.updatedAt : null,
+        }));
+        return out({ roundsTotal: wf.round, round, steps, stepsCursor: null, reviews: [], decisions: [], findingsTotal: 0 });
+      }
+      case 'item.link': {
+        const it = find(String(a.itemId));
+        const ref = String(a.ref);
+        if (!/^https:\/\//.test(ref) && !/#\d+$/.test(ref)) throw new Error(`Puck cannot read "${ref}" as a GitHub issue, pull request or https URL.`);
+        const link = { id: `ref_fx_${Date.now()}`, role: 'related' as const, kind: 'url' as const, url: ref, label: null };
+        return out(change(it, { references: [...it.references, link] }));
+      }
+      case 'item.unlink': {
+        const it = find(String(a.itemId));
+        return out(change(it, { references: it.references.filter((r) => r.id !== a.referenceId) }));
       }
       case 'item.delete': {
         const it = find(String(a.itemId));
-        nextStatus(it.status, 'delete');
+        nextTicket({ status: it.status, outcome: it.outcome }, 'delete');
         snap.items = snap.items.filter((i) => i.id !== it.id);
         snap.order = snap.order.filter((id) => id !== it.id);
         emit({ kind: 'item.removed', itemId: it.id });
@@ -240,7 +325,7 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
       case 'issue.search':
         return out({
           issues: [
-            { repo: 'acme/web', number: 131, title: 'Onboarding checklist copy', state: 'open', labels: ['launch'], url: 'https://github.com/acme/web/issues/131', item: 'W-9 (backlog)' },
+            { repo: 'acme/web', number: 131, title: 'Onboarding checklist copy', state: 'open', labels: ['launch'], url: 'https://github.com/acme/web/issues/131', item: 'W-9 (in Todo)' },
             { repo: 'acme/web', number: 140, title: 'Keyboard shortcut for search', state: 'open', labels: [], url: 'https://github.com/acme/web/issues/140', item: null },
             { repo: 'acme/api', number: 77, title: 'Verify webhook signatures', state: 'open', labels: ['security'], url: 'https://github.com/acme/api/issues/77', item: null },
           ].filter((hit) => `${hit.repo}#${hit.number} ${hit.title}`.toLowerCase().includes(String(a.query).toLowerCase()) || String(a.query).length < 3),
@@ -248,7 +333,8 @@ export function fixtureBridge(scenario: Scenario): PuckBridge {
       case 'issue.import': {
         const repo = String(a.repo);
         const number = Number(a.number);
-        return out(create(`Issue ${repo}#${number}`, { repo: repo.split('/')[1] ?? null, source: { kind: 'github-issue', repo, number, url: `https://github.com/${repo}/issues/${number}`, updatedAt: Date.now() } }, a.position as ItemPosition));
+        const source = { id: `ref_fx_${number}_s`, role: 'source' as const, kind: 'github-issue' as const, repo, number, url: `https://github.com/${repo}/issues/${number}`, updatedAt: Date.now() };
+        return out(create(`Issue ${repo}#${number}`, { repo: repo.split('/')[1] ?? null, references: [source] }, a.position as ItemPosition));
       }
       case 'scheduler.pause':
       case 'scheduler.resume':

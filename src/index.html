@@ -100,6 +100,7 @@
             <button class="btn-primary" id="oc-empty-start" type="button">Start an environment</button>
           </div>
           <div class="composer-zone" id="oc-composer-zone">
+            <div class="oc-waiting hidden" id="oc-waiting"></div>
             <p class="composer-hint hidden" id="oc-hint"></p>
             <form class="composer" id="oc-composer">
               <textarea id="oc-prompt" rows="1" aria-label="Message the orchestrator"></textarea>
@@ -151,6 +152,7 @@
           <nav class="wd-tabs" id="wd-tabs" role="tablist" aria-label="Work item views">
             <button data-tab="conversation" role="tab" type="button">Conversation</button>
             <button data-tab="changes" role="tab" type="button">Changes</button>
+            <button data-tab="workflow" role="tab" type="button">Workflow</button>
             <button data-tab="details" role="tab" type="button">Details</button>
           </nav>
           <div class="wd-panes">
@@ -178,6 +180,7 @@
               </div>
             </div>
             <div class="wd-pane wd-changes keep-scroll hidden" id="wd-changes"></div>
+            <div class="wd-pane wd-workflow keep-scroll hidden" id="wd-workflow"></div>
             <div class="wd-pane wd-details keep-scroll hidden" id="wd-details"></div>
           </div>
         </aside>

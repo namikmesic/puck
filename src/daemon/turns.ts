@@ -60,6 +60,7 @@ import { harnessDescriptorById } from '../harness/providers';
 import { validateSettings } from '../harness/options';
 import { newId } from '../harness/ulid';
 import type { DaemonAgent } from '../harness/env-definition';
+import { JournalError } from './delivery/journal';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';
@@ -205,7 +206,7 @@ export class Turns {
     return this.list().find((s) => s.kind === 'orchestrator' && s.status !== 'closed') ?? null;
   }
 
-  create(init: { kind: SessionKind; agent: string; harness: string; cwd: string; itemId?: string }): SessionRecord {
+  create(init: { kind: SessionKind; agent: string; harness: string; cwd: string; itemId?: string; stepId?: string }): SessionRecord {
     const at = this.now();
     const session: SessionRecord = {
       id: newId('ses', at),
@@ -213,6 +214,7 @@ export class Turns {
       agent: init.agent,
       harness: init.harness,
       ...(init.itemId ? { itemId: init.itemId } : {}),
+      ...(init.stepId ? { stepId: init.stepId } : {}),
       cwd: init.cwd,
       status: 'idle',
       queue: [],
@@ -223,10 +225,41 @@ export class Turns {
       lastActiveAt: at,
     };
     this.deps.sessions.get()[session.id] = session;
-    this.deps.sessions.save();
+    // Durable before a journaled ticket names it (the ticket's session is recorded next).
+    this.deps.sessions.commit();
     this.deps.log.info('session.create', { sessionId: session.id, kind: session.kind, agent: session.agent });
     this.upsert(session);
     return session;
+  }
+
+  /** A worker session works for another implement step now (a new round, a retry). */
+  bindStep(sessionId: string, stepId: string): void {
+    const session = this.get(sessionId);
+    if (!session || session.stepId === stepId) return;
+    session.stepId = stepId;
+    this.deps.sessions.save();
+  }
+
+  /**
+   * The texts a session holds as input, one per logical input: queued,
+   * handed to the running turn, or recorded in the transcript at or after
+   * `since`. An input handed to a turn is in the handoff and, once its turn
+   * recorded it, in the transcript too; it counts once, so a repeated
+   * request with the same text stays distinct. Boot recovery compares
+   * journaled step inputs against it.
+   */
+  inputTexts(sessionId: string, since: number): string[] {
+    const session = this.get(sessionId);
+    if (!session) return [];
+    const log = this.deps.transcripts.get(sessionId).log;
+    const texts = (this.queues.get(sessionId) ?? session.queue).map((q) => q.text);
+    const handoff = session.handoff;
+    if (handoff) {
+      const recorded = durableInputs(turnLines(log, handoff.turnId).map(copyInput), handoff.inputs);
+      for (const q of handoff.inputs.slice(recorded)) texts.push(q.text);
+    }
+    for (const entry of log) if (entry.kind === 'user' && entry.ts >= since) texts.push(entry.text);
+    return texts;
   }
 
   close(sessionId: string): void {
@@ -739,15 +772,31 @@ export class Turns {
     return ask ? { sessionId: ask.sessionId, questions: ask.questions, routedTo: ask.routedTo, ...(ask.note ? { note: ask.note } : {}) } : null;
   }
 
+  /**
+   * Close a question. An answer is recorded first (`onAskClosed` journals
+   * it): if the journal refuses, the question stays open, nothing is
+   * recorded or emitted, the worker keeps waiting, and the refusal is
+   * thrown. A cancellation (the turn is ending) always closes.
+   */
   private closeAsk(askId: string, answers: Record<string, string> | null, by: AskCloser): void {
     const ask = this.asks.get(askId);
     if (!ask) return;
+    const session = this.get(ask.sessionId);
+    let recorded = false;
+    if (by !== 'cancelled' && session && this.deps.onAskClosed) {
+      try {
+        this.deps.onAskClosed(session, askId, by);
+      } catch (err) {
+        if (err instanceof JournalError) throw err;
+        this.deps.log.error('ask.closed-failed', err, { sessionId: ask.sessionId });
+      }
+      recorded = true;
+    }
     this.asks.delete(askId);
     const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
     if (entry && recordAskAnswer(entry, askId, answers)) this.deps.transcripts.saveSoon(ask.sessionId);
     this.emitSafe({ kind: 'ask.closed', sessionId: ask.sessionId, askId, answers, by });
-    const session = this.get(ask.sessionId);
-    if (session && this.deps.onAskClosed) {
+    if (!recorded && session && this.deps.onAskClosed) {
       try {
         this.deps.onAskClosed(session, askId, by);
       } catch (err) {
@@ -1230,6 +1279,23 @@ function sawProvider(events: TurnEntry['events']): boolean {
   return events.some(
     (e) => e.kind === 'text-delta' || e.kind === 'thinking' || e.kind === 'tool-start' || e.kind === 'tool-end' || e.kind === 'ask',
   );
+}
+
+/**
+ * The user lines recorded for turn `turnId`: those just before its turn
+ * entry (notices between are skipped), or, while it has no entry yet, the
+ * lines after the last turn entry.
+ */
+function turnLines(log: TranscriptEntry[], turnId: string): UserEntry[] {
+  const at = log.findIndex((entry) => entry.kind === 'turn' && entry.turnId === turnId);
+  const lines: UserEntry[] = [];
+  for (let i = (at < 0 ? log.length : at) - 1; i >= 0; i--) {
+    const entry = log[i];
+    if (entry.kind === 'notice') continue;
+    if (entry.kind !== 'user') break;
+    lines.unshift(entry);
+  }
+  return lines;
 }
 
 /** User lines of the in-flight turn. A finished turn ends the tail; a restart-closed one does not. */

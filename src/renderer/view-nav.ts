@@ -14,7 +14,7 @@ export type View = 'chat' | 'board';
 export type Center = 'env' | 'first-run';
 export type Modal = 'settings' | 'start';
 export type SettingsSection = 'providers' | 'runners' | 'support';
-export type WorkTab = 'conversation' | 'changes' | 'details';
+export type WorkTab = 'conversation' | 'changes' | 'workflow' | 'details';
 
 export interface NavState {
   center: Center;

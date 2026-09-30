@@ -9,6 +9,10 @@
  * The link's timer starts at open and is not reset on welcome. Close the
  * link before any slow work of your own; the token pump does that before
  * it asks the server to mint.
+ *
+ * The link says hello with PROTOCOL_VERSION; a daemon that predates it
+ * refuses with `protocol-mismatch`, and the link opens once more with
+ * protocol 1. Its ops (`github.put`, `github.nudge`) are the same in both.
  */
 
 import {
@@ -43,7 +47,16 @@ export function attachArgs(envId: string): string[] {
 }
 
 /** Opens a link and completes the handshake, or rejects (daemon not up yet, container gone). */
-export function openDaemonLink(spawner: DockerSpawner, envId: string, client: { app: string; build: string }): Promise<DaemonLink> {
+export async function openDaemonLink(spawner: DockerSpawner, envId: string, client: { app: string; build: string }): Promise<DaemonLink> {
+  try {
+    return await openWith(spawner, envId, client, PROTOCOL_VERSION);
+  } catch (err) {
+    if (!(err instanceof DaemonLinkError) || err.code !== 'protocol-mismatch' || PROTOCOL_VERSION <= 1) throw err;
+    return openWith(spawner, envId, client, PROTOCOL_VERSION - 1);
+  }
+}
+
+function openWith(spawner: DockerSpawner, envId: string, client: { app: string; build: string }, protocol: number): Promise<DaemonLink> {
   const child = spawner(attachArgs(envId));
   const pending = new Map<string, { resolve(v: unknown): void; reject(e: Error): void }>();
   let buf = '';
@@ -120,6 +133,6 @@ export function openDaemonLink(spawner: DockerSpawner, envId: string, client: { 
       if (ok) resolve(link);
       else reject(err);
     };
-    child.stdin.write(JSON.stringify({ t: 'hello', protocol: PROTOCOL_VERSION, client, since: null }) + '\n');
+    child.stdin.write(JSON.stringify({ t: 'hello', protocol, client, since: null }) + '\n');
   });
 }
