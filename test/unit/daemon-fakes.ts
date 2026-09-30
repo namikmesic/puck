@@ -243,6 +243,10 @@ export const LEGACY = {
   merged: 'itm_01J00000000000000000MERGED',
   failed: 'itm_01J00000000000000000FAILED',
   cancelled: 'itm_01J00000000000000CANCELLED',
+  /** Queued with a session but no agent: unassigned after it ran. Its session's owner runs it. */
+  unassigned: 'itm_01J0000000000000UNASSIGNED',
+  /** The same, with no session record left to name an owner: it waits in Todo. */
+  orphaned: 'itm_01J000000000000000ORPHANED',
 } as const;
 
 /**
@@ -250,7 +254,9 @@ export const LEGACY = {
  * in each of the eight old statuses, a queued one with and one without a
  * session, two done ones (one accepted, one with a merged pull request), a
  * question routed to the orchestrator and one to the user, an active worker
- * session with a queued input, a source issue and an open pull request.
+ * session with a queued input, a source issue and an open pull request, and
+ * two queued ones with a session but no agent (one whose session record is
+ * gone).
  */
 export function legacyState(): { items: Record<string, unknown>; sessions: Record<string, unknown> } {
   let n = 0;
@@ -303,6 +309,8 @@ export function legacyState(): { items: Record<string, unknown>; sessions: Recor
     rec(LEGACY.merged, { status: 'done', result: result(), pr: { number: 41, url: 'https://github.com/octo/app/pull/41', draft: false, lastPushedSha: 'd'.repeat(40), state: 'merged' } }),
     rec(LEGACY.failed, { status: 'failed', attempts: 3, lastError: 'Tests failed.' }),
     rec(LEGACY.cancelled, { status: 'cancelled', agent: null, sessionId: null, attempts: 0, cancelReason: 'Not needed.' }),
+    rec(LEGACY.unassigned, { status: 'queued', agent: null }),
+    rec(LEGACY.orphaned, { status: 'queued', agent: null }),
   ];
   const items = { nextNumber: n + 1, order: list.map((i) => i.id), items: Object.fromEntries(list.map((i) => [i.id, i])) };
   const sessions: Record<string, unknown> = {};
@@ -324,6 +332,8 @@ export function legacyState(): { items: Record<string, unknown>; sessions: Recor
       lastActiveAt: LEGACY_T + 60,
     };
   }
+  const orphan = list.find((i) => i.id === LEGACY.orphaned);
+  if (orphan?.sessionId) delete sessions[orphan.sessionId];
   sessions.ses_01J0000000000000000000ORCH = { id: 'ses_01J0000000000000000000ORCH', kind: 'orchestrator', agent: 'lead', harness: 'claude-code', cwd: '/workspace', status: 'idle', queue: [], turns: 0, lastTurnTokens: 0, costUsd: 0, createdAt: LEGACY_T, lastActiveAt: LEGACY_T };
   return { items, sessions };
 }

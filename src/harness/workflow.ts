@@ -360,6 +360,8 @@ export function workflowIdOf(itemId: string): string {
 export interface LegacyShape {
   status: ItemStatusV1;
   sessionId: string | null;
+  /** The agent the ticket runs with; a queued ticket without one has nothing to run it. */
+  agent: string | null;
   /** The pull request's state as protocol 1 last recorded it. */
   prState?: 'open' | 'closed' | 'merged';
   interrupted: boolean;
@@ -385,6 +387,9 @@ export function mapLegacy(item: LegacyShape): LegacyMapping {
     case 'backlog':
       return { status: 'todo', outcome: null, stage: null, implement: null, merge: null };
     case 'queued':
+      // Queued with no agent (unassigned after it ran, its session's owner unknown): nothing would pick it up,
+      // so it waits in Todo like a backlog ticket until someone assigns it.
+      if (!item.agent) return { status: 'todo', outcome: null, stage: null, implement: null, merge: null };
       return item.sessionId
         ? { status: 'in-progress', outcome: null, stage: 'implement', implement: implement('queued'), merge: null }
         : { status: 'todo', outcome: null, stage: null, implement: implement('queued'), merge: null };
@@ -472,7 +477,7 @@ export function legacySummarySteps(itemId: string, agent: string | null, mapping
  * attached to a daemon that predates protocol 2 (12.3).
  */
 export function upgradeV1Item(item: WorkItemV1): WorkItem {
-  const mapping = mapLegacy({ status: item.status, sessionId: item.sessionId, prState: item.pr?.state, interrupted: !!item.result?.interrupted });
+  const mapping = mapLegacy({ status: item.status, sessionId: item.sessionId, agent: item.agent, prState: item.pr?.state, interrupted: !!item.result?.interrupted });
   const ids = legacyIds(item.id);
   const ask = item.pendingAsk
     ? { askId: item.pendingAsk.askId, kind: 'question' as const, roundId: ids.roundId, stepId: ids.implementId, routedTo: item.pendingAsk.routedTo, since: item.updatedAt }

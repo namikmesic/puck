@@ -23,8 +23,9 @@ import { issueLink } from '../../src/daemon/publish';
 import { githubStore } from '../../src/daemon/store/github';
 import type { ItemRecord } from '../../src/daemon/store/items';
 import { Work, WorkError, type WorkDeps } from '../../src/daemon/work';
-import { deliveryStack, exampleDefinition, placeOf, seedChanges, seedTicket, tempRoot, type Stack } from './daemon-fakes';
-import { activeImplementOf, addManualMerge, askFields, stepMove, ticketStatus } from '../../src/daemon/workflow';
+import { deliveryStack, exampleDefinition, LEGACY, placeOf, seedChanges, seedTicket, tempRoot, writeLegacyState, type Stack } from './daemon-fakes';
+import { activeImplementOf, addManualMerge, askFields, bootstrapLegacy, stepMove, ticketStatus } from '../../src/daemon/workflow';
+import { migrateState } from '../../src/daemon/store/meta';
 import { PIPELINE } from '../../src/daemon/delivery/derive';
 import { openJournal } from '../../src/daemon/delivery/journal';
 
@@ -1116,6 +1117,33 @@ describe('merge.observed', () => {
     opened.journal.close();
     return opened.transactions.flatMap((tx) => tx.events);
   }
+
+  it('records a pull request an older daemon already saw merged once, without a notice or a change to its ticket', async () => {
+    policies = { intake: 'off' };
+    stack.journal.close();
+    writeLegacyState(root.paths.state);
+    expect(migrateState(root.paths.state, { daemonVersion: 'new', now: T0, eventHead: 0 })).toMatchObject({ ok: true, to: 2 });
+    restart();
+    bootstrapLegacy(stack.workflow, backlog.list(), stack.items.get().nextNumber);
+    const before = structuredClone(backlog.get(LEGACY.merged));
+    expect(before).toMatchObject({ status: 'done', outcome: 'merged' });
+    expect(deliveryPull(before)).toMatchObject({ number: 41, state: 'merged' });
+    fake.gh.pulls.set(41, { number: 41, html_url: 'https://github.com/octo/app/pull/41', head: { sha: 'd'.repeat(40), ref: 'puck/W-9' }, ...merged });
+    fake.gh.pulls.set(40, { number: 40, state: 'open', merged: false, merged_at: null, html_url: 'https://github.com/octo/app/pull/40', head: { sha: 'c'.repeat(40), ref: 'puck/W-7' } });
+    clock += 60_000;
+    await sync.poll();
+    await pollAll();
+    // The one-time read journals the merge row the journal lacked, with the pull request's facts…
+    expect(observed()).toEqual([expect.objectContaining({ itemId: LEGACY.merged, repo: 'octo/app', prNumber: 41, mergeCommitSha: MERGE_SHA, mergedBy: 'octocat' })]);
+    // …and nothing else: no notice wakes the orchestrator, and the ticket keeps its record, updatedAt included.
+    expect(noticesOf('pr.merged')).toEqual([]);
+    expect(backlog.get(LEGACY.merged)).toEqual(before);
+    restart();
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+    expect(noticesOf('pr.merged')).toEqual([]);
+  });
 
   it('records the merge with its commit, once, and the ticket is done (merged)', async () => {
     policies = { intake: 'off' };

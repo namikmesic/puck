@@ -477,7 +477,9 @@ export class Work {
    * GitHub reports the ticket's delivery pull request merged and the journal
    * has no merge of it yet: journal `merge.observed` and move the ticket to
    * Done (merged) from any status the ticket table allows, in one
-   * transaction. Returns false when the merge was already recorded.
+   * transaction. A ticket already done (merged) keeps its record as it is:
+   * only the merge.observed row is journaled. Returns false when the merge
+   * was already recorded.
    */
   merged(ref: string, observed: MergeObserved, note: string): boolean {
     const item = this.item(ref);
@@ -489,7 +491,9 @@ export class Work {
       const tx = this.begin('merge.observed');
       tx.push({ kind: 'merge.observed', ...observed });
       const pr = deliveryPull(item);
-      if (pr && pr.number === observed.prNumber) {
+      const wasMerged = item.status === 'done' && item.outcome === 'merged';
+      const same = pr?.state === 'merged' && pr.mergeCommitSha === observed.mergeCommitSha;
+      if (pr && pr.number === observed.prNumber && !wasMerged && !same) {
         this.deps.backlog.reference(tx, item, 'update', { ...pr, state: 'merged', mergeCommitSha: observed.mergeCommitSha });
       }
       if (allows({ status: item.status, outcome: item.outcome }, 'merged')) {

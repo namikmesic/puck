@@ -1039,15 +1039,12 @@ export class GithubSync {
     };
     const from = ticketPhrase(item);
     const during = this.deps.work.isRunning(item) || (item.status === 'in-progress' && item.stage === 'implement') ? ' during a follow-up' : '';
-    const wasDone = item.status === 'done' && item.outcome === 'merged';
+    // A ticket already done (merged), as an older daemon recorded it, gets its merge.observed row and nothing else:
+    // nothing changed that the orchestrator needs to hear about.
+    const wasMerged = item.status === 'done' && item.outcome === 'merged';
     if (!this.deps.work.merged(item.id, observed, `Pull request #${pr.number} was merged on GitHub${during}; it was ${from}.`)) return;
-    this.deps.notify(
-      'pr.merged',
-      wasDone
-        ? `${this.label(item)}: pull request #${pr.number} was merged on GitHub; the item is done.`
-        : `${this.label(item)}: pull request #${pr.number} was merged on GitHub${during}, so the item is done; it was ${from}.`,
-      item.id,
-    );
+    if (wasMerged) return;
+    this.deps.notify('pr.merged', `${this.label(item)}: pull request #${pr.number} was merged on GitHub${during}, so the item is done; it was ${from}.`, item.id);
   }
 
   private async pollFeedback(item: ItemRecord, repo: DaemonRepo, number: number): Promise<void> {

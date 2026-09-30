@@ -934,6 +934,11 @@ describe('the format-2 upgrade', () => {
     expect(byId(LEGACY.merged)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: LEGACY_T + 109, workflow: null });
     expect(byId(LEGACY.merged).references).toEqual([expect.objectContaining({ role: 'delivery', number: 41, state: 'merged' })]);
     expect(byId(LEGACY.failed)).toMatchObject({ status: 'done', outcome: 'failed' });
+    // Queued with a session but no agent: the session's owner runs its implement step;
+    // with no session record to name an owner, it waits in Todo for someone to assign it.
+    expect(byId(LEGACY.unassigned)).toMatchObject({ status: 'in-progress', stage: 'implement', agent: 'implementer' });
+    expect(byId(LEGACY.unassigned).workflow?.steps.find((s) => s.kind === 'implement')).toMatchObject({ agent: 'implementer' });
+    expect(byId(LEGACY.orphaned)).toMatchObject({ status: 'todo', stage: null, agent: null, workflow: null });
 
     // The running ticket resumes its session and runs its queued input exactly once.
     await vi.waitFor(() => expect(workerCalls.filter((r) => r.prompt === 'Also update the docs.')).toHaveLength(1), { timeout: 3000 });
@@ -948,6 +953,30 @@ describe('the format-2 upgrade', () => {
     await expect(c.cmd('item.retry', { itemId: LEGACY.merged })).rejects.toThrow('Cannot retry a ticket that is done (merged).');
     await daemon.shutdown();
     expect(workerCalls.filter((r) => r.prompt === 'Also update the docs.')).toHaveLength(1);
+  });
+
+  it('runs a legacy ticket queued with a session but no agent with its session’s owner, and lets the orphaned one be assigned', async () => {
+    await daemon.shutdown();
+    root.cleanup();
+    root = tempRoot('pd-work-');
+    writeLegacyState(root.paths.state);
+    const file = path.join(root.paths.state, 'items.json');
+    const legacy = JSON.parse(fs.readFileSync(file, 'utf8')) as { order: string[]; items: Record<string, { sessionId: string | null }> };
+    legacy.items = { [LEGACY.unassigned]: defined(legacy.items[LEGACY.unassigned]), [LEGACY.orphaned]: defined(legacy.items[LEGACY.orphaned]) };
+    legacy.order = [LEGACY.unassigned, LEGACY.orphaned];
+    fs.writeFileSync(file, JSON.stringify(legacy));
+    deliver();
+    workerSteps = [say('Picked up again.'), say('Started fresh.')];
+    await launch();
+    const sessionId = defined(legacy.items[LEGACY.unassigned]?.sessionId);
+    await vi.waitFor(() => expect(workerCalls.some((r) => r.sessionId === sessionId)).toBe(true), { timeout: 3000 });
+    const c = client(2);
+    await vi.waitFor(async () => expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === LEGACY.unassigned)).toMatchObject({ status: 'in-progress', stage: 'merge' }));
+    expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === LEGACY.orphaned)).toMatchObject({ status: 'todo', agent: null, sessionId: null });
+    expect(await c.cmd<WorkItem>('item.assign', { itemId: LEGACY.orphaned, agent: 'implementer' })).toMatchObject({ agent: 'implementer' });
+    // Assigned, it starts in a session of its own.
+    await vi.waitFor(async () => expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === LEGACY.orphaned)?.sessionId).toMatch(/^ses_/), { timeout: 3000 });
+    expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === LEGACY.orphaned)?.sessionId).not.toBe(legacy.items[LEGACY.orphaned]?.sessionId);
   });
 
   it('queues a journaled input again when a crash kept it from the session, and only once', async () => {

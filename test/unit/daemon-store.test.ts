@@ -171,6 +171,8 @@ describe('the format-2 migration', () => {
     merged: { status: 'done', outcome: 'merged', stage: null, closedAt: 'updated', workflow: true },
     failed: { status: 'done', outcome: 'failed', stage: null, closedAt: 'updated', workflow: true },
     cancelled: { status: 'done', outcome: 'cancelled', stage: null, closedAt: 'updated', workflow: true },
+    unassigned: { status: 'in-progress', outcome: null, stage: 'implement', closedAt: null, workflow: true },
+    orphaned: { status: 'todo', outcome: null, stage: null, closedAt: null, workflow: false },
   };
 
   it('maps every old status to status, stage and outcome, keeping everything else', () => {
@@ -188,6 +190,10 @@ describe('the format-2 migration', () => {
       expect(rec.workflowId, name).toBe(want.workflow ? legacyIds(id).workflowId : null);
       expect(rec.recordFormat, name).toBe(2);
       for (const key of ['agent', 'attempts', 'sessionId', 'branch', 'worktree', 'base', 'lastError', 'cancelReason', 'acceptNote', 'requeue', 'pushedSha', 'createdBy', 'createdAt', 'updatedAt']) {
+        // A queued ticket without an agent takes its session's owner.
+        if (name === 'unassigned' && key === 'agent') continue;
+        // With no session record left, the dangling session id goes.
+        if (name === 'orphaned' && key === 'sessionId') continue;
         expect(rec[key], `${name}.${key}`).toEqual(was[key]);
       }
       for (const key of ['source', 'pr', 'pendingAsk']) expect(rec, `${name} drops ${key}`).not.toHaveProperty(key);
@@ -208,6 +214,9 @@ describe('the format-2 migration', () => {
       { id: `ref_${LEGACY.review.slice(4)}_d`, role: 'delivery', kind: 'github-pr', repo: 'octo/app', number: 40, url: 'https://github.com/octo/app/pull/40', draft: true, lastPushedSha: 'c'.repeat(40), state: 'open' },
     ]);
     expect((migrated[LEGACY.merged] as { references: Array<{ state?: string }> }).references[0]?.state).toBe('merged');
+    // Queued with a session but no agent: the session's owner runs it; with no session record left, it waits in Todo.
+    expect(migrated[LEGACY.unassigned]).toMatchObject({ agent: 'implementer', status: 'in-progress', stage: 'implement' });
+    expect(migrated[LEGACY.orphaned]).toMatchObject({ agent: null, sessionId: null, status: 'todo', stage: null, workflowId: null });
     // Each worker session gains its ticket's implement step; the orchestrator's does not.
     const migratedSessions = out['sessions.json'] as Record<string, Record<string, unknown>>;
     for (const s of Object.values(migratedSessions)) {

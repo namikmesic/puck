@@ -49,12 +49,22 @@ const V1_STATUSES: readonly ItemStatusV1[] = ['backlog', 'queued', 'running', 'n
 type Raw = Record<string, unknown>;
 
 /** One protocol-1 ticket record in format 2 (4.1's mapping; everything else kept). */
-export function migrateRecord(id: string, raw: Raw): Raw {
+/**
+ * One items.json record to format 2. `ownerOf` names a worker session's
+ * agent: a ticket queued with a session but no agent (unassigned after it
+ * ran) takes its session's owner, so its implement step has an agent to
+ * run it. With no session record left to name one, the ticket lands in
+ * Todo and drops the dangling session id, so it can be assigned again.
+ */
+export function migrateRecord(id: string, raw: Raw, ownerOf: (sessionId: string) => string | null = () => null): Raw {
   if (raw.recordFormat === 2) return raw;
   const old = V1_STATUSES.includes(raw.status as ItemStatusV1) ? (raw.status as ItemStatusV1) : 'backlog';
   const pr = raw.pr as { state?: 'open' | 'closed' | 'merged' } | null | undefined;
   const result = raw.result as Raw | null | undefined;
-  const mapping = mapLegacy({ status: old, sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null, prState: pr?.state, interrupted: !!result?.interrupted });
+  const recorded = typeof raw.sessionId === 'string' ? raw.sessionId : null;
+  const agent = typeof raw.agent === 'string' && raw.agent ? raw.agent : old === 'queued' && recorded ? ownerOf(recorded) : null;
+  const sessionId = old === 'queued' && !agent ? null : recorded;
+  const mapping = mapLegacy({ status: old, sessionId, agent, prState: pr?.state, interrupted: !!result?.interrupted });
   const ids = legacyIds(id);
   const pending = raw.pendingAsk as { askId?: unknown; routedTo?: unknown } | null | undefined;
   const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : 0;
@@ -68,6 +78,8 @@ export function migrateRecord(id: string, raw: Raw): Raw {
   const user = asks.find((a) => a.routedTo === 'user');
   return {
     ...rest,
+    agent,
+    sessionId,
     status: mapping.status,
     stage: mapping.stage,
     outcome: mapping.outcome,
@@ -91,22 +103,26 @@ export function migrateRecord(id: string, raw: Raw): Raw {
 export function migrateToFormat2(state: StateFiles): StateFiles {
   const out: StateFiles = { ...state };
   const items = state['items.json'] as { items?: Record<string, Raw> } | undefined;
+  const sessions = state['sessions.json'] as Record<string, Raw> | undefined;
+  const ownerOf = (sessionId: string): string | null => {
+    const s = sessions && typeof sessions === 'object' ? sessions[sessionId] : undefined;
+    return s && s.kind === 'worker' && typeof s.agent === 'string' && s.agent ? s.agent : null;
+  };
   const records: Record<string, Raw> = {};
   if (items && items.items && typeof items.items === 'object') {
     for (const [id, raw] of Object.entries(items.items)) {
-      records[id] = raw && typeof raw === 'object' ? migrateRecord(id, raw) : raw;
+      records[id] = raw && typeof raw === 'object' ? migrateRecord(id, raw, ownerOf) : raw;
     }
     out['items.json'] = { ...items, items: records };
   }
-  const sessions = state['sessions.json'] as Record<string, Raw> | undefined;
   if (sessions && typeof sessions === 'object') {
     const next: Record<string, Raw> = {};
     for (const [id, s] of Object.entries(sessions)) {
       const itemId = s && typeof s.itemId === 'string' ? s.itemId : null;
       const ticket = itemId ? records[itemId] : undefined;
-      const legacy = ticket ? (ticket.legacyStatus as ItemStatusV1 | undefined) : undefined;
+      // Only a ticket that got a legacy workflow has an implement step for its session.
       next[id] =
-        s && s.kind === 'worker' && itemId && typeof s.stepId !== 'string' && legacy && legacy !== 'backlog'
+        s && s.kind === 'worker' && itemId && typeof s.stepId !== 'string' && ticket && typeof ticket.workflowId === 'string'
           ? { ...s, stepId: legacyIds(itemId).implementId }
           : s;
     }

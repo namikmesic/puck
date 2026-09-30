@@ -474,7 +474,7 @@ export function bootstrapLegacy(wf: Workflow, items: readonly ItemRecord[], next
     tx.push({ kind: 'ticket.created', item: structuredClone(item), position: index, nextNumber, legacy: true });
     const legacy = item.legacyStatus;
     const mapping = legacy
-      ? mapLegacy({ status: legacy, sessionId: item.sessionId, prState: deliveryPull(item)?.state, interrupted: !!item.result?.interrupted })
+      ? mapLegacy({ status: legacy, sessionId: item.sessionId, agent: item.agent, prState: deliveryPull(item)?.state, interrupted: !!item.result?.interrupted })
       : null;
     const ids = legacyIds(item.id);
     if (mapping?.implement) {

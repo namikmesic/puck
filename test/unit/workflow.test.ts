@@ -244,7 +244,13 @@ describe("protocol 1's statuses and the three-state model", () => {
   ];
 
   it.each(MAPPING.map((m) => [`${m[0]}${m[1] ? ' with a session' : ''}${m[2] ? ` (${m[2]})` : ''}${m[3] ? ' interrupted' : ''}`, m] as const))('%s', (_n, [status, session, prState, interrupted, want]) => {
-    expect(mapLegacy({ status, sessionId: session ? 'ses_1' : null, prState, interrupted })).toEqual(want);
+    expect(mapLegacy({ status, sessionId: session ? 'ses_1' : null, agent: 'implementer', prState, interrupted })).toEqual(want);
+  });
+
+  it('sends a queued ticket with no agent to Todo without a step, with or without a session: nothing would run it', () => {
+    for (const sessionId of [null, 'ses_1']) {
+      expect(mapLegacy({ status: 'queued', sessionId, agent: null, interrupted: false })).toEqual({ status: 'todo', outcome: null, stage: null, implement: null, merge: null });
+    }
   });
 
   function v1(over: Partial<WorkItemV1> & Pick<WorkItemV1, 'status'>): WorkItemV1 {
