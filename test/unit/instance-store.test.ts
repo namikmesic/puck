@@ -152,6 +152,107 @@ describe('daemon upgrade state', () => {
     expect(store.state()?.upgrading).toBeNull();
   });
 
+  it.each(['replay', 'snapshot'] as const)('times out a failed drain upgrade returning on the old build by %s while new work runs', (reattach) => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ inflight: [{ sessionId: ORCH, turnId: 'old-turn', startedAt: 1, events: [] }] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.applyEvent(12, {
+      kind: 'turn.end', sessionId: ORCH, turnId: 'old-turn',
+      stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 },
+    }, ENV);
+    store.applyEvent(13, { kind: 'instance.status', status: 'stopping', detail: 'upgrading' }, ENV);
+    // A failed persist or bundle swap restarts the old daemon, which accepts new work.
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(1_000);
+    store.applyWelcome(snap().daemon, 16, ENV);
+    store.upsertInstance(instance());
+    store.applyEvent(14, { kind: 'instance.status', status: 'provisioning' }, ENV);
+    store.applyEvent(15, { kind: 'instance.status', status: 'ready' }, ENV);
+    store.applyEvent(16, { kind: 'turn.start', sessionId: ORCH, turnId: 'new-turn' }, ENV);
+    if (reattach === 'snapshot') {
+      store.applySnapshot(snap({ head: 16, inflight: [{ sessionId: ORCH, turnId: 'new-turn', startedAt: 1_000, events: [] }] }), ENV);
+    }
+    vi.advanceTimersByTime(119_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toMatch(/did not complete within two minutes/);
+    vi.advanceTimersByTime(600_000);
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.reset(null);
+  });
+
+  it('keeps the restart deadline after stopping even if the last turn-end arrives late', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ inflight: [{ sessionId: ORCH, turnId: 'old-turn', startedAt: 1, events: [] }] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.applyEvent(12, { kind: 'instance.status', status: 'stopping', detail: 'upgrading' }, ENV);
+    store.applyWelcome(snap().daemon, 13, ENV);
+    store.applyEvent(13, { kind: 'instance.status', status: 'ready' }, ENV);
+    vi.advanceTimersByTime(60_000);
+    store.applyEvent(14, {
+      kind: 'turn.end', sessionId: ORCH, turnId: 'old-turn',
+      stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 },
+    }, ENV);
+    vi.advanceTimersByTime(60_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+  });
+
+  it('recognizes a completed drain from a snapshot even if its turn-end was missed', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ inflight: [{ sessionId: ORCH, turnId: 'old-turn', startedAt: 1, events: [] }] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(1_000);
+    store.applyWelcome(snap().daemon, 16, ENV);
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ head: 16, inflight: [{ sessionId: ORCH, turnId: 'new-turn', startedAt: 1_000, events: [] }] }), ENV);
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgradeError).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+  });
+
+  it('restores a still-running drain from a same-build snapshot after a long disconnect', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    const turn = { sessionId: ORCH, turnId: 'old-turn', startedAt: 1, events: [] };
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ inflight: [turn] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(180_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.applyWelcome(snap().daemon, 11, ENV);
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ head: 11, inflight: [turn] }), ENV);
+    vi.advanceTimersByTime(600_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyEvent(12, {
+      kind: 'turn.end', sessionId: ORCH, turnId: 'old-turn',
+      stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 },
+    }, ENV);
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgradeError).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.applyEvent(13, { kind: 'turn.start', sessionId: ORCH, turnId: 'retry-turn' }, ENV);
+    store.applyEvent(14, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    vi.advanceTimersByTime(600_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.reset(null);
+  });
+
   it('cancels the deadline on an updated snapshot or when leaving the environment', () => {
     vi.useFakeTimers();
     const { store } = setup();

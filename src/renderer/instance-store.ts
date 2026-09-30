@@ -9,8 +9,9 @@
  *   buffer cannot close asks the owner for a resync (once per cursor).
  * - A snapshot replaces the projection and moves the cursor to its head;
  *   buffered events after the head then apply on top. The same daemon
- *   keeps an in-progress or failed update; a different version or build
- *   clears it. A welcome updates the version and build without replacing
+ *   keeps an in-progress or failed restart, and recovers a drain whose
+ *   original turns are still running; a different version or build clears
+ *   the update. A welcome updates the version and build without replacing
  *   the projection, and clears the update only when either changed.
  * - Kept: items, backlog order, sessions, capacity, instance status, GitHub
  *   state, open questions, and live turn buffers (the recorded dialect of
@@ -122,6 +123,10 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
   /** The latest tool summary per session while its turn runs. */
   const lastTool = new Map<string, string>();
   let upgradeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Keep the phase after a timeout so a snapshot can recover a still-running drain. */
+  let upgradePhase: 'draining' | 'restarting' | null = null;
+  /** Only the turns running when the upgrade began can delay its restart deadline. */
+  const drainTurns = new Set<string>();
   /** An old upgrading event replayed through this head belongs to the build we replaced. */
   let completedUpgradeThrough: number | null = null;
 
@@ -136,6 +141,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
 
   function finishUpgrade(): void {
     cancelUpgradeTimer();
+    upgradePhase = null;
+    drainTurns.clear();
     if (!state) return;
     state.upgrading = null;
     state.upgradeError = null;
@@ -145,18 +152,29 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     return !!envId
       && !!state
       && state.upgrading === 'drain'
+      && upgradePhase === 'draining'
       && state.instance.status !== 'stopping'
       && instances.get(envId)?.attach === 'attached';
   }
 
+  function completeDrain(): void {
+    if (upgradePhase !== 'draining') return;
+    // Replace a temporary disconnect deadline with a full restart deadline once.
+    cancelUpgradeTimer();
+    upgradePhase = 'restarting';
+    drainTurns.clear();
+  }
+
   function watchUpgrade(restarting = false): void {
-    if (!state?.upgrading) return;
-    const waiting = state.upgrading === 'drain' && inflight.size > 0 && !restarting && state.instance.status !== 'stopping';
+    if (!state) return;
+    if (drainTurns.size === 0 || (state.instance.status === 'stopping' && state.instance.detail === 'upgrading')) completeDrain();
+    if (!state.upgrading) return;
+    const waiting = upgradePhase === 'draining' && !restarting && state.instance.status !== 'stopping';
     if (waiting) return;
     if (upgradeTimer) return;
     upgradeTimer = setTimeout(() => {
       upgradeTimer = null;
-      if (!state || !envId || (attachedDrain() && inflight.size > 0)) return;
+      if (!state || !envId || attachedDrain()) return;
       state.upgrading = null;
       state.upgradeError = 'The daemon update did not complete within two minutes.';
       emit({ kind: 'daemon', envId });
@@ -215,10 +233,10 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         break;
       }
       case 'turn.end': {
-        const tracked = inflight.delete(ev.turnId);
+        inflight.delete(ev.turnId);
+        drainTurns.delete(ev.turnId);
         lastTool.delete(ev.sessionId);
         for (const [askId, ask] of asks) if (ask.turnId === ev.turnId) asks.delete(askId);
-        if (tracked && inflight.size === 0 && upgradeTimer && attachedDrain()) cancelUpgradeTimer();
         break;
       }
       case 'ask.routed': {
@@ -246,6 +264,9 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
       case 'daemon.upgrading':
         if (completedUpgradeThrough !== null && seq <= completedUpgradeThrough) break;
         cancelUpgradeTimer();
+        upgradePhase = ev.mode === 'drain' ? 'draining' : 'restarting';
+        drainTurns.clear();
+        if (ev.mode === 'drain') for (const id of inflight.keys()) drainTurns.add(id);
         state.upgrading = ev.mode;
         state.upgradeError = null;
         break;
@@ -310,6 +331,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     /** Switch to another environment (or none): its daemon state starts empty until a snapshot. */
     reset(next: string | null): void {
       cancelUpgradeTimer();
+      upgradePhase = null;
+      drainTurns.clear();
       completedUpgradeThrough = null;
       envId = next;
       cursor = null;
@@ -359,6 +382,13 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
             break;
           }
         }
+      }
+      for (const id of drainTurns) if (!inflight.has(id)) drainTurns.delete(id);
+      if (upgradePhase === 'draining' && drainTurns.size > 0 && state.instance.status !== 'stopping') {
+        // The same process is still draining after a connection timeout.
+        cancelUpgradeTimer();
+        state.upgrading = 'drain';
+        state.upgradeError = null;
       }
       cursor = snapshot.head;
       resyncAsked = undefined;
