@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -107,7 +106,18 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const NODE = randomBytes(300 * 1024);
+/** 300 KiB of fixed pseudo-random bytes (xorshift32 from a fixed seed): incompressible like a runtime, and the same in every run. */
+const NODE = (() => {
+  const out = Buffer.alloc(300 * 1024);
+  let x = 0x9e3779b9;
+  for (let i = 0; i < out.length; i++) {
+    x = (x ^ (x << 13)) >>> 0;
+    x = (x ^ (x >>> 17)) >>> 0;
+    x = (x ^ (x << 5)) >>> 0;
+    out[i] = x & 0xff;
+  }
+  return out;
+})();
 const BUNDLE = Buffer.from(`// runner ${VERSION}\n`.repeat(2000));
 const BODIES: Record<string, Buffer> = {
   'config.sh': Buffer.from('#!/bin/sh\n# config\n'),
@@ -491,9 +501,11 @@ describe('the stream and the trailer', () => {
     const gz = tarGz(entries());
     await refused(gz.subarray(0, gz.length - 100), 'truncated', 'gzip stream ended early');
     await refused(gz.subarray(0, 40), 'truncated', 'gzip stream ended early');
+    // A flipped byte near the end can corrupt the stream, cut it short, or end it early with bytes left over
+    // before the trailer; each is a correct rejection, and the fixed payload makes this one reproducible.
     const flipped = Buffer.from(gz);
     flipped[gz.length - 30] ^= 0xff;
-    expect((await failure(unpack(flipped))).code).toMatch(/corrupt|truncated/);
+    expect((await failure(unpack(flipped))).code).toMatch(/^(corrupt|truncated|trailing-data)$/);
     expect(readdirSync(into)).toEqual([]);
     const garbageBody = Buffer.concat([gz.subarray(0, 10), Buffer.from('this is not a deflate stream, whatever the framing says'), gz.subarray(gz.length - 8)]);
     await refused(garbageBody, 'corrupt', 'not a readable gzip stream');
