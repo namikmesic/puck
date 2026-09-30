@@ -814,6 +814,21 @@ describe('the implement and merge workflow', () => {
     ]);
   });
 
+  it('opens a round for each of the orchestrator’s work_request_changes too, without a limit', async () => {
+    const c = client(2);
+    const tools = (daemon as unknown as { tools: Array<{ name: string; run(a: Record<string, unknown>): unknown }> }).tools;
+    const tool = (name: string) => defined(tools.find((t) => t.name === name));
+    await c.cmd('item.create', { title: 'Docs', agent: 'implementer' });
+    await waiting(c, 1);
+    for (let n = 2; n <= 4; n++) {
+      const sent = (await tool('work_request_changes').run({ item: 'W-1', message: `Fix ${n}.` })) as Record<string, unknown>;
+      expect(sent).toMatchObject({ item: 'W-1', status: 'in-progress' });
+      await vi.waitFor(async () => expect((await item(c, 1)).workflow?.round).toBe(n));
+      await waiting(c, 1);
+    }
+    expect(workerCalls.map((r) => r.prompt).slice(1)).toEqual(['Fix 2.', 'Fix 3.', 'Fix 4.']);
+  });
+
   it('Stop ends the implement step cancelled and waits on the merge step; a message opens a new round, and Retry after Cancel another', async () => {
     const c = client(2);
     workerSteps = [

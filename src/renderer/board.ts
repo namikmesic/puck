@@ -134,6 +134,10 @@ export function initBoard(ctx: BoardContext) {
 
   /* ---------- Structure (built once) ---------- */
 
+  const legacy = el('p', 'bd-legacy hidden', "This environment's daemon predates the three-column board. Update it to work here.");
+  legacy.setAttribute('role', 'status');
+  els.columns.before(legacy);
+
   for (const c of COLUMNS) {
     const section = el('section', `bd-col col-${c.id}`);
     section.dataset.col = c.id;
@@ -720,8 +724,9 @@ export function initBoard(ctx: BoardContext) {
 
   function renderHeader(): void {
     const ready = store.hasSnapshot();
-    els.newBtn.disabled = !ready;
-    els.importBtn.disabled = !ready;
+    legacy.classList.toggle('hidden', !ready || !readOnly());
+    els.newBtn.disabled = !ready || readOnly();
+    els.importBtn.disabled = !ready || readOnly();
     const cap = store.capacity();
     const capKey = JSON.stringify(ready ? cap : null);
     if (els.capacity.dataset.key !== capKey) {

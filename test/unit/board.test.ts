@@ -215,9 +215,15 @@ describe('board', () => {
     expect(ids('progress')).toEqual(['itm_1', 'itm_2']);
   });
 
-  it('is read-only while the daemon predates protocol 2', () => {
+  it('is read-only while the daemon predates protocol 2, and says so', () => {
     const { card, store, byId } = setup([item({ number: 1, status: 'backlog' })]);
+    const banner = document.querySelector('.bd-legacy') as HTMLElement;
+    expect(banner.classList.contains('hidden')).toBe(true);
     store.applySnapshot(snap({ head: 2, items: [item({ number: 1, status: 'backlog' })], order: ['itm_1'], daemon: { version: '0.0.1', build: 'old', protocol: 1 } }), ENV);
+    expect(banner.classList.contains('hidden')).toBe(false);
+    expect(banner.textContent).toBe("This environment's daemon predates the three-column board. Update it to work here.");
+    expect((byId('new') as HTMLButtonElement).disabled).toBe(true);
+    expect((byId('imp') as HTMLButtonElement).disabled).toBe(true);
     (card('itm_1').querySelector('.bd-more') as HTMLButtonElement).click();
     expect(menuItems()).toEqual(['open']);
     expect(card('itm_1').draggable).toBe(false);

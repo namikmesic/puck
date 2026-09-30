@@ -94,6 +94,18 @@
   font-weight: 600;
 }
 
+/* A daemon that predates the three columns: the board is read-only until it is updated. */
+.bd-legacy {
+  flex: none;
+  margin: 0 var(--board-pad) var(--space-3);
+  padding: 8px var(--space-3);
+  border: 1px solid var(--gold-edge);
+  border-radius: var(--radius-md);
+  background: var(--gold-muted);
+  color: var(--gold-ink);
+  font-size: var(--text-sm);
+}
+
 .bd-columns {
   flex: 1;
   min-height: 0;
