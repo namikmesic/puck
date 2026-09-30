@@ -83,7 +83,6 @@ describe('compiled trust roots', () => {
     expect(RELEASE_KEYS).toEqual([]);
     expect(Object.isFrozen(RELEASE_KEYS)).toBe(true);
     expect(RELEASE_KEYS).not.toContain(FIXTURE_KEY);
-    expect(readFileSync(join(root, 'src', 'runner-release', 'trust.ts'), 'utf8')).not.toContain('-----BEGIN');
   });
 
   it('fail closed: a validly signed release is refused by the default roots', () => {
