@@ -35,7 +35,7 @@ export function protocolSupported(version: unknown): boolean {
 
 /** Wire limits and timings shared by both ends. */
 export const WIRE_LIMITS = {
-  /** One frame (one line of UTF-8 JSON). Larger results are paged. */
+  /** One frame (one line of UTF-8 JSON). The frame guard is in `src/daemon/server.ts`. */
   maxFrameBytes: 1024 * 1024,
   /** The client must send `hello` within this long after connecting. */
   helloTimeoutMs: 5_000,

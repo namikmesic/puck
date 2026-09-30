@@ -49,11 +49,11 @@ switcher and status on the left, the Chat | Board switch centered) over
 one of two views. Chat is the orchestrator conversation in a centered
 reading column (`--chat-col`, 760px) with the composer pinned under it;
 it is Slack-shaped: 28px avatar-gutter message rows, day dividers,
-grouped consecutive messages — never bubbles. Board is one column per
-stage (Backlog, Ready, In progress, Review, Done, and Closed as a rail
-until expanded); five columns and the rail fit from 1,024px, and the
-board scrolls sideways below that. An item's detail is a side sheet
-(`clamp(520px, 50vw, 780px)`) over either view.
+grouped consecutive messages — never bubbles. Board is three columns,
+Todo, In progress and Done; each column flexes, and the board scrolls
+sideways when they do not fit. Done filters by outcome, and failed and
+cancelled items stay in that column behind the filter. An item's detail
+is a side sheet (`clamp(520px, 50vw, 780px)`) over either view.
 
 ## Signals
 
