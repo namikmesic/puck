@@ -2,9 +2,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ESLint } from 'eslint';
 
-// The import boundaries .eslintrc.json enforces around the runner-release
-// verifier: shared by the server, the app's main process and the runner;
-// never in the renderer, the preload, the daemon or the pure harness.
+// The import boundaries .eslintrc.json enforces on src/runner-release
+// (the verifier, the transport and the archive reader): the server, the
+// app's main process and the runner may import it; the renderer, the
+// preload, the daemon and the pure harness never do.
 
 const root = join(__dirname, '..', '..');
 const eslint = new ESLint({ cwd: root });
