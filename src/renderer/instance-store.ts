@@ -138,12 +138,22 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     state.upgradeError = null;
   }
 
+  function attachedDrain(): boolean {
+    return !!envId
+      && !!state
+      && state.upgrading === 'drain'
+      && state.instance.status !== 'stopping'
+      && instances.get(envId)?.attach === 'attached';
+  }
+
   function watchUpgrade(restarting = false): void {
-    if (!state?.upgrading || upgradeTimer) return;
-    if (state.upgrading === 'drain' && inflight.size && !restarting && state.instance.status !== 'stopping') return;
+    if (!state?.upgrading) return;
+    const waiting = state.upgrading === 'drain' && inflight.size > 0 && !restarting && state.instance.status !== 'stopping';
+    if (waiting) return;
+    if (upgradeTimer) return;
     upgradeTimer = setTimeout(() => {
       upgradeTimer = null;
-      if (!state || !envId) return;
+      if (!state || !envId || (attachedDrain() && inflight.size > 0)) return;
       state.upgrading = null;
       state.upgradeError = 'The daemon update did not complete within two minutes.';
       emit({ kind: 'daemon', envId });
@@ -201,11 +211,13 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         }
         break;
       }
-      case 'turn.end':
-        inflight.delete(ev.turnId);
+      case 'turn.end': {
+        const tracked = inflight.delete(ev.turnId);
         lastTool.delete(ev.sessionId);
         for (const [askId, ask] of asks) if (ask.turnId === ev.turnId) asks.delete(askId);
+        if (tracked && inflight.size === 0 && upgradeTimer && attachedDrain()) cancelUpgradeTimer();
         break;
+      }
       case 'ask.routed': {
         const ask = asks.get(ev.askId);
         if (ask) asks.set(ev.askId, { ...ask, routedTo: ev.to });
@@ -276,7 +288,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     },
     upsertInstance(info: InstanceInfo): void {
       instances.set(info.id, info);
-      if (info.id === envId && info.attach !== 'attached') watchUpgrade(true);
+      if (info.id === envId) watchUpgrade(info.attach !== 'attached');
       emit({ kind: 'instances' });
     },
     removeInstance(id: string): void {
@@ -360,6 +372,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         finishUpgrade();
       }
       state.daemon = { ...daemon };
+      watchUpgrade();
       emit({ kind: 'daemon', envId: forEnv });
     },
 

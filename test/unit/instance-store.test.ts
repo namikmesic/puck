@@ -80,6 +80,67 @@ describe('daemon upgrade state', () => {
     expect(store.state()?.upgradeError).toBeNull();
   });
 
+  function reattachedDrain() {
+    vi.useFakeTimers();
+    const { store } = setup();
+    const turn = { sessionId: ORCH, turnId: 'turn1', startedAt: 1, events: [] };
+    store.applySnapshot(snap({ inflight: [turn] }), ENV);
+    store.upsertInstance(instance());
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(1_000);
+    store.applyWelcome(snap().daemon, 11, ENV);
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ head: 11, inflight: [turn] }), ENV);
+    vi.advanceTimersByTime(120_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyEvent(12, { kind: 'turn.end', sessionId: ORCH, turnId: 'turn1', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } }, ENV);
+    return store;
+  }
+
+  it('keeps a drain alive across a short same-build reattach, then clears it when the new build returns', () => {
+    const store = reattachedDrain();
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyWelcome(updated, 13, ENV);
+    vi.advanceTimersByTime(120_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toBeNull();
+    expect(store.state()?.daemon).toEqual(updated);
+  });
+
+  it('keeps a drain alive across a short same-build reattach, then times out a restart that never arrives', () => {
+    const store = reattachedDrain();
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toMatch(/did not complete within two minutes/);
+  });
+
+  it('starts a fresh restart deadline when the last turn ends after a same-build reattach', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    const turn = { sessionId: ORCH, turnId: 'turn1', startedAt: 1, events: [] };
+    store.applySnapshot(snap({ inflight: [turn] }), ENV);
+    store.upsertInstance(instance());
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(1_000);
+    store.applyWelcome(snap().daemon, 11, ENV);
+    store.upsertInstance(instance());
+    store.applyEvent(12, { kind: 'turn.end', sessionId: ORCH, turnId: 'turn1', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } }, ENV);
+    vi.advanceTimersByTime(119_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    vi.advanceTimersByTime(1_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toMatch(/did not complete within two minutes/);
+  });
+
   it('bounds a drain restart after disconnect even if turn-end events did not reach the app', () => {
     vi.useFakeTimers();
     const { store } = setup();
