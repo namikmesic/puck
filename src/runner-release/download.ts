@@ -164,11 +164,13 @@ const cancel = (res: Response): Promise<void> => (res.body ? res.body.cancel().c
  * over. A content encoding is refused. Throws RunnerDownloadError.
  */
 export async function readBoundedBody(res: Response, maxBytes: number): Promise<Uint8Array> {
-  contentEncoding(res);
-  const length = contentLength(res);
-  if (length !== null && length > maxBytes) {
+  try {
+    contentEncoding(res);
+    const length = contentLength(res);
+    if (length !== null && length > maxBytes) throw new RunnerDownloadError('too-large', `The response announces ${length} bytes; at most ${maxBytes} are read.`);
+  } catch (err) {
     await cancel(res);
-    throw new RunnerDownloadError('too-large', `The response announces ${length} bytes; at most ${maxBytes} are read.`);
+    throw err;
   }
   if (!res.body) return new Uint8Array(0);
   const reader = res.body.getReader();

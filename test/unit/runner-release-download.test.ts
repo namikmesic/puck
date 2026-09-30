@@ -499,10 +499,15 @@ describe('readBoundedBody', () => {
     expect(Buffer.from(await readBoundedBody(streamed(chunked(randomBytes(20), 7)).res, 20))).toHaveLength(20);
   });
 
-  it('refuses a content encoding', async () => {
+  it('refuses a content encoding or an unreadable Content-Length, cancelling the body unread', async () => {
     const encoded = streamed(chunked(randomBytes(10)), { headers: { 'content-encoding': 'gzip' } });
     expect((await failure(readBoundedBody(encoded.res, 100))).code).toBe('content-encoding');
     expect(encoded.body.pulled).toBe(false);
+    expect(encoded.body.cancelled).toBe(true);
+    const odd = streamed(chunked(randomBytes(10)), { headers: { 'content-length': 'ten' } });
+    expect((await failure(readBoundedBody(odd.res, 100))).code).toBe('size-mismatch');
+    expect(odd.body.pulled).toBe(false);
+    expect(odd.body.cancelled).toBe(true);
   });
 });
 

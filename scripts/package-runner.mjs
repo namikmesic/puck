@@ -16,6 +16,11 @@
  *   config.sh  run.sh  svc.sh  VERSION  README.md  LICENSE
  *   bin/node  bin/node.LICENSE  bin/puck-runner.cjs
  *
+ * That layout, with its modes, is RUNNER_PACKAGE_ENTRIES in
+ * src/harness/runner-releases.ts: the entries below must match it, since
+ * src/runner-release/archive.ts unpacks nothing else (a unit test reads
+ * this script's output through it).
+ *
  * The Node runtime is the pinned release below, downloaded once into
  * .cache/runner-node/ and checked against the pinned sha256 before use.
  * Archives are written by the runner's own ustar writer with fixed owners
