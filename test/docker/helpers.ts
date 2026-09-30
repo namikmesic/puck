@@ -42,7 +42,11 @@ export async function must(args: string[], opts?: { timeoutMs?: number }): Promi
 
 /** Builds puck-runner (the Docker suite runs it as a real process). */
 export function buildRunnerBundle(): void {
-  execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'build-runner.mjs')], { cwd: ROOT, stdio: 'inherit' });
+  execFileSync(
+    process.execPath,
+    ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', path.join(ROOT, 'scripts', 'build-runner.mjs'), '--mode', 'development'],
+    { cwd: ROOT, stdio: 'inherit' },
+  );
 }
 
 /** Builds the daemon with the fake harness compiled in. */

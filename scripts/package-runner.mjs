@@ -6,6 +6,7 @@
  *   out/puck-runner/<version>/puck-runner-<os>-<arch>-<version>.tar.gz
  *   out/puck-runner/<version>/puck-runner-<os>-<arch>-<version>.tar.gz.sha256
  *   out/puck-runner/<version>/SHA256SUMS
+ *   out/puck-runner/<version>/runner-release.json         (production only)
  *
  * for linux-x64, linux-arm64 and macos-arm64 (macOS is `macos` in runner
  * names, as the Puck server lists releases). That directory layout is what
@@ -18,10 +19,25 @@
  * The Node runtime is the pinned release below, downloaded once into
  * .cache/runner-node/ and checked against the pinned sha256 before use.
  * Archives are written by the runner's own ustar writer with fixed owners
- * and modes and the commit time as mtime, so a rebuild of the same commit
- * gives the same bytes.
+ * and modes and the commit time (or SOURCE_DATE_EPOCH) as mtime, so a
+ * rebuild of the same commit gives the same bytes.
  *
- *   node scripts/package-runner.mjs [--targets linux-x64,linux-arm64,macos-arm64] [--out <dir>]
+ * The trust mode is explicit and compiled into the runner
+ * (scripts/build-runner.mjs), and each run checks the built bundle's own
+ * `version --json` against it. `--mode development` is `npm run
+ * package:runner` and the development server image. `--mode production` is
+ * the release packaging, `npm run package:runner:release`: all three
+ * targets from a clean checkout, plus runner-release.json
+ * (src/harness/runner-releases.ts) written from the archives' final bytes.
+ * The manifest names the key that will sign it: the one key committed in
+ * RELEASE_KEYS (src/runner-release/trust.ts), or `--signing-key-id`, which
+ * production packaging needs while no key or several are committed.
+ * Signing is a separate, explicit step (scripts/runner-release.mjs sign).
+ * Every run removes a manifest or signature left by an earlier one; it
+ * would not describe the new archives.
+ *
+ *   node scripts/package-runner.mjs --mode development|production
+ *     [--targets linux-x64,linux-arm64,macos-arm64] [--out <dir>] [--signing-key-id <id>]
  */
 
 import { execFileSync } from 'node:child_process';
@@ -30,8 +46,20 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import {
+  formatSha256Sums,
+  RELEASE_KEY_ID_RE,
+  RUNNER_RELEASE_MANIFEST,
+  RUNNER_RELEASE_SUMS,
+  RUNNER_TARGETS,
+  runnerPackageFile,
+  SIGNATURE_SUFFIX,
+  targetName,
+} from '../src/harness/runner-releases.ts';
 import { tarGz } from '../src/puck-runner/tar.ts';
-import { buildRunner } from './build-runner.mjs';
+import { buildRunner, probeRunner, runnerTrustMode } from './build-runner.mjs';
+import { RELEASE_KEYS, loadReleaseKeys, writeReleaseManifest } from './runner-release.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -64,7 +92,7 @@ async function nodeArchive(target) {
 }
 
 /** bin/node and Node's LICENSE out of the official archive (system tar; members named explicitly). */
-async function nodeBinary(target) {
+export async function nodeBinary(target) {
   const { file, dir } = await nodeArchive(target);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-runner-node-'));
   try {
@@ -78,8 +106,12 @@ async function nodeBinary(target) {
   }
 }
 
-function commitTime() {
-  if (process.env.SOURCE_DATE_EPOCH) return Number(process.env.SOURCE_DATE_EPOCH);
+export function commitTime() {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  if (epoch !== undefined) {
+    if (!/^\d+$/.test(epoch)) throw new Error(`SOURCE_DATE_EPOCH must be whole seconds since the epoch, not ${JSON.stringify(epoch)}.`);
+    return Number(epoch);
+  }
   try {
     return Number(execFileSync('git', ['log', '-1', '--format=%ct'], { cwd: root }).toString().trim());
   } catch {
@@ -87,20 +119,84 @@ function commitTime() {
   }
 }
 
-export async function packageRunner({ targets = Object.keys(TARGETS), outDir = path.join(root, 'out', 'puck-runner') } = {}) {
-  const { bundlePath, version } = await buildRunner();
+/** The checked-out commit, for a production manifest; refuses a checkout with uncommitted changes to tracked files. */
+export function sourceCommit() {
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  let commit;
+  let changes;
+  try {
+    commit = git('rev-parse', 'HEAD');
+    changes = git('status', '--porcelain', '--untracked-files=no');
+  } catch {
+    throw new Error('Production packages come from a git checkout; this is not one.');
+  }
+  if (changes) throw new Error(`Production packages come from a clean checkout; commit or discard these changes first:\n${changes}`);
+  return commit;
+}
+
+/** The key id a production manifest names: `--signing-key-id`, or the one committed release key. */
+export function signingKeyIdFor(requested, keys) {
+  const committed = loadReleaseKeys(keys).map((k) => k.id);
+  if (requested !== undefined) {
+    if (!RELEASE_KEY_ID_RE.test(requested)) throw new Error(`--signing-key-id must be a release key id (64 lowercase hex digits), not ${JSON.stringify(requested)}.`);
+    if (committed.length && !committed.includes(requested)) throw new Error(`Release key ${requested} is not committed in RELEASE_KEYS (src/runner-release/trust.ts).`);
+    return requested;
+  }
+  if (committed.length === 1) return committed[0];
+  throw new Error(
+    committed.length
+      ? `RELEASE_KEYS commits ${committed.length} keys; name the signing key with --signing-key-id.`
+      : 'No release key is committed in RELEASE_KEYS (src/runner-release/trust.ts). Commit the public key of the key that will sign, or name its id with --signing-key-id.',
+  );
+}
+
+/** The requested targets in the canonical order; production takes all three or refuses. */
+function selectTargets(targets, mode) {
+  const all = RUNNER_TARGETS.map(targetName);
+  for (const key of targets) if (!all.includes(key)) throw new Error(`Unknown target ${key}; known: ${all.join(', ')}`);
+  const selected = all.filter((key) => targets.includes(key));
+  if (mode === 'production' && selected.length !== all.length) {
+    throw new Error(`A production release carries all three targets (${all.join(', ')}); drop --targets.`);
+  }
+  return selected;
+}
+
+/**
+ * Builds the runner in `mode` and packages it (see the header). The
+ * options after `outDir` are seams for tests.
+ */
+export async function packageRunner({
+  mode,
+  targets = RUNNER_TARGETS.map(targetName),
+  outDir = path.join(root, 'out', 'puck-runner'),
+  signingKeyId,
+  build = buildRunner,
+  runtime = nodeBinary,
+  commit = sourceCommit,
+  keys = RELEASE_KEYS,
+} = {}) {
+  const trustMode = runnerTrustMode(mode);
+  const selected = selectTargets(targets, trustMode);
+  const release = trustMode === 'production' ? { signingKeyId: signingKeyIdFor(signingKeyId, keys), sourceCommit: commit() } : null;
+  const { bundlePath, version } = await build({ mode: trustMode });
+  const probe = probeRunner(bundlePath);
+  if (probe.trustMode !== trustMode || probe.version !== version) {
+    throw new Error(`The built runner reports ${probe.version} (${probe.trustMode}), not ${version} (${trustMode}).`);
+  }
   const bundle = fs.readFileSync(bundlePath);
   const mtime = commitTime();
   const sh = (name) => fs.readFileSync(path.join(root, 'src', 'puck-runner', 'sh', name));
   const dest = path.join(outDir, version);
   fs.mkdirSync(dest, { recursive: true });
+  for (const stale of [RUNNER_RELEASE_MANIFEST, RUNNER_RELEASE_MANIFEST + SIGNATURE_SUFFIX, RUNNER_RELEASE_SUMS + SIGNATURE_SUFFIX]) {
+    fs.rmSync(path.join(dest, stale), { force: true });
+  }
   const sums = [];
   const files = [];
-  for (const key of targets) {
+  for (const key of selected) {
     const target = TARGETS[key];
-    if (!target) throw new Error(`Unknown target ${key}; known: ${Object.keys(TARGETS).join(', ')}`);
-    const { node, license } = await nodeBinary(target);
-    const entry = (name, body, mode) => ({ name, type: 'file', mode, body, mtime });
+    const { node, license } = await runtime(target);
+    const entry = (name, body, fileMode) => ({ name, type: 'file', mode: fileMode, body, mtime });
     const archive = tarGz([
       entry('config.sh', sh('config.sh'), 0o755),
       entry('run.sh', sh('run.sh'), 0o755),
@@ -113,27 +209,36 @@ export async function packageRunner({ targets = Object.keys(TARGETS), outDir = p
       entry('bin/node.LICENSE', license, 0o644),
       entry('bin/puck-runner.cjs', bundle, 0o644),
     ]);
-    const file = `puck-runner-${target.os}-${target.arch}-${version}.tar.gz`;
+    const file = runnerPackageFile(target, version);
     const sum = sha256(archive);
     fs.writeFileSync(path.join(dest, file), archive);
-    fs.writeFileSync(path.join(dest, `${file}.sha256`), `${sum}  ${file}\n`);
-    sums.push(`${sum}  ${file}`);
+    fs.writeFileSync(path.join(dest, `${file}.sha256`), formatSha256Sums([{ file, sha256: sum }]));
+    sums.push({ file, sha256: sum });
     files.push(path.join(dest, file));
     console.log(`${file}  ${(archive.length / 1024 / 1024).toFixed(1)} MiB  sha256 ${sum}`);
   }
-  fs.writeFileSync(path.join(dest, 'SHA256SUMS'), sums.join('\n') + '\n');
-  return { version, dir: dest, files };
+  fs.writeFileSync(path.join(dest, RUNNER_RELEASE_SUMS), formatSha256Sums(sums));
+  const manifest = release && writeReleaseManifest(dest, { version, runnerProtocol: probe.runnerProtocol, ...release });
+  if (manifest) console.log(`${RUNNER_RELEASE_MANIFEST}  for signing key ${manifest.signingKeyId}; sign it with npm run runner-release -- sign ${dest}`);
+  return { version, trustMode, dir: dest, files, manifest };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const arg = (flag) => {
-    const i = process.argv.indexOf(flag);
-    return i > 0 ? process.argv[i + 1] : undefined;
-  };
-  const targets = arg('--targets')?.split(',').filter(Boolean);
-  const out = arg('--out');
-  packageRunner({ ...(targets ? { targets } : {}), ...(out ? { outDir: path.resolve(out) } : {}) }).catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
-  });
+  Promise.resolve()
+    .then(() => {
+      const { values } = parseArgs({
+        options: { mode: { type: 'string' }, targets: { type: 'string' }, out: { type: 'string' }, 'signing-key-id': { type: 'string' } },
+        strict: true,
+      });
+      return packageRunner({
+        mode: values.mode,
+        ...(values.targets ? { targets: values.targets.split(',').filter(Boolean) } : {}),
+        ...(values.out ? { outDir: path.resolve(values.out) } : {}),
+        signingKeyId: values['signing-key-id'],
+      });
+    })
+    .catch((err) => {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
 }

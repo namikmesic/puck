@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,6 +114,45 @@ describe('toolchain pin', () => {
   it('routes package and make through the artifact-checking wrapper', () => {
     expect(pkg.scripts.package).toBe('node scripts/forge.mjs package');
     expect(pkg.scripts.make).toBe('node scripts/forge.mjs make');
+  });
+});
+
+describe('runner trust mode and release signing', () => {
+  const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+  const dockerfile = read('src/server/Dockerfile');
+  const ci = read('.github/workflows/ci.yml');
+
+  it('builds and packages the runner in an explicit trust mode', () => {
+    expect(pkg.scripts['build:runner']).toMatch(/ scripts\/build-runner\.mjs --mode development$/);
+    expect(pkg.scripts['package:runner']).toMatch(/ scripts\/package-runner\.mjs --mode development$/);
+    expect(pkg.scripts['package:runner:release']).toMatch(/ scripts\/package-runner\.mjs --mode production$/);
+  });
+
+  it('packages the development server image in development mode, with the sources the packager imports', () => {
+    const runs = dockerfile.split('\n').filter((line) => /\bnode .*scripts\/package-runner\.mjs/.test(line));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('scripts/package-runner.mjs --mode development ');
+    expect(dockerfile).toContain('COPY scripts/build-runner.mjs scripts/package-runner.mjs scripts/runner-release.mjs scripts/ts-resolve.mjs scripts/');
+    expect(dockerfile).toContain('COPY src/runner-release src/runner-release');
+  });
+
+  it('never packages production runners or signs in CI, and checks the packaged runner reports development trust', () => {
+    expect(ci).not.toMatch(/--mode production|package:runner:release|runner-release(\.mjs)?( --)? sign|PUCK_RUNNER_RELEASE_PRIVATE_KEY/);
+    expect(ci).toContain('npm run package:runner -- --targets macos-arm64');
+    expect(ci).toContain(`./bin/node bin/puck-runner.cjs version --json | grep -F '"trustMode":"development"'`);
+  });
+
+  it('keeps private keys out of the repository', () => {
+    const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+    const privateKey = /-----BEGIN [A-Z ]*PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END [A-Z ]*PRIVATE KEY-----/;
+    const offenders = tracked.filter((file) => {
+      try {
+        return privateKey.test(readFileSync(join(root, file), 'latin1'));
+      } catch {
+        return false;
+      }
+    });
+    expect(offenders).toEqual([]);
   });
 });
 

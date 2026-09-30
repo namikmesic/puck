@@ -7,7 +7,8 @@
  *   config.sh remove [options]   deregister it                → puck-runner config remove
  *   run.sh                       run the runner               → puck-runner run
  *   svc.sh <command>             run it as a service          → puck-runner svc
- *   bin/node bin/puck-runner.cjs version
+ *   bin/node bin/puck-runner.cjs version          the version, one line
+ *   bin/node bin/puck-runner.cjs version --json   version, trust mode and control protocol, one JSON line
  *
  * `--help` works everywhere without Docker, a server, or a configuration.
  */
@@ -15,12 +16,15 @@
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import pkg from '../../package.json';
+import { formatVersionProbe } from '../harness/runner-releases';
+import { RUNNER_PROTOCOL_VERSION } from '../harness/runner-protocol';
 import { configure, ConfigureError, currentPlatform, remove, type Io } from './configure';
 import { realDocker, realSpawner } from './docker/client';
 import { NotConfiguredError, readConfig, runnerPaths, runnerRoot } from './files';
 import { createLogger } from './log';
 import { LockError, run } from './runner';
 import { defaultServiceDeps, Service, ServiceError } from './service';
+import { runnerTrustMode } from './trust-mode';
 import { realExec } from './update';
 import * as fs from 'node:fs';
 
@@ -226,6 +230,12 @@ async function svc(argv: string[]): Promise<number> {
   }
 }
 
+function version(argv: string[]): number {
+  const { values } = parseArgs({ args: argv, options: { json: { type: 'boolean' } }, strict: true });
+  process.stdout.write(values.json ? formatVersionProbe({ version: RUNNER_VERSION, trustMode: runnerTrustMode(), runnerProtocol: RUNNER_PROTOCOL_VERSION }) : `${RUNNER_VERSION}\n`);
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   switch (command) {
@@ -236,8 +246,7 @@ async function main(): Promise<number> {
     case 'svc':
       return svc(rest);
     case 'version':
-      process.stdout.write(`${RUNNER_VERSION}\n`);
-      return 0;
+      return version(rest);
     default:
       process.stderr.write('Usage: puck-runner <config|run|svc|version>. Use ./config.sh, ./run.sh or ./svc.sh.\n');
       return 2;
