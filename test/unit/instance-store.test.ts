@@ -219,6 +219,39 @@ describe('daemon upgrade state', () => {
     expect(store.state()?.upgradeError).not.toBeNull();
   });
 
+  it('restores a still-running drain from a same-build replay after a long disconnect, then times out after the last original turn', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    const turn = { sessionId: ORCH, turnId: 'old-turn', startedAt: 1, events: [] };
+    store.upsertInstance(instance());
+    store.applySnapshot(snap({ inflight: [turn] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(180_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.applyWelcome(snap().daemon, 11, ENV);
+    store.upsertInstance(instance());
+    vi.advanceTimersByTime(600_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyEvent(12, {
+      kind: 'turn.end', sessionId: ORCH, turnId: 'old-turn',
+      stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 },
+    }, ENV);
+    store.applyEvent(13, { kind: 'turn.start', sessionId: ORCH, turnId: 'new-turn' }, ENV);
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toMatch(/did not complete within two minutes/);
+    vi.advanceTimersByTime(600_000);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.reset(null);
+  });
+
   it('restores a still-running drain from a same-build snapshot after a long disconnect', () => {
     vi.useFakeTimers();
     const { store } = setup();

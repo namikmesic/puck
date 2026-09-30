@@ -12,7 +12,8 @@
  *   keeps an in-progress or failed restart, and recovers a drain whose
  *   original turns are still running; a different version or build clears
  *   the update. A welcome updates the version and build without replacing
- *   the projection, and clears the update only when either changed.
+ *   the projection. The same build recovers that drain the same way; a
+ *   different version or build clears the update.
  * - Kept: items, backlog order, sessions, capacity, instance status, GitHub
  *   state, open questions, and live turn buffers (the recorded dialect of
  *   every turn still running, so a thread opened mid-turn and the board's
@@ -123,7 +124,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
   /** The latest tool summary per session while its turn runs. */
   const lastTool = new Map<string, string>();
   let upgradeTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Keep the phase after a timeout so a snapshot can recover a still-running drain. */
+  /** Keep the phase after a timeout so a same-build snapshot or welcome can recover a still-running drain. */
   let upgradePhase: 'draining' | 'restarting' | null = null;
   /** Only the turns running when the upgrade began can delay its restart deadline. */
   const drainTurns = new Set<string>();
@@ -163,6 +164,15 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     cancelUpgradeTimer();
     upgradePhase = 'restarting';
     drainTurns.clear();
+  }
+
+  function recoverRunningDrain(): void {
+    if (!state) return;
+    for (const id of drainTurns) if (!inflight.has(id)) drainTurns.delete(id);
+    if (upgradePhase !== 'draining' || drainTurns.size === 0 || state.instance.status === 'stopping') return;
+    cancelUpgradeTimer();
+    state.upgrading = 'drain';
+    state.upgradeError = null;
   }
 
   function watchUpgrade(restarting = false): void {
@@ -383,13 +393,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
           }
         }
       }
-      for (const id of drainTurns) if (!inflight.has(id)) drainTurns.delete(id);
-      if (upgradePhase === 'draining' && drainTurns.size > 0 && state.instance.status !== 'stopping') {
-        // The same process is still draining after a connection timeout.
-        cancelUpgradeTimer();
-        state.upgrading = 'drain';
-        state.upgradeError = null;
-      }
+      recoverRunningDrain();
       cursor = snapshot.head;
       resyncAsked = undefined;
       watchUpgrade();
@@ -403,6 +407,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
       if (!sameDaemon(state.daemon, daemon)) {
         completedUpgradeThrough = head;
         finishUpgrade();
+      } else {
+        recoverRunningDrain();
       }
       state.daemon = { ...daemon };
       watchUpgrade();
