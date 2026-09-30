@@ -84,7 +84,7 @@ async function bringUp(
   const key = loadRunnerKey(paths);
   const api = new ServerApi(h.base);
   // Assertions name the server's public URL; the socket goes to where it listens.
-  const session2 = new RunnerSession(api, config.runnerId, key, config.serverUrl, () => h.clock.now());
+  const session2 = new RunnerSession(api, config.runnerId, key, config.serverUrl, '0.1.0', () => h.clock.now());
   const ops = new DockerOps(docker.run);
   const bundles = new BundleCache(paths.cache);
   const log = createLogger({ dir: paths.diag });

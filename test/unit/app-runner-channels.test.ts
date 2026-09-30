@@ -139,7 +139,7 @@ describe('through the Puck server relay', { timeout: 30_000 }, () => {
     const config = readConfig(paths);
     const key = loadRunnerKey(paths);
     const api = new ServerApi(h.base);
-    const runnerSession = new RunnerSession(api, config.runnerId, key, config.serverUrl, () => (h as Harness).clock.now());
+    const runnerSession = new RunnerSession(api, config.runnerId, key, config.serverUrl, '0.1.0', () => (h as Harness).clock.now());
     relay = new RelayConnection({
       runnerId: config.runnerId,
       version: '0.1.0',

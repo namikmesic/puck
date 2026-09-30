@@ -64,7 +64,7 @@ export async function run(deps: RunDeps): Promise<number> {
   }
 
   const api = new ServerApi(config.serverUrl, deps.fetch);
-  const session = new RunnerSession(api, config.runnerId, key, config.serverUrl);
+  const session = new RunnerSession(api, config.runnerId, key, config.serverUrl, deps.version);
   const ops = new DockerOps(deps.docker);
   const bundles = new BundleCache(paths.cache);
   const mint = (envId: string) => session.withToken((token) => api.githubToken(envId, token));

@@ -51,9 +51,10 @@ export function loadRunnerKey(paths: RunnerPaths): RunnerKey {
 
 const b64url = (v: string | Buffer): string => Buffer.from(v).toString('base64url');
 
-export function signAssertion(runnerId: string, key: KeyObject, audience: string, nowMs: number): string {
+/** Token assertions may carry the running version so an updated runner can reconnect. */
+export function signAssertion(runnerId: string, key: KeyObject, audience: string, nowMs: number, version?: string): string {
   const iat = Math.floor(nowMs / 1000);
   const head = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' }));
-  const body = b64url(JSON.stringify({ iss: runnerId, sub: runnerId, aud: audience, iat, exp: iat + ASSERTION_LIFE_S, jti: randomUUID() }));
+  const body = b64url(JSON.stringify({ iss: runnerId, sub: runnerId, aud: audience, iat, exp: iat + ASSERTION_LIFE_S, jti: randomUUID(), ver: version }));
   return `${head}.${body}.${sign(null, Buffer.from(`${head}.${body}`), key).toString('base64url')}`;
 }
