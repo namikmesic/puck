@@ -13,6 +13,10 @@ import {
   type JournalIO,
 } from '../../src/daemon/delivery/journal';
 import type { Logger } from '../../src/daemon/log';
+import { migrateState } from '../../src/daemon/store/meta';
+import { bootstrapLegacy, openFirstRound, queueImplement } from '../../src/daemon/workflow';
+import { legacyIds } from '../../src/harness/workflow';
+import { deliveryStack, LEGACY, LEGACY_T, writeLegacyState, type Stack } from './daemon-fakes';
 
 let dir: string;
 let file: string;
@@ -294,6 +298,196 @@ describe('delivery journal', () => {
           expect(js()).toEqual(expected);
         }
       });
+    }
+  });
+});
+
+describe('the write path over the checkpoints: boot recovers the whole transaction or none of it', () => {
+  class Crash extends Error {}
+
+  /** A ticket with an agent: ticket.created, round.opened and two step.changed, one transaction. */
+  function createTicket(stack: Stack, title: string): string {
+    const tx = stack.workflow.begin('item.create');
+    const item = stack.backlog.create(tx, { title, body: '', agent: 'implementer', repo: null, createdBy: 'user' });
+    openFirstRound(tx, item.id, 'assigned');
+    queueImplement(tx, item.id, 1, { agent: 'implementer', sessionId: null, purpose: 'task' });
+    stack.workflow.commit(tx);
+    return item.id;
+  }
+
+  function state(dir: string) {
+    const again = deliveryStack(dir, { now: () => 5 });
+    const out = {
+      tickets: again.backlog.list().map((i) => [i.title, i.status, i.stage, i.workflowId]),
+      steps: Object.values(again.tables.get().workflows).map((w) => w.steps.map((s) => [s.kind, s.state, s.result])),
+      rounds: Object.values(again.tables.get().workflows).map((w) => w.rounds.length),
+      seq: [again.items.get().journalSeq, again.tables.get().journalSeq],
+      head: again.journal.head(),
+    };
+    again.journal.close();
+    return out;
+  }
+
+  const points = [
+    ['after the fsync and before the items.json commit', { afterJournal: () => { throw new Crash('crash'); } }],
+    ['after the items.json commit and before the tables and side effects', { afterItems: () => { throw new Crash('crash'); } }],
+  ] as const;
+
+  for (const [name, hooks] of points) {
+    it(name, () => {
+      const first = deliveryStack(path.join(dir, 's'), { now: () => 5 });
+      createTicket(first, 'A');
+      first.journal.close();
+      const crashing = deliveryStack(path.join(dir, 's'), { now: () => 5, hooks });
+      expect(() => createTicket(crashing, 'B')).toThrow(Crash);
+      crashing.journal.close();
+      // The journal held it: boot rolls both checkpoints forward to the whole transaction.
+      const after = state(path.join(dir, 's'));
+      expect(after.tickets).toEqual([
+        ['A', 'todo', null, 'wfl_' + (after.tickets[0]?.[3] as string).slice(4)],
+        ['B', 'todo', null, after.tickets[1]?.[3]],
+      ]);
+      expect(after.steps).toEqual([
+        [['decompose', 'done', 'skipped'], ['implement', 'queued', null]],
+        [['decompose', 'done', 'skipped'], ['implement', 'queued', null]],
+      ]);
+      expect(after.seq).toEqual([after.head, after.head]);
+      // And the next transaction commits after it, without a gap or a reused j.
+      const next = deliveryStack(path.join(dir, 's'), { now: () => 5 });
+      createTicket(next, 'C');
+      next.journal.close();
+      expect(js()).toEqual(Array.from({ length: 3 }, (_, i) => i + 1));
+    });
+  }
+
+  function js(): number[] {
+    return fs
+      .readFileSync(path.join(dir, 's', 'delivery', 'journal.ndjson'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => (JSON.parse(l) as { j: number }).j);
+  }
+
+  it('rebuilds tables.json from the first line when it is missing or unreadable', () => {
+    const s = deliveryStack(path.join(dir, 's'), { now: () => 5 });
+    createTicket(s, 'A');
+    createTicket(s, 'B');
+    s.journal.close();
+    const before = state(path.join(dir, 's'));
+    fs.writeFileSync(path.join(dir, 's', 'delivery', 'tables.json'), '{ not json');
+    expect(state(path.join(dir, 's'))).toEqual(before);
+    fs.rmSync(path.join(dir, 's', 'delivery', 'tables.json'));
+    expect(state(path.join(dir, 's'))).toEqual(before);
+  });
+
+  it('refuses every mutation once the journal is failing, without appending', () => {
+    let failWrites = false;
+    const io: JournalIO = {
+      ...nodeJournalIO,
+      write(fd, buf, offset, length) {
+        if (failWrites) throw new Error('EIO');
+        return nodeJournalIO.write(fd, buf, offset, length);
+      },
+      truncate(fd, size) {
+        if (failWrites) throw new Error('EIO on truncate');
+        nodeJournalIO.truncate(fd, size);
+      },
+    };
+    const s = deliveryStack(path.join(dir, 's'), { now: () => 5, io });
+    createTicket(s, 'A');
+    const size = fs.statSync(path.join(dir, 's', 'delivery', 'journal.ndjson')).size;
+    failWrites = true;
+    expect(() => createTicket(s, 'B')).toThrow(new JournalError('not-ready', 'The delivery journal is failing; see the environment log.'));
+    failWrites = false;
+    expect(s.workflow.failing()).toBe(true);
+    expect(() => createTicket(s, 'C')).toThrow(JournalError);
+    expect(fs.statSync(path.join(dir, 's', 'delivery', 'journal.ndjson')).size).toBe(size);
+    expect(s.backlog.list().map((i) => i.title)).toEqual(['A']);
+  });
+});
+
+describe('the format-2 bootstrap', () => {
+  function migrated(d: string): void {
+    writeLegacyState(d);
+    expect(migrateState(d, { daemonVersion: 'new', now: 5, eventHead: 7 })).toMatchObject({ ok: true, to: 2 });
+  }
+
+  function journalEvents(d: string) {
+    const opened = openJournal(path.join(d, 'delivery', 'journal.ndjson'));
+    opened.journal.close();
+    return opened.transactions;
+  }
+
+  function boot(d: string, hooks: { afterTicket?(itemId: string): void } = {}) {
+    const s = deliveryStack(d, { now: () => 5 });
+    try {
+      return { journaled: bootstrapLegacy(s.workflow, s.backlog.list(), s.items.get().nextNumber, hooks), stack: s };
+    } finally {
+      s.journal.close();
+    }
+  }
+
+  it('journals each ticket once with its legacy workflow, never a check or a review, then the marker', () => {
+    const d = path.join(dir, 'clean');
+    migrated(d);
+    const { journaled } = boot(d);
+    expect(journaled).toBe(Object.keys(LEGACY).length);
+    const txs = journalEvents(d);
+    expect(txs.map((t) => t.op)).toEqual([...Object.keys(LEGACY).map(() => 'journal.bootstrap'), 'journal.bootstrap']);
+    const events = txs.flatMap((t) => t.events);
+    expect(events.filter((e) => e.kind === 'journal.bootstrap')).toEqual([{ kind: 'journal.bootstrap', format: 2, tickets: journaled }]);
+    const steps = events.filter((e) => e.kind === 'step.changed').map((e) => (e as unknown as { step: { kind: string; legacy?: true } }).step);
+    expect(new Set(steps.map((s) => s.kind))).toEqual(new Set(['implement', 'merge']));
+    expect(steps.every((s) => s.legacy === true)).toBe(true);
+    const s = deliveryStack(d, { now: () => 5 });
+    const review = s.backlog.get(LEGACY.review);
+    expect(review).toMatchObject({ status: 'in-progress', stage: 'merge' });
+    expect(s.pub(review as NonNullable<typeof review>).workflow?.steps.map((x) => [x.kind, x.state, x.result])).toEqual([
+      ['implement', 'done', 'passed'],
+      ['merge', 'waiting', null],
+    ]);
+    expect(s.tables.get().tickets[LEGACY.merged]).toMatchObject({ outcome: 'merged', closedAt: LEGACY_T + 100 + 9 });
+    // The running ticket's implement step still runs until boot restarts it; its session stays linked.
+    expect(s.workflow.activeImplement(LEGACY.running)).toMatchObject({ id: legacyIds(LEGACY.running).implementId, state: 'running', sessionId: expect.stringMatching(/^ses_/) });
+    // A second boot journals nothing more.
+    s.journal.close();
+    expect(boot(d).journaled).toBe(0);
+    expect(journalEvents(d)).toHaveLength(txs.length);
+  });
+
+  // One migration, a crashing boot and a resumed one per ticket, each fsynced: slow under a loaded suite.
+  it('resumes after a crash after any ticket, ending in the same state with no duplicated ticket, id or record', { timeout: 30_000 }, () => {
+    const clean = path.join(dir, 'clean');
+    migrated(clean);
+    boot(clean);
+    const snapshot = (d: string) => {
+      const s = deliveryStack(d, { now: () => 5 });
+      const out = { items: s.items.get(), tables: { ...s.tables.get(), journalSeq: 0 } };
+      s.journal.close();
+      return JSON.parse(JSON.stringify(out)) as unknown;
+    };
+    const expected = snapshot(clean);
+    const total = Object.keys(LEGACY).length;
+    for (let crashAfter = 1; crashAfter <= total; crashAfter++) {
+      const d = path.join(dir, `crash-${crashAfter}`);
+      migrated(d);
+      let n = 0;
+      expect(() =>
+        boot(d, {
+          afterTicket: () => {
+            n += 1;
+            if (n === crashAfter) throw new Error('crash');
+          },
+        }),
+      ).toThrow('crash');
+      boot(d);
+      expect(snapshot(d), `crash after ticket ${crashAfter}`).toEqual(expected);
+      const events = journalEvents(d).flatMap((t) => t.events);
+      const created = events.filter((e) => e.kind === 'ticket.created').map((e) => (e as unknown as { item: { id: string } }).item.id);
+      expect(created.sort(), `crash after ticket ${crashAfter}`).toEqual(Object.values(LEGACY).sort());
+      expect(events.filter((e) => e.kind === 'journal.bootstrap')).toHaveLength(1);
+      const stepIds = events.filter((e) => e.kind === 'step.changed').map((e) => (e as unknown as { step: { id: string } }).step.id);
+      expect(new Set(stepIds).size).toBe(stepIds.length);
     }
   });
 });

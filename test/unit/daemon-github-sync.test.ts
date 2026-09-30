@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { GithubGrant, GithubIssueReference, GithubPullReference, MergeObserved } from '../../src/harness/daemon-protocol';
 import { deliveryPull, sourceIssue } from '../../src/harness/references';
@@ -25,6 +26,7 @@ import { Work, WorkError, type WorkDeps } from '../../src/daemon/work';
 import { deliveryStack, exampleDefinition, placeOf, seedChanges, seedTicket, tempRoot, type Stack } from './daemon-fakes';
 import { activeImplementOf, addManualMerge, askFields, stepMove, ticketStatus } from '../../src/daemon/workflow';
 import { PIPELINE } from '../../src/daemon/delivery/derive';
+import { openJournal } from '../../src/daemon/delivery/journal';
 
 // The GitHub workflow against a fake GitHub that answers with ETags and
 // 304s, a real backlog, and a small stand-in for the Work operations.
@@ -1086,6 +1088,126 @@ describe('pull request state', () => {
     const count = fake.gh.requests.length;
     await pollAll();
     expect(fake.gh.requests.length).toBe(count);
+  });
+});
+
+/* ---------- Merges, reconciled against the journal ---------- */
+
+describe('merge.observed', () => {
+  const MERGE_SHA = 'e'.repeat(40);
+  const merged = { state: 'closed', merged: true, merged_at: iso(T0 + 1_000), merge_commit_sha: MERGE_SHA, merged_by: { login: 'octocat', type: 'User' }, commits: 3 };
+
+  /** A new daemon on the same state: stores, journal and the GitHub workflow built again (its ETag cache is gone). */
+  function restart(): void {
+    stack.journal.close();
+    stack = deliveryStack(root.paths.state, { now: () => clock });
+    backlog = stack.backlog;
+    work = makeWork();
+    sync = build();
+  }
+
+  const observed = () =>
+    stack.journal.head() > 0
+      ? openJournalEvents().filter((e) => e.kind === 'merge.observed')
+      : [];
+
+  function openJournalEvents() {
+    const opened = openJournal(path.join(root.paths.state, 'delivery', 'journal.ndjson'));
+    opened.journal.close();
+    return opened.transactions.flatMap((tx) => tx.events);
+  }
+
+  it('records the merge with its commit, once, and the ticket is done (merged)', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    await sync.poll();
+    expect(observed()).toEqual([
+      expect.objectContaining({
+        kind: 'merge.observed',
+        itemId: item.id,
+        repo: 'octo/app',
+        prNumber: 7,
+        prHeadSha: SHA,
+        prCommits: 3,
+        mergeCommitSha: MERGE_SHA,
+        mergeParents: [],
+        mergedAt: T0 + 1_000,
+        mergedBy: 'octocat',
+        method: null,
+        initiatedBy: 'external',
+        reviewedHeadSha: null,
+        reviewed: false,
+      }),
+    ]);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: clock });
+    expect(prOf(backlog.get(item.id))).toMatchObject({ state: 'merged', mergeCommitSha: MERGE_SHA });
+    await pollAll();
+    restart();
+    await sync.poll();
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+  });
+
+  it('records it after a crash between the poll’s cache write and the journal', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    // The poll saves the pull request's state first; the crash comes before the journal has the merge.
+    work.merged = () => {
+      throw new Error('crash');
+    };
+    await sync.poll();
+    expect(observed()).toHaveLength(0);
+    expect(githubStore(root.paths.state).get().items[item.id]?.prState).toBe('merged');
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(observed()[0]).toMatchObject({ mergeCommitSha: MERGE_SHA });
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+  });
+
+  it('records it after a lost poll', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    await sync.poll();
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    const orig = fetchImpl;
+    fetchImpl = (async (input, init) => {
+      if (new URL(String(input)).pathname === '/repos/octo/app/pulls/7') throw new TypeError('fetch failed');
+      return orig(input, init);
+    }) as typeof fetch;
+    await pollAll();
+    expect(observed()).toHaveLength(0);
+    expect(backlog.get(item.id)?.status).toBe('in-progress');
+    fetchImpl = orig;
+    await pollAll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+  });
+
+  it('reads each unrecorded pull request once at boot, and records a merge from before the restart', async () => {
+    policies = { intake: 'off' };
+    const item = publishedItem('review');
+    await sync.poll();
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    restart();
+    await sync.poll();
+    expect(observed()).toHaveLength(1);
+    expect(backlog.get(item.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+  });
+
+  it('moves a failed ticket to done (merged) too, and keeps a done (merged) ticket as it is', async () => {
+    policies = { intake: 'off' };
+    const failed = publishedItem('failed');
+    Object.assign(fake.gh.pulls.get(7) as Json, merged);
+    await sync.poll();
+    expect(backlog.get(failed.id)).toMatchObject({ status: 'done', outcome: 'merged' });
+    expect(observed()).toHaveLength(1);
+    expect(work.merged(failed.id, { ...(observed()[0] as unknown as MergeObserved) }, 'again')).toBe(false);
+    expect(observed()).toHaveLength(1);
   });
 });
 

@@ -73,6 +73,32 @@ describe('wake batching', () => {
     expect(o.pending().map((n) => n.text)).toEqual(['W-1 is ready for review.', 'W-2 failed.']);
   });
 
+  it('opens no wake window for a notice with wake: false; it rides along with the next turn', () => {
+    const { turns, state } = fakeTurns();
+    const { o } = orchestrator(turns);
+    const quiet = o.push('item.updated', 'W-1 round 2 is verifying.', 'itm_1', { wake: false });
+    expect(quiet.wake).toBe(false);
+    vi.advanceTimersByTime(WAKE_BATCH_MS * 10);
+    expect(state.kicks).toBe(0);
+    o.fire();
+    expect(state.kicks).toBe(0);
+    expect(o.pending().map((n) => n.text)).toEqual(['W-1 round 2 is verifying.']);
+    // A notice that wakes opens the window, and the quiet one rides along with its turn.
+    o.push('item.failed', 'W-2 failed.');
+    vi.advanceTimersByTime(WAKE_BATCH_MS);
+    expect(state.kicks).toBe(1);
+    expect(o.pending().map((n) => n.text)).toEqual(['W-1 round 2 is verifying.', 'W-2 failed.']);
+  });
+
+  it('treats a stored notice without wake as one that wakes', () => {
+    fs.writeFileSync(path.join(dir, 'notices.json'), JSON.stringify({ pending: [{ id: 'ntc_1', kind: 'item.review', at: 1, text: 'Stored before wake existed.' }] }));
+    const { turns, state } = fakeTurns();
+    const { o } = orchestrator(turns);
+    o.schedule();
+    vi.advanceTimersByTime(WAKE_BATCH_MS);
+    expect(state.kicks).toBe(1);
+  });
+
   it('holds notices while a turn runs, and opens a new window when it ends', () => {
     const { turns, state } = fakeTurns();
     const { o } = orchestrator(turns);

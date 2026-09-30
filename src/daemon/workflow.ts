@@ -19,13 +19,15 @@
  * supersedes the waiting merge step (`openRound`).
  */
 
-import type { ImplementPurpose, RoundInfo, Step, StepResult, StepState, TicketAsk, WorkItem, WorkflowSummary } from '../harness/daemon-protocol';
+import type { DaemonEvent, ImplementPurpose, RoundInfo, Step, StepResult, StepState, TicketAsk, WorkItem, WorkflowSummary } from '../harness/daemon-protocol';
 import { nextTicket, type TicketState, type TicketTrigger } from '../harness/item-transitions';
 import { newId } from '../harness/ulid';
 import { deliveryPull } from '../harness/references';
 import { createStep, latestAttempts, latestRound, legacyIds, mapLegacy, moveStep, readyState, roundSteps, stageOf, summarize, type StepTrigger } from '../harness/workflow';
 import { applyItemEvent, applyTableEvent, emptyDelta, PIPELINE, type ItemsDelta, type JournalActor, type LedgerEvent, type TicketChange } from './delivery/derive';
-import type { Ledger } from './delivery/journal';
+import { Ledger, openJournal, type Journal, type JournalIO, type LedgerDeps, type Transaction } from './delivery/journal';
+import { rollForward } from './delivery/derive';
+import type { Logger } from './log';
 import { emptyTables, mergeKey, type TablesFile, type WorkflowRecord } from './store/delivery';
 import type { ItemRecord, ItemsFile } from './store/items';
 import type { JsonStore } from './store/store';
@@ -380,6 +382,53 @@ export function finalize(tx: Tx): void {
   }
 }
 
+/* ---------- Boot ---------- */
+
+export interface DeliveryBoot {
+  journal: Journal;
+  ledger: Ledger;
+  workflow: Workflow;
+  /** Every committed transaction, as boot read it (for the input re-queue). */
+  transactions: Transaction[];
+  /** Transactions each checkpoint had to roll forward over. */
+  rolled: { items: number; tables: number };
+  tornBytes: number;
+}
+
+/**
+ * Boot recovery, steps 1 to 3 (6.6): open the journal (repairing a torn
+ * tail; a damaged one throws JournalDamagedError), roll items.json and
+ * delivery/tables.json forward over every transaction they do not hold,
+ * commit both, and build the write path over them.
+ */
+export function bootDelivery(opts: {
+  file: string;
+  items: JsonStore<ItemsFile>;
+  tables: JsonStore<TablesFile>;
+  emit(ev: DaemonEvent): void;
+  log: Logger;
+  now: () => number;
+  io?: JournalIO;
+  hooks?: LedgerDeps['hooks'];
+}): DeliveryBoot {
+  const opened = openJournal(opts.file, { io: opts.io, log: opts.log });
+  const rolled = rollForward(opts.items.get(), opts.tables.get(), opened.transactions);
+  if (rolled.items) opts.items.commit();
+  if (rolled.tables) opts.tables.commit();
+  if (rolled.items || rolled.tables) opts.log.info('journal.rolled-forward', rolled);
+  const ledger = new Ledger({
+    journal: opened.journal,
+    items: opts.items,
+    tables: opts.tables,
+    emit: opts.emit,
+    publicItem: (item) => publicItem(item, opts.tables.get().workflows[item.id] ?? null),
+    log: opts.log,
+    hooks: opts.hooks,
+  });
+  const workflow = new Workflow({ ledger, items: opts.items, tables: opts.tables, now: opts.now });
+  return { journal: opened.journal, ledger, workflow, transactions: opened.transactions, rolled, tornBytes: opened.tornBytes };
+}
+
 /* ---------- The format-2 bootstrap ---------- */
 
 /**
@@ -450,8 +499,9 @@ export function bootstrapLegacy(wf: Workflow, items: readonly ItemRecord[], next
     journaled += 1;
     hooks.afterTicket?.(item.id);
   });
+  // The marker counts every ticket the bootstrap journaled, across a crash and its resumption.
   const tx = wf.begin('journal.bootstrap');
-  tx.push({ kind: 'journal.bootstrap', format: 2, tickets: journaled });
+  tx.push({ kind: 'journal.bootstrap', format: 2, tickets: items.length });
   wf.commit(tx);
   return journaled;
 }

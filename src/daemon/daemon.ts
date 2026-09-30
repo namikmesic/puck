@@ -46,8 +46,8 @@ import {
   type WorkItem,
 } from '../harness/daemon-protocol';
 import { latestAttempts, latestRound, roundSteps, StepStateError } from '../harness/workflow';
-import { asLedgerEvents, rollForward } from './delivery/derive';
-import { JournalDamagedError, JournalError, Ledger, openJournal, type Journal, type Transaction } from './delivery/journal';
+import { asLedgerEvents } from './delivery/derive';
+import { JournalDamagedError, JournalError, type Journal } from './delivery/journal';
 import { deliveryStore, type TablesFile } from './store/delivery';
 import type { ItemRecord, ItemsFile } from './store/items';
 import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
@@ -87,7 +87,7 @@ import { Work, WorkError } from './work';
 import { PUCK_GID, PUCK_UID, type DaemonPaths } from './paths';
 import { provision, provisionFingerprint, ProvisionError } from './provision';
 import { DaemonServer, SnapshotParts, type OpContext } from './server';
-import { bootstrapLegacy, publicItem, Workflow } from './workflow';
+import { bootDelivery, bootstrapLegacy, publicItem, type DeliveryBoot, type Workflow } from './workflow';
 import { flushJsonWrites, reportWriteErrors } from './store/jsonfile';
 import { instanceStore, type InstanceRecord } from './store/instance';
 import { migrateState } from './store/meta';
@@ -381,30 +381,25 @@ export class Daemon {
    */
   private openLedger(): void {
     const { paths, log } = this.opts;
-    let transactions: Transaction[];
+    let boot: DeliveryBoot;
     try {
-      const opened = openJournal(path.join(paths.state, 'delivery', 'journal.ndjson'), { log });
-      this.journal = opened.journal;
-      transactions = opened.transactions;
+      boot = bootDelivery({
+        file: path.join(paths.state, 'delivery', 'journal.ndjson'),
+        items: this.itemsFile,
+        tables: this.tablesFile,
+        emit: (ev) => this.emit(ev),
+        log,
+        now: this.now,
+      });
     } catch (err) {
       if (!(err instanceof JournalDamagedError)) throw err;
       this.journalError = err.message;
       log.error('journal.damaged', undefined, { line: err.line });
       return;
     }
-    const applied = rollForward(this.itemsFile.get(), this.tablesFile.get(), transactions);
-    if (applied.items) this.itemsFile.commit();
-    if (applied.tables) this.tablesFile.commit();
-    if (applied.items || applied.tables) log.info('journal.rolled-forward', { items: applied.items, tables: applied.tables });
-    const ledger = new Ledger({
-      journal: this.journal,
-      items: this.itemsFile,
-      tables: this.tablesFile,
-      emit: (ev) => this.emit(ev),
-      publicItem: (item) => publicItem(item, this.tablesFile.get().workflows[item.id] ?? null),
-      log,
-    });
-    this.workflow = new Workflow({ ledger, items: this.itemsFile, tables: this.tablesFile, now: this.now });
+    this.journal = boot.journal;
+    this.workflow = boot.workflow;
+    const transactions = boot.transactions;
     const bootstrapped = bootstrapLegacy(this.workflow, this.backlog.list(), this.itemsFile.get().nextNumber);
     if (bootstrapped || !transactions.length) log.info('journal.bootstrap', { tickets: bootstrapped });
     const active = new Set<string>();
@@ -1018,6 +1013,7 @@ export class Daemon {
   private async finishExit(code: number): Promise<void> {
     if (this.exited) return;
     if (this.githubTimer) clearInterval(this.githubTimer);
+    this.journal?.close();
     try {
       await this.server?.close();
     } catch (err) {

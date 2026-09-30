@@ -10,7 +10,8 @@ import { Daemon } from '../../src/daemon/daemon';
 import type { AdapterContext, AdapterRequest, HarnessAdapter } from '../../src/daemon/harness/types';
 import { createLogger } from '../../src/daemon/log';
 import { continuePrompt, workerPrompt } from '../../src/daemon/prompts';
-import { defined, exampleDefinition, fakeRunner, tempRoot, type RecordedCommand } from './daemon-fakes';
+import { stageLine } from '../../src/renderer/board-model';
+import { defined, deliveryStack, exampleDefinition, fakeRunner, LEGACY, LEGACY_T, tempRoot, writeLegacyState, type RecordedCommand } from './daemon-fakes';
 
 // Orchestration end to end, in process: real stores, socket and turn loop
 // under a temporary root, a fake command runner standing in for git, and a
@@ -751,6 +752,212 @@ describe('orchestrator tools', () => {
     // User changes reach the orchestrator; its own do not come back as notices.
     const pending = (daemon as unknown as { orchestrator: { pending(): Array<{ kind: string }> } }).orchestrator.pending();
     expect(pending.map((n) => n.kind)).toEqual(['item.review']);
+  });
+});
+
+describe('the implement and merge workflow', () => {
+  const stepsOf = (i: WorkItem) => i.workflow?.steps.map((s) => [s.kind, s.state, s.result]);
+
+  async function waiting(c: ReturnType<typeof client>, number: number): Promise<WorkItem> {
+    let found: WorkItem | undefined;
+    await vi.waitFor(
+      async () => {
+        found = await item(c, number);
+        expect([found.status, found.stage]).toEqual(['in-progress', 'merge']);
+      },
+      { timeout: 3000, interval: 10 },
+    );
+    return defined(found);
+  }
+
+  it('opens a changes round for every message to a finished ticket, without a limit, each superseding the waiting merge step', async () => {
+    const c = client(2);
+    await c.cmd('item.create', { title: 'Docs', agent: 'implementer' });
+    let current = await waiting(c, 1);
+    expect(stepsOf(current)).toEqual([
+      ['decompose', 'done', 'skipped'],
+      ['implement', 'done', 'passed'],
+      ['merge', 'waiting', null],
+    ]);
+    expect(current.workflow?.round).toBe(1);
+    for (let n = 2; n <= 6; n++) {
+      await c.cmd('chat.send', { sessionId: current.sessionId, text: `Change ${n}.` });
+      await vi.waitFor(async () => expect((await item(c, 1)).workflow?.round).toBe(n));
+      current = await waiting(c, 1);
+      expect(stepsOf(current)).toEqual([
+        ['implement', 'done', 'passed'],
+        ['merge', 'waiting', null],
+      ]);
+    }
+    expect(workerCalls.map((r) => r.prompt).slice(1)).toEqual(['Change 2.', 'Change 3.', 'Change 4.', 'Change 5.', 'Change 6.']);
+    expect(new Set(workerCalls.map((r) => r.sessionId)).size).toBe(1);
+    const flow = await c.cmd<{ roundsTotal: number; round: { purpose: string; outcome: string | null } }>('item.workflow', { itemId: current.id });
+    expect(flow).toMatchObject({ roundsTotal: 6, round: { purpose: 'changes', outcome: 'open' } });
+    const first = await c.cmd<{ round: { purpose: string; outcome: string }; steps: Array<{ kind: string; state: string; result: string | null }> }>('item.workflow', { itemId: current.id, round: 1 });
+    // Superseding a waiting merge step leaves the round settled (7.11).
+    expect(first.round).toMatchObject({ purpose: 'task', outcome: 'settled' });
+    expect(first.steps.map((s) => [s.kind, s.state, s.result])).toEqual([
+      ['decompose', 'done', 'skipped'],
+      ['implement', 'done', 'passed'],
+      ['merge', 'done', 'superseded'],
+    ]);
+    // Accept needs no reason; the waiting merge step finishes passed and the round settles.
+    const accepted = await c.cmd<WorkItem>('item.accept', { itemId: current.id });
+    expect(accepted).toMatchObject({ status: 'done', outcome: 'accepted', stage: null });
+    expect(accepted.closedAt).toEqual(expect.any(Number));
+    const last = await c.cmd<{ round: { outcome: string }; steps: Array<{ kind: string; state: string; result: string | null }> }>('item.workflow', { itemId: current.id });
+    expect(last.round.outcome).toBe('settled');
+    expect(last.steps.map((s) => [s.kind, s.result])).toEqual([
+      ['implement', 'passed'],
+      ['merge', 'passed'],
+    ]);
+  });
+
+  it('Stop ends the implement step cancelled and waits on the merge step; a message opens a new round, and Retry after Cancel another', async () => {
+    const c = client(2);
+    workerSteps = [
+      async (req, ctx) => {
+        ctx.reportSession(`worker-${req.sessionId}`);
+        await new Promise<void>((r) => ctx.onInterrupt(r));
+        end(ctx);
+      },
+    ];
+    await c.cmd('item.create', { title: 'Long', agent: 'implementer' });
+    await vi.waitFor(() => expect(workerCalls).toHaveLength(1));
+    const running = await item(c, 1);
+    expect(running).toMatchObject({ status: 'in-progress', stage: 'implement' });
+    // Publishing is refused while its worker runs.
+    await expect(c.cmd('item.publish', { itemId: running.id })).rejects.toThrow('W-1 is in progress; publish it once its worker finishes.');
+    await c.cmd('session.interrupt', { sessionId: running.sessionId });
+    const stopped = await waiting(c, 1);
+    expect(stepsOf(stopped)).toEqual([
+      ['decompose', 'done', 'skipped'],
+      ['implement', 'done', 'cancelled'],
+      ['merge', 'waiting', null],
+    ]);
+    expect(stopped.workflow?.steps[1]).toMatchObject({ detail: 'Stopped by the user' });
+    // Retry is for a ticket that is done; a stopped one takes a message.
+    await expect(c.cmd('item.retry', { itemId: stopped.id })).rejects.toThrow('Cannot retry a ticket that is in progress.');
+    await c.cmd('chat.send', { sessionId: stopped.sessionId, text: 'Carry on.' });
+    await vi.waitFor(async () => expect((await item(c, 1)).workflow?.round).toBe(2));
+    await waiting(c, 1);
+    expect((await c.cmd<WorkItem>('item.cancel', { itemId: stopped.id })).outcome).toBe('cancelled');
+    const retried = await c.cmd<WorkItem>('item.retry', { itemId: stopped.id });
+    expect(retried).toMatchObject({ status: 'in-progress', outcome: null, closedAt: null, sessionId: stopped.sessionId });
+    expect(retried.workflow?.round).toBe(3);
+    await waiting(c, 1);
+  });
+
+  it('accepts from the orchestrator’s work_accept without a reason, and links and unlinks related references', async () => {
+    const c = client(2);
+    const tools = (daemon as unknown as { tools: Array<{ name: string; run(a: Record<string, unknown>): unknown }> }).tools;
+    const tool = (name: string) => defined(tools.find((t) => t.name === name));
+    const created = await c.cmd<WorkItem>('item.create', { title: 'Link me', agent: 'implementer', links: ['octo/app#5', 'https://example.com/design'] });
+    expect(created.references.map((r) => [r.role, r.kind])).toEqual([
+      ['related', 'github-issue'],
+      ['related', 'url'],
+    ]);
+    // The same target twice is one link.
+    const again = await c.cmd<WorkItem>('item.link', { itemId: created.id, ref: 'https://github.com/octo/app/issues/5' });
+    expect(again.references).toHaveLength(2);
+    const pull = await c.cmd<WorkItem>('item.link', { itemId: created.id, ref: 'octo/app#9' });
+    expect(pull.references).toHaveLength(3);
+    await expect(c.cmd('item.link', { itemId: created.id, ref: 'not a link' })).rejects.toThrow('Puck cannot read "not a link" as a GitHub issue, pull request or https URL.');
+    const linked = (await tool('ticket_link').run({ item: 'W-1', ref: 'https://example.com/spec' })) as { references: Array<{ id: string; label: string }> };
+    expect(linked.references).toHaveLength(4);
+    const unlinked = (await tool('ticket_unlink').run({ item: 'W-1', reference: defined(linked.references[0]).id })) as { references: unknown[] };
+    expect(unlinked.references).toHaveLength(3);
+    await expect(c.cmd('item.unlink', { itemId: created.id, referenceId: 'ref_01J0000000000000000000000Z' })).rejects.toThrow('W-1 has no link ref_01J0000000000000000000000Z.');
+    // Links beyond 20 are refused.
+    for (let n = 0; n < 17; n++) await c.cmd('item.link', { itemId: created.id, ref: `https://example.com/${n}` });
+    await expect(c.cmd('item.link', { itemId: created.id, ref: 'https://example.com/extra' })).rejects.toThrow('A ticket has at most 20 related links.');
+    // The links made with the ticket are in ticket.created; every later add and remove is a ticket.reference.
+    expect(c.events().filter((e) => e.kind === 'ticket.reference')).toHaveLength(20);
+
+    await waiting(c, 1);
+    const accepted = (await tool('work_accept').run({ item: 'W-1' })) as Record<string, unknown>;
+    expect(accepted).toMatchObject({ item: 'W-1', status: 'done', outcome: 'accepted', stage: null });
+    expect((await item(c, 1)).acceptNote).toBeNull();
+  });
+});
+
+describe('the format-2 upgrade', () => {
+  it('boots a format-1 state onto the three columns: every ticket in place, then Retry, Accept and Cancel on the right ones, the queued input run once', async () => {
+    await daemon.shutdown();
+    root.cleanup();
+    root = tempRoot('pd-work-');
+    writeLegacyState(root.paths.state);
+    deliver();
+    // Workers wait until interrupted, so nothing moves on by itself.
+    const hold: Step = async (req, ctx) => {
+      ctx.reportSession(req.resumeId ?? `worker-${req.sessionId}`);
+      await new Promise<void>((r) => ctx.onInterrupt(r));
+      end(ctx);
+    };
+    workerSteps = Array.from({ length: 12 }, () => hold);
+    await launch();
+    const c = client(2);
+    const snap = await c.cmd<Snapshot>('snapshot.get');
+    const byId = (id: string) => defined(snap.items.find((i) => i.id === id), id);
+    expect(snap.items).toHaveLength(Object.keys(LEGACY).length);
+    // The old review ticket: in progress, its merge step waiting, and no checks or review rows.
+    const review = byId(LEGACY.review);
+    expect(review).toMatchObject({ status: 'in-progress', stage: 'merge', outcome: null });
+    expect(review.workflow?.steps.map((s) => [s.kind, s.state, s.result])).toEqual([
+      ['implement', 'done', 'passed'],
+      ['merge', 'waiting', null],
+    ]);
+    expect(stageLine(review, snap.items).text).toBe('Finished · waiting for you to accept or merge');
+    expect(byId(LEGACY.backlog)).toMatchObject({ status: 'todo', workflow: null });
+    expect(byId(LEGACY.merged)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: LEGACY_T + 109, workflow: null });
+    expect(byId(LEGACY.merged).references).toEqual([expect.objectContaining({ role: 'delivery', number: 41, state: 'merged' })]);
+    expect(byId(LEGACY.failed)).toMatchObject({ status: 'done', outcome: 'failed' });
+
+    // The running ticket resumes its session and runs its queued input exactly once.
+    await vi.waitFor(() => expect(workerCalls.filter((r) => r.prompt === 'Also update the docs.')).toHaveLength(1), { timeout: 3000 });
+    const running = await c.cmd<Snapshot>('snapshot.get');
+    expect(running.items.find((i) => i.id === LEGACY.running)).toMatchObject({ status: 'in-progress', stage: 'implement' });
+
+    expect(await c.cmd<WorkItem>('item.accept', { itemId: LEGACY.review })).toMatchObject({ status: 'done', outcome: 'accepted' });
+    expect(await c.cmd<WorkItem>('item.cancel', { itemId: LEGACY.backlog })).toMatchObject({ status: 'done', outcome: 'cancelled' });
+    const retried = await c.cmd<WorkItem>('item.retry', { itemId: LEGACY.failed });
+    expect(retried).toMatchObject({ status: 'in-progress', outcome: null, sessionId: byId(LEGACY.failed).sessionId });
+    expect(retried.workflow?.round).toBe(2);
+    await expect(c.cmd('item.retry', { itemId: LEGACY.merged })).rejects.toThrow('Cannot retry a ticket that is done (merged).');
+    await daemon.shutdown();
+    expect(workerCalls.filter((r) => r.prompt === 'Also update the docs.')).toHaveLength(1);
+  });
+
+  it('queues a journaled input again when a crash kept it from the session, and only once', async () => {
+    const c = client(2);
+    workerSteps = [
+      async (req, ctx) => {
+        ctx.reportSession('worker-1');
+        await new Promise<void>((r) => ctx.onInterrupt(r));
+        end(ctx);
+      },
+    ];
+    const created = await c.cmd<WorkItem>('item.create', { title: 'Long job', agent: 'implementer' });
+    await vi.waitFor(() => expect(workerCalls).toHaveLength(1));
+    const running = (await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === created.id);
+    await daemon.shutdown();
+    // A crash after the journal and before the session store: the input is journaled, the session never got it.
+    const stack = deliveryStack(root.paths.state);
+    const step = defined(stack.workflow.activeImplement(created.id));
+    const tx = stack.workflow.begin('item.follow-up');
+    tx.push({ kind: 'step.input', itemId: created.id, stepId: step.id, sessionId: defined(running?.sessionId), author: 'user', text: 'The lost message.', attachment: null });
+    stack.workflow.commit(tx);
+    stack.journal.close();
+    workerSteps = [say('Resumed.'), say('Got the message.')];
+    await launch();
+    await vi.waitFor(() => expect(workerCalls.filter((r) => r.prompt.includes('The lost message.'))).toHaveLength(1), { timeout: 3000 });
+    const d = client(2);
+    await until(d, 1, 'in-progress');
+    await daemon.shutdown();
+    workerSteps = [];
+    await launch();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(workerCalls.filter((r) => r.prompt.includes('The lost message.'))).toHaveLength(1);
   });
 });
 

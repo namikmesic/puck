@@ -5,7 +5,7 @@ import type { CommandRunner, RunOptions, RunResult } from '../../src/daemon/exec
 import { daemonPaths, type DaemonPaths } from '../../src/daemon/paths';
 import type { DaemonEvent, ItemStatusV1, Reference } from '../../src/harness/daemon-protocol';
 import { statusV1 } from '../../src/harness/workflow';
-import { openJournal, Ledger, type Journal, type JournalIO } from '../../src/daemon/delivery/journal';
+import type { Journal, JournalIO, Ledger } from '../../src/daemon/delivery/journal';
 import type { TicketChange } from '../../src/daemon/delivery/derive';
 import { actor, PIPELINE } from '../../src/daemon/delivery/derive';
 import { Backlog } from '../../src/daemon/items';
@@ -25,7 +25,9 @@ import {
   ticketPatch,
   ticketStatus,
   activeImplementOf,
-  Workflow,
+  bootDelivery,
+  type DeliveryBoot,
+  type Workflow,
 } from '../../src/daemon/workflow';
 
 export interface RecordedCommand {
@@ -95,30 +97,30 @@ export interface Stack {
   events: DaemonEvent[];
   /** The protocol shape of a ticket, with its workflow summary. */
   pub(item: ItemRecord): ReturnType<typeof publicItem>;
+  boot: DeliveryBoot;
 }
 
-/** Items, tables, the journal and the ledger over a state directory, as the daemon builds them. */
+/** Items, tables, the journal and the ledger over a state directory, as the daemon boots them (rolled forward). */
 export function deliveryStack(dir: string, opts: { now?: () => number; io?: JournalIO; emit?(ev: DaemonEvent): void; hooks?: ConstructorParameters<typeof Ledger>[0]['hooks'] } = {}): Stack {
   const now = opts.now ?? Date.now;
   const items = itemsStore(dir);
   const tables = deliveryStore(dir);
-  const { journal } = openJournal(path.join(dir, 'delivery', 'journal.ndjson'), { io: opts.io });
   const events: DaemonEvent[] = [];
-  const pub = (item: ItemRecord) => publicItem(item, tables.get().workflows[item.id] ?? null);
-  const ledger = new Ledger({
-    journal,
+  const boot = bootDelivery({
+    file: path.join(dir, 'delivery', 'journal.ndjson'),
     items,
     tables,
     emit: (ev) => {
       events.push(ev);
       opts.emit?.(ev);
     },
-    publicItem: pub,
     log: nullLogger,
+    now,
+    io: opts.io,
     hooks: opts.hooks,
   });
-  const workflow = new Workflow({ ledger, items, tables, now });
-  return { dir, items, tables, journal, ledger, workflow, backlog: new Backlog({ store: items, now }), events, pub };
+  const pub = (item: ItemRecord) => publicItem(item, tables.get().workflows[item.id] ?? null);
+  return { dir, items, tables, journal: boot.journal, ledger: boot.ledger, workflow: boot.workflow, backlog: new Backlog({ store: items, now }), events, pub, boot };
 }
 
 /** Where a ticket is, in protocol 1's words (the projection's mapping): what the older suites assert. */
@@ -219,4 +221,116 @@ export function seedChanges(stack: Stack, item: ItemRecord): ItemRecord {
   ticketPatch(tx, item, { requeue: 'follow-up' });
   stack.workflow.commit(tx);
   return stack.backlog.get(item.id) as ItemRecord;
+}
+
+/* ---------- A format-1 state, for the format-2 migration ---------- */
+
+export const LEGACY_T = 1_700_000_000_000;
+
+/** Ticket ids of the legacy fixture, by what they were. */
+export const LEGACY = {
+  backlog: 'itm_01J0000000000000000000BACK',
+  queued: 'itm_01J00000000000000000QUEUED',
+  requeued: 'itm_01J000000000000000REQUEUED',
+  running: 'itm_01J0000000000000000RUNNING',
+  askOrch: 'itm_01J000000000000000ASKORCHE',
+  askUser: 'itm_01J000000000000000ASKUSERX',
+  review: 'itm_01J00000000000000000REVIEW',
+  accepted: 'itm_01J000000000000000ACCEPTED',
+  merged: 'itm_01J00000000000000000MERGED',
+  failed: 'itm_01J00000000000000000FAILED',
+  cancelled: 'itm_01J00000000000000CANCELLED',
+} as const;
+
+/**
+ * items.json and sessions.json as a format-1 daemon wrote them: one ticket
+ * in each of the eight old statuses, a queued one with and one without a
+ * session, two done ones (one accepted, one with a merged pull request), a
+ * question routed to the orchestrator and one to the user, an active worker
+ * session with a queued input, a source issue and an open pull request.
+ */
+export function legacyState(): { items: Record<string, unknown>; sessions: Record<string, unknown> } {
+  let n = 0;
+  const base = { branch: 'main', sha: 'a'.repeat(40) };
+  const result = (interrupted = false) => ({ summary: 'Did it.', commits: [{ sha: 'c'.repeat(40), subject: 'Do it' }], diffStat: { files: 1, insertions: 2, deletions: 0, text: '' }, uncommitted: [], interrupted, endedAt: LEGACY_T + 50 });
+  const rec = (id: string, over: Record<string, unknown>) => {
+    n += 1;
+    return {
+      id,
+      number: n,
+      title: `Ticket ${n}`,
+      body: '',
+      status: 'backlog',
+      agent: 'implementer',
+      repo: 'app',
+      createdBy: 'user',
+      createdAt: LEGACY_T + n,
+      updatedAt: LEGACY_T + 100 + n,
+      attempts: 1,
+      sessionId: `ses_01J00000000000000000000${String(n).padStart(3, '0')}`,
+      branch: `puck/W-${n}`,
+      worktree: `/workspace/.puck/worktrees/W-${n}`,
+      base,
+      result: null,
+      pr: null,
+      source: null,
+      lastError: null,
+      cancelReason: null,
+      acceptNote: null,
+      pendingAsk: null,
+      requeue: null,
+      pushedSha: null,
+      ...over,
+    };
+  };
+  const list = [
+    rec(LEGACY.backlog, { status: 'backlog', agent: null, sessionId: null, attempts: 0, branch: null, worktree: null, base: null }),
+    rec(LEGACY.queued, { status: 'queued', sessionId: null, attempts: 0, branch: null, worktree: null, base: null }),
+    rec(LEGACY.requeued, { status: 'queued', requeue: 'restart' }),
+    rec(LEGACY.running, { status: 'running' }),
+    rec(LEGACY.askOrch, { status: 'needs-input', pendingAsk: { askId: 'ask_01J0000000000000000000ORCH', routedTo: 'orchestrator' } }),
+    rec(LEGACY.askUser, { status: 'needs-input', pendingAsk: { askId: 'ask_01J0000000000000000000USER', routedTo: 'user' } }),
+    rec(LEGACY.review, {
+      status: 'review',
+      result: result(),
+      source: { kind: 'github-issue', repo: 'octo/app', number: 12, url: 'https://github.com/octo/app/issues/12', updatedAt: LEGACY_T },
+      pr: { number: 40, url: 'https://github.com/octo/app/pull/40', draft: true, lastPushedSha: 'c'.repeat(40), state: 'open' },
+    }),
+    rec(LEGACY.accepted, { status: 'done', result: result(), acceptNote: 'Accepted by the user.' }),
+    rec(LEGACY.merged, { status: 'done', result: result(), pr: { number: 41, url: 'https://github.com/octo/app/pull/41', draft: false, lastPushedSha: 'd'.repeat(40), state: 'merged' } }),
+    rec(LEGACY.failed, { status: 'failed', attempts: 3, lastError: 'Tests failed.' }),
+    rec(LEGACY.cancelled, { status: 'cancelled', agent: null, sessionId: null, attempts: 0, cancelReason: 'Not needed.' }),
+  ];
+  const items = { nextNumber: n + 1, order: list.map((i) => i.id), items: Object.fromEntries(list.map((i) => [i.id, i])) };
+  const sessions: Record<string, unknown> = {};
+  for (const item of list) {
+    if (!item.sessionId) continue;
+    sessions[item.sessionId] = {
+      id: item.sessionId,
+      kind: 'worker',
+      agent: 'implementer',
+      harness: 'claude-code',
+      itemId: item.id,
+      cwd: item.worktree,
+      status: item.status === 'running' || item.status === 'needs-input' ? 'running' : 'idle',
+      queue: item.id === LEGACY.running ? [{ text: 'Also update the docs.', author: 'user' }] : [],
+      turns: 1,
+      lastTurnTokens: 10,
+      costUsd: 0,
+      createdAt: LEGACY_T,
+      lastActiveAt: LEGACY_T + 60,
+    };
+  }
+  sessions.ses_01J0000000000000000000ORCH = { id: 'ses_01J0000000000000000000ORCH', kind: 'orchestrator', agent: 'lead', harness: 'claude-code', cwd: '/workspace', status: 'idle', queue: [], turns: 0, lastTurnTokens: 0, costUsd: 0, createdAt: LEGACY_T, lastActiveAt: LEGACY_T };
+  return { items, sessions };
+}
+
+/** Write the legacy fixture as a format-1 state directory. */
+export function writeLegacyState(stateDir: string): ReturnType<typeof legacyState> {
+  const state = legacyState();
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'meta.json'), JSON.stringify({ formatVersion: 1, daemonVersion: '0.0.9', createdAt: LEGACY_T }));
+  fs.writeFileSync(path.join(stateDir, 'items.json'), JSON.stringify(state.items));
+  fs.writeFileSync(path.join(stateDir, 'sessions.json'), JSON.stringify(state.sessions));
+  return state;
 }

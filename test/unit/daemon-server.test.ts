@@ -3,7 +3,17 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { WIRE_LIMITS, type DaemonEvent, type DaemonFrame, type Snapshot } from '../../src/harness/daemon-protocol';
+import {
+  addSnapshotPart,
+  snapshotFromHead,
+  WIRE_LIMITS,
+  type DaemonEvent,
+  type DaemonFrame,
+  type Snapshot,
+  type SnapshotHead,
+  type SnapshotPart,
+  type WorkItem,
+} from '../../src/harness/daemon-protocol';
 import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
 import { attach } from '../../src/daemon/attach';
@@ -12,7 +22,8 @@ import { EventLog } from '../../src/daemon/eventlog';
 import type { HarnessAdapter } from '../../src/daemon/harness/types';
 import { createLogger, nullLogger } from '../../src/daemon/log';
 import { writeJsonAtomicSync } from '../../src/daemon/store/jsonfile';
-import { DaemonServer } from '../../src/daemon/server';
+import { DaemonServer, SnapshotParts } from '../../src/daemon/server';
+import { V1_EVENT_KINDS } from '../../src/daemon/protocol-v1';
 import { defined, exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
 
 // The daemon end to end, in process: real socket, real stores and event
@@ -816,5 +827,248 @@ describe('daemon wire frame limit', () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+describe('protocol 2 and the protocol-1 projection', () => {
+  const definition = () => ({
+    'instance.json': { envId: ENV_ID, name: 'Example', pin: { kind: 'tag', name: 'v1', sha: 'abc1234' }, definition: exampleDefinition({ orchestrator: { agent: 'lead', autoWake: false, maxAutoTurnsPerHour: 30 } }) },
+    'github.json': { grants: [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_abcdefghijk', expiresAt: 4102444800000 }] },
+  });
+
+  async function snapshot2(c: ReturnType<typeof client>): Promise<{ head: SnapshotHead; parts: SnapshotPart[]; snapshot: Snapshot }> {
+    const res = await c.cmd('snapshot.get');
+    if (!res.ok) throw new Error(res.error.message);
+    const head = res.result as SnapshotHead;
+    const snapshot = snapshotFromHead(head);
+    const parts: SnapshotPart[] = [];
+    let cursor = head.partsCursor;
+    while (cursor) {
+      const part = await c.cmd('snapshot.part', { cursor });
+      if (!part.ok) throw new Error(part.error.message);
+      parts.push(part.result as SnapshotPart);
+      addSnapshotPart(snapshot, part.result as SnapshotPart);
+      cursor = (part.result as SnapshotPart).partsCursor;
+    }
+    return { head, parts, snapshot };
+  }
+
+  it('serves an old app (protocol 1) across a ticket’s whole lifecycle with every seq, no gap and no resync', async () => {
+    deliver(definition());
+    await boot();
+    const v1 = client();
+    v1.hello(null, 1);
+    const welcome = await v1.until(isWelcome);
+    expect(welcome.protocol).toBe(1);
+    const snap = await v1.cmd('snapshot.get');
+    expect(snap.ok && (snap.result as { items: unknown[]; decisions?: unknown }).decisions).toBeUndefined();
+    const created = await v1.cmd('item.create', { title: 'Old app', agent: 'implementer' });
+    expect(created).toMatchObject({ ok: true, result: { status: 'queued', pr: null, source: null, pendingAsk: null } });
+    const itemId = (created as { result: { id: string } }).result.id;
+    const upserts = () => v1.events().flatMap((e) => (e.ev.kind === 'item.upsert' && (e.ev.item as { id: string }).id === itemId ? [(e.ev.item as unknown as { status: string }).status] : []));
+    await vi.waitFor(() => expect(upserts()).toContain('review'), { timeout: 3000 });
+    const accepted = await v1.cmd('item.accept', { itemId });
+    expect(accepted).toMatchObject({ ok: true, result: { status: 'done' } });
+    await vi.waitFor(() => expect(upserts().at(-1)).toBe('done'));
+    const seqs = v1.events().map((e) => e.seq);
+    expect(seqs[0]).toBe(welcome.head + 1);
+    expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => welcome.head + 1 + i));
+    for (const e of v1.events()) expect(V1_EVENT_KINDS.has(e.ev.kind), e.ev.kind).toBe(true);
+    // The statuses it saw are protocol 1's, in order.
+    expect([...new Set(upserts())]).toEqual(['queued', 'running', 'review', 'done']);
+    // A protocol-2 op is unknown to it.
+    expect(await v1.cmd('item.workflow', { itemId })).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
+    await daemon.shutdown();
+  });
+
+  it('serves a new app (protocol 2): the three-state ticket, its step events, and the snapshot in parts from one head', async () => {
+    deliver(definition());
+    await boot();
+    const v2 = client();
+    v2.hello(null, 2);
+    const welcome = await v2.until(isWelcome);
+    expect(welcome.protocol).toBe(2);
+    const created = await v2.cmd('item.create', { title: 'New app', agent: 'implementer', links: ['octo/app#5'] });
+    expect(created).toMatchObject({ ok: true, result: { status: 'todo', stage: null, outcome: null, references: [{ role: 'related', kind: 'github-issue', number: 5 }] } });
+    const itemId = (created as { result: { id: string } }).result.id;
+    await vi.waitFor(() => expect(v2.events().some((e) => e.ev.kind === 'item.upsert' && (e.ev.item as WorkItem).stage === 'merge')).toBe(true), { timeout: 3000 });
+    expect(v2.events().some((e) => e.ev.kind === 'step.changed')).toBe(true);
+    const { head, snapshot } = await snapshot2(v2);
+    expect(head).not.toHaveProperty('items');
+    expect(snapshot.items).toEqual([expect.objectContaining({ id: itemId, status: 'in-progress', stage: 'merge' })]);
+    expect(snapshot.order).toEqual([itemId]);
+    expect(snapshot.sessions.length).toBeGreaterThanOrEqual(2);
+    const flow = await v2.cmd('item.workflow', { itemId });
+    expect(flow).toMatchObject({ ok: true, result: { roundsTotal: 1, round: { round: 1 }, stepsCursor: null, reviews: [], decisions: [], findingsTotal: 0 } });
+    expect((flow as { result: { steps: Array<{ kind: string }> } }).result.steps.map((s) => s.kind)).toEqual(['decompose', 'implement', 'merge']);
+    const records = await v2.cmd('item.records', { itemId, kind: 'steps', limit: 2 });
+    expect(records).toMatchObject({ ok: true, result: { records: [{ kind: 'decompose' }, { kind: 'implement' }], nextCursor: '2' } });
+    expect(await v2.cmd('item.records', { itemId, kind: 'steps', cursor: '2' })).toMatchObject({ ok: true, result: { records: [{ kind: 'merge' }], nextCursor: null } });
+    expect(await v2.cmd('item.records', { itemId, kind: 'findings' })).toMatchObject({ ok: true, result: { records: [], nextCursor: null } });
+    expect(await v2.cmd('snapshot.part', { cursor: 'snp_01J0000000000000000000000A.0' })).toMatchObject({ ok: false, error: { code: 'not-found', message: 'The snapshot expired; take a new one.' } });
+    await daemon.shutdown();
+  });
+
+  it('serves an old runner (protocol 1) its ops', async () => {
+    deliver(definition());
+    await boot();
+    const runner = client();
+    runner.hello(null, 1);
+    await runner.until(isWelcome);
+    expect(await runner.cmd('github.put', { grants: [{ owner: 'octo', installationId: 42, repos: ['octo/app'], token: 'ghs_new_token_value', expiresAt: 4102444800000 }] })).toMatchObject({ ok: true });
+    expect(await runner.cmd('github.nudge', { repo: 'octo/app', kind: 'pull', number: 1 })).toMatchObject({ ok: true });
+    await daemon.shutdown();
+  });
+
+  it('sends a protocol-2 client whose cursor is from before the format boundary a resync, and a protocol-1 one its events', async () => {
+    // A format-1 volume with three events in its log.
+    fs.mkdirSync(root.paths.state, { recursive: true });
+    fs.writeFileSync(path.join(root.paths.state, 'meta.json'), JSON.stringify({ formatVersion: 1, daemonVersion: 'old', createdAt: 1 }));
+    const old = new EventLog(root.paths.events);
+    for (let i = 0; i < 3; i++) old.append({ kind: 'instance.status', status: 'provisioning', detail: `old ${i}` });
+    old.close();
+    deliver(definition());
+    await boot();
+    expect(JSON.parse(fs.readFileSync(path.join(root.paths.state, 'meta.json'), 'utf8'))).toMatchObject({ formatVersion: 2, formatBoundary: 3 });
+    const v2 = client();
+    v2.hello(1, 2);
+    expect(await v2.until(isWelcome)).toMatchObject({ replay: 'resync' });
+    const v2late = client();
+    v2late.hello(3, 2);
+    expect(await v2late.until(isWelcome)).toMatchObject({ replay: 'events' });
+    const v1 = client();
+    v1.hello(1, 1);
+    expect(await v1.until(isWelcome)).toMatchObject({ replay: 'events' });
+    await v1.until((f): f is Extract<DaemonFrame, { t: 'event' }> => f.t === 'event' && f.seq === 2);
+    expect(v1.events().find((e) => e.seq === 2)?.ev).toEqual({ kind: 'instance.status', status: 'provisioning', detail: 'old 1' });
+    await daemon.shutdown();
+  });
+});
+
+describe('the frame guard', () => {
+  async function serve(result: unknown, v1Snapshot: unknown = {}): Promise<DaemonServer> {
+    fs.mkdirSync(root.paths.run, { recursive: true });
+    const server = new DaemonServer({
+      socketPath: root.paths.socket,
+      log: nullLogger,
+      events: new EventLog(root.paths.events),
+      identity: () => ({ envId: ENV_ID, version: '0', build: 'b' }),
+      dispatch: async () => result,
+      snapshotV1: () => v1Snapshot as never,
+      projection: () => ({ item: () => null, capacity: () => ({ agents: {}, workers: { running: 0, max: 0 }, paused: false }), formatBoundary: 0 }),
+    });
+    await server.listen();
+    return server;
+  }
+
+  it('refuses any result larger than one frame with limit', async () => {
+    const server = await serve({ text: 'x'.repeat(WIRE_LIMITS.maxFrameBytes) });
+    try {
+      for (const protocol of [1, 2]) {
+        const c = client();
+        c.hello(null, protocol);
+        await c.until(isWelcome);
+        expect(await c.cmd('logs.tail', { lines: 10 })).toMatchObject({ ok: false, error: { code: 'limit', message: 'The result is larger than one frame; page it.' } });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('sends protocol 1’s whole snapshot unmeasured, as it always did', async () => {
+    const big = { items: [{ body: 'y'.repeat(WIRE_LIMITS.maxFrameBytes + 1024) }] };
+    const server = await serve({}, big);
+    try {
+      const c = client();
+      c.hello(null, 1);
+      await c.until(isWelcome);
+      const res = await c.cmd('snapshot.get');
+      expect(res).toMatchObject({ ok: true });
+      expect(((res as { result: typeof big }).result.items[0]?.body.length)).toBe(WIRE_LIMITS.maxFrameBytes + 1024);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe('snapshot parts', () => {
+  function base(): Snapshot {
+    return {
+      envId: ENV_ID,
+      name: 'n',
+      daemon: { version: 'v', build: 'b', protocol: 2 },
+      head: 77,
+      instance: { status: 'ready', pin: null, sha: null },
+      github: { state: 'ok' },
+      sessions: [],
+      orchestratorSessionId: null,
+      items: [],
+      order: [],
+      capacity: { agents: {}, workers: { running: 0, max: 1 }, paused: false },
+      inflight: [],
+      asks: [],
+      decisions: [],
+    };
+  }
+
+  function page(snapshot: Snapshot): { parts: SnapshotPart[]; head: SnapshotHead; assembled: Snapshot } {
+    const store = new SnapshotParts({ now: () => 1 });
+    const head = store.freeze(snapshot);
+    const assembled = snapshotFromHead(head);
+    const parts: SnapshotPart[] = [];
+    let cursor = head.partsCursor;
+    while (cursor) {
+      const part = store.next(cursor);
+      parts.push(part);
+      addSnapshotPart(assembled, part);
+      cursor = part.partsCursor;
+    }
+    return { parts, head, assembled };
+  }
+
+  const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+  it('attaches 1,000 tickets with 64 KiB bodies: every part below 512 KiB, one head', () => {
+    const snapshot = base();
+    for (let n = 1; n <= 1000; n++) {
+      const id = `itm_${String(n).padStart(26, '0')}`;
+      snapshot.items.push({ ...({} as WorkItem), id, number: n, title: `T${n}`, body: 'é'.repeat(32 * 1024), status: 'todo' } as WorkItem);
+      snapshot.order.push(id);
+    }
+    const { parts, head, assembled } = page(snapshot);
+    expect(bytes(snapshot)).toBeGreaterThan(64 * 1024 * 1000);
+    for (const part of parts) expect(bytes({ t: 'res', id: 'c1', ok: true, result: part })).toBeLessThan(512 * 1024);
+    expect(head.head).toBe(77);
+    expect(assembled).toEqual(snapshot);
+  });
+
+  it('attaches 4,000 retained worker sessions and 2,000 open decisions, and an in-flight turn larger than a part', () => {
+    const snapshot = base();
+    for (let n = 0; n < 4000; n++) {
+      snapshot.sessions.push({ id: `ses_${n}`, kind: 'worker', agent: 'implementer', harness: 'claude-code', itemId: `itm_${n}`, cwd: '/workspace/.puck/worktrees/W-1', status: 'idle', turns: 3, lastTurnTokens: 10, costUsd: 0, createdAt: 1, lastActiveAt: 1, queued: 0 });
+    }
+    for (let n = 0; n < 2000; n++) {
+      snapshot.decisions.push({ itemId: `itm_${n}`, askId: `dask_${n}`, roundId: `rnd_${n}`, stepId: null, kind: 'rounds', routedTo: 'user', question: 'q'.repeat(3000), options: [{ value: 'fix', label: 'One more round', needsReason: false, override: false }], since: 1 });
+    }
+    snapshot.inflight.push({ sessionId: 'ses_0', turnId: 'trn_big', startedAt: 1, events: Array.from({ length: 400 }, (_, i) => ({ kind: 'text-delta' as const, text: `${i}:${'z'.repeat(4000)}` })) });
+    const { parts, assembled } = page(snapshot);
+    for (const part of parts) expect(bytes(part)).toBeLessThan(512 * 1024);
+    expect(parts.filter((p) => p.collection === 'inflight').length).toBeGreaterThan(1);
+    expect(assembled).toEqual(snapshot);
+  });
+
+  it('forgets a frozen copy 120 s after its last request', () => {
+    let now = 0;
+    const store = new SnapshotParts({ now: () => now });
+    const snapshot = base();
+    snapshot.order = ['itm_1'];
+    const head = store.freeze(snapshot);
+    now = 119_000;
+    expect(store.next(defined(head.partsCursor)).collection).toBe('order');
+    now = 238_000;
+    expect(store.next(defined(head.partsCursor)).collection).toBe('order');
+    now = 359_000;
+    expect(() => store.next(defined(head.partsCursor))).toThrow('The snapshot expired; take a new one.');
+    expect(store.freeze(base()).partsCursor).toBeNull();
   });
 });
