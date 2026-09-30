@@ -82,11 +82,13 @@ export interface RequestOptions {
   token?: string;
   timeoutMs?: number;
   /**
-   * Bounds the answer: read through the runner-release transport, which
-   * refuses a longer or an encoded body before parsing. Release listings
-   * set it; other requests read as before.
+   * Bounds the answer through the runner-release transport: a longer body
+   * is refused before parsing. Release listings set it; other requests
+   * read as before.
    */
   maxBodyBytes?: number;
+  /** With maxBodyBytes. Listings pass false and keep a content encoding. */
+  refuseContentEncoding?: boolean;
 }
 
 /** One JSON request; resolves with the parsed body (null for 204), throws ServerApiError otherwise. */
@@ -95,7 +97,6 @@ export async function serverRequest<T = Record<string, unknown>>(method: string,
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
-  if (opts.maxBodyBytes !== undefined) headers['Accept-Encoding'] = 'identity';
   let res: Response;
   try {
     res = await deps.fetch(base + path, {
@@ -107,7 +108,10 @@ export async function serverRequest<T = Record<string, unknown>>(method: string,
   } catch (err) {
     throw new ServerUnreachableError(base, err);
   }
-  const text = opts.maxBodyBytes === undefined ? await res.text().catch(() => '') : new TextDecoder().decode(await readBoundedBody(res, opts.maxBodyBytes));
+  const text =
+    opts.maxBodyBytes === undefined
+      ? await res.text().catch(() => '')
+      : new TextDecoder().decode(await readBoundedBody(res, opts.maxBodyBytes, { refuseContentEncoding: opts.refuseContentEncoding }));
   let parsed: unknown = null;
   if (text) {
     try {

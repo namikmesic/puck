@@ -1,14 +1,31 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { packageRunner } from '../../scripts/package-runner.mjs';
 import { RUNNER_PACKAGE_ENTRIES, RUNNER_TARGETS, runnerPackageFile, targetName } from '../../src/harness/runner-releases';
 import { tar, tarGz, type TarEntry } from '../../src/puck-runner/tar';
 import { MAX_UNPACKED_BYTES, RunnerArchiveError, unpackRunnerPackage, type RunnerArchiveErrorCode } from '../../src/runner-release/archive';
 import { MAX_PACKAGE_BYTES } from '../../src/runner-release/download';
-import { packageRunner } from '../../scripts/package-runner.mjs';
+
+/** When set, the next staging directory is given a file named `bin`, so `bin/` cannot be created. */
+const plantBin = vi.hoisted(() => ({ on: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    mkdtempSync(prefix: string): string {
+      const dir = actual.mkdtempSync(prefix);
+      if (plantBin.on) actual.writeFileSync(join(dir, 'bin'), 'not a directory');
+      return dir;
+    },
+  };
+});
+
+const { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } = fs;
 
 // The strict package reader: the packager's fixed layout and nothing else,
 // read header by header into private staging, with every failure leaving
@@ -32,6 +49,7 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
 });
 afterEach(() => {
+  plantBin.on = false;
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -407,5 +425,12 @@ describe('staging', () => {
     mkdirSync(join(into, 'other'));
     expect((await failure(unpack(tarGz(entries({ LICENSE: null }))))).code).toBe('missing-entry');
     expect(readdirSync(into).sort()).toEqual([first.dir, second.dir].map((d) => d.slice(into.length + 1)).concat('other').sort());
+  });
+
+  it('removes the staging directory when bin/ cannot be created', async () => {
+    plantBin.on = true;
+    const f = await failure(unpack(tarGz(entries())));
+    expect(f.code).toBe('write-failed');
+    expect(readdirSync(into)).toEqual([]);
   });
 });

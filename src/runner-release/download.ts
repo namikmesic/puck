@@ -5,10 +5,12 @@
  * built-ins and the global fetch only; the renderer and the daemon never
  * import this directory (.eslintrc.json), and nothing here runs a package.
  *
- * Metadata. `readBoundedBody` returns a response's exact bytes: the bound
- * is checked against Content-Length before the read and against the count
- * during it, and a content encoding is refused because the bytes would
- * then not be the ones sent. `verifySignedRunnerReleases` decodes a
+ * Metadata. `readBoundedBody` returns a response's bytes: the bound is
+ * checked against Content-Length before the read and against the count
+ * during it. A listing passes `refuseContentEncoding: false`, because
+ * fetch has already decoded the body and signed bytes travel base64
+ * inside the JSON. A package download refuses a content encoding, because
+ * those bytes are hashed as sent. `verifySignedRunnerReleases` decodes a
  * listing's records (at most MAX_RELEASE_RECORDS, each manifest at most
  * MAX_MANIFEST_BYTES once decoded) and hands every manifest's exact bytes
  * to the verifier. Nothing re-serialised is ever verified, and the bytes
@@ -46,9 +48,7 @@ import {
   RUNNER_TARGETS,
   runnerPackageFile,
   runnerReleaseTag,
-  runnerTargetFor,
   RunnerReleaseError,
-  type RunnerTarget,
 } from '../harness/runner-releases';
 import { RELEASE_KEYS } from './trust';
 import { verifyRunnerRelease, type VerifiedRunnerRelease } from './verify';
@@ -132,9 +132,6 @@ export interface DownloadedPackage {
   sha256: string;
 }
 
-/** This machine as a package target, or null where runners do not run. */
-export const currentRunnerTarget = (platform: string = process.platform, arch: string = process.arch): RunnerTarget | null => runnerTargetFor(platform, arch);
-
 // eslint-disable-next-line no-control-regex
 const CONTROL_OR_SPACE_RE = /[\x00-\x20\x7f]/;
 const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
@@ -158,14 +155,15 @@ function contentLength(res: Response): number | null {
 const cancel = (res: Response): Promise<void> => (res.body ? res.body.cancel().catch(() => undefined) : Promise.resolve());
 
 /**
- * Reads a response's body as the exact bytes sent, at most `maxBytes`:
- * the bound is checked against Content-Length before the read and against
- * the running count during it, and the body is cancelled the moment it is
- * over. A content encoding is refused. Throws RunnerDownloadError.
+ * Reads a response's body, at most `maxBytes`. The bound is checked
+ * against Content-Length before the read and against the running count
+ * during it, and the body is cancelled the moment it is over. A content
+ * encoding is refused unless `opts.refuseContentEncoding` is false.
+ * Throws RunnerDownloadError.
  */
-export async function readBoundedBody(res: Response, maxBytes: number): Promise<Uint8Array> {
+export async function readBoundedBody(res: Response, maxBytes: number, opts: { refuseContentEncoding?: boolean } = {}): Promise<Uint8Array> {
   try {
-    contentEncoding(res);
+    if (opts.refuseContentEncoding !== false) contentEncoding(res);
     const length = contentLength(res);
     if (length !== null && length > maxBytes) throw new RunnerDownloadError('too-large', `The response announces ${length} bytes; at most ${maxBytes} are read.`);
   } catch (err) {
@@ -199,7 +197,7 @@ export async function readBoundedBody(res: Response, maxBytes: number): Promise<
 
 /** A release listing's body: at most MAX_RELEASE_METADATA_BYTES of UTF-8 JSON, returned parsed and as its exact bytes. */
 export async function readReleaseListing(res: Response): Promise<{ bytes: Uint8Array; value: unknown }> {
-  const bytes = await readBoundedBody(res, MAX_RELEASE_METADATA_BYTES);
+  const bytes = await readBoundedBody(res, MAX_RELEASE_METADATA_BYTES, { refuseContentEncoding: false });
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));

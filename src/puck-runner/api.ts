@@ -94,8 +94,8 @@ export class ServerApi {
     private readonly fetchImpl: Fetch = fetch,
   ) {}
 
-  /** `maxBytes` bounds the answer through the runner-release transport (a longer or an encoded body is refused unparsed); release listings set it. */
-  private async call<T>(method: string, path: string, opts: { body?: unknown; token?: string; maxBytes?: number } = {}): Promise<T> {
+  /** `maxBytes` bounds the answer through the runner-release transport; a longer body is refused unparsed. Release listings set it. */
+  private async call<T>(method: string, path: string, opts: { body?: unknown; token?: string; maxBytes?: number; refuseContentEncoding?: boolean } = {}): Promise<T> {
     let res: Response;
     try {
       res = await this.fetchImpl(this.baseUrl + path, {
@@ -103,7 +103,6 @@ export class ServerApi {
         headers: {
           ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
           ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
-          ...(opts.maxBytes !== undefined ? { 'Accept-Encoding': 'identity' } : {}),
         },
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -111,7 +110,10 @@ export class ServerApi {
     } catch (err) {
       throw new ApiError(0, 'unreachable', `Cannot reach the Puck server at ${this.baseUrl}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const text = opts.maxBytes === undefined ? await res.text() : new TextDecoder().decode(await readBoundedBody(res, opts.maxBytes));
+    const text =
+      opts.maxBytes === undefined
+        ? await res.text()
+        : new TextDecoder().decode(await readBoundedBody(res, opts.maxBytes, { refuseContentEncoding: opts.refuseContentEncoding }));
     let body: Record<string, unknown> = {};
     try {
       body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
@@ -151,7 +153,7 @@ export class ServerApi {
   }
 
   releases(): Promise<Releases> {
-    return this.call('GET', '/v1/runner/releases', { maxBytes: MAX_RELEASE_METADATA_BYTES });
+    return this.call('GET', '/v1/runner/releases', { maxBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false });
   }
 
   /** Streams a download; only URLs on this server are fetched. */

@@ -326,11 +326,16 @@ export async function unpackRunnerPackage(archive: string, opts: UnpackOptions):
   let dir: string;
   try {
     dir = fs.mkdtempSync(path.join(opts.into, 'puck-runner-'));
+  } catch (err) {
+    throw fail('write-failed', `Cannot make a staging directory under ${opts.into}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
     fs.chmodSync(dir, 0o700);
     const bin = RUNNER_PACKAGE_ENTRIES.find((e) => e.type === 'dir') as RunnerPackageEntry;
     fs.mkdirSync(path.join(dir, bin.name), { mode: bin.mode });
     fs.chmodSync(path.join(dir, bin.name), bin.mode);
   } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true });
     throw fail('write-failed', `Cannot make a staging directory under ${opts.into}: ${err instanceof Error ? err.message : String(err)}`);
   }
   try {

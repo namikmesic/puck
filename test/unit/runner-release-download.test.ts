@@ -20,7 +20,6 @@ import { ServerApi } from '../../src/puck-runner/api';
 import {
   BODY_TIMEOUT_MS,
   checkDownloadUrl,
-  currentRunnerTarget,
   DOWNLOAD_HOSTS,
   downloadRunnerPackage,
   HEADER_TIMEOUT_MS,
@@ -517,6 +516,9 @@ describe('release listings', () => {
     const { bytes, value } = await readReleaseListing(new Response(text));
     expect(Buffer.from(bytes).toString('utf8')).toBe(text);
     expect(value).toEqual({ latest: '1.2.3', releases: [] });
+    const encoded = await readReleaseListing(new Response(text, { headers: { 'content-encoding': 'gzip' } }));
+    expect(Buffer.from(encoded.bytes).toString('utf8')).toBe(text);
+    expect(encoded.value).toEqual({ latest: '1.2.3', releases: [] });
     for (const body of [new Uint8Array([0x7b, 0xff, 0x7d]), new TextEncoder().encode('{"a":'), new TextEncoder().encode('﻿{}')]) {
       await expect(readReleaseListing(new Response(body))).rejects.toMatchObject({ name: 'RunnerReleaseError', code: 'malformed' });
     }
@@ -535,15 +537,52 @@ describe('release listings', () => {
     useServerDeps({ fetch: fetchImpl as never }, 'http://puck.test');
     expect((await failure(mainApi.releases())).code).toBe('too-large');
     expect(seen[0].url).toBe('http://puck.test/v1/runner/releases');
-    expect((seen[0].init.headers as Record<string, string>)['Accept-Encoding']).toBe('identity');
+    expect((seen[0].init.headers as Record<string, string>)['Accept-Encoding']).toBeUndefined();
     // Other requests read as before: the whole (blank) body, parsed leniently.
     expect(await serverRequest('GET', '/v1/me')).toBeNull();
     expect((seen[1].init.headers as Record<string, string>)['Accept-Encoding']).toBeUndefined();
 
     const runner = new ServerApi('http://puck.test', fetchImpl);
     expect((await failure(runner.releases())).code).toBe('too-large');
-    expect((seen[2].init.headers as Record<string, string>)['Accept-Encoding']).toBe('identity');
+    expect((seen[2].init.headers as Record<string, string>)['Accept-Encoding']).toBeUndefined();
     expect(seen[2].init.headers).not.toHaveProperty('Authorization');
+  });
+
+  it('reads a content-encoded listing within the byte bound', async () => {
+    const listing = JSON.stringify({ latest: VERSION, minVersion: null, assets: [] });
+    const fetchImpl = (async () =>
+      streamed(chunked(Buffer.from(listing)), { headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } }).res) as typeof fetch;
+    useServerDeps({ fetch: fetchImpl as never }, 'http://puck.test');
+    expect(await mainApi.releases()).toEqual({ latest: VERSION, minVersion: null, assets: [] });
+    expect(await new ServerApi('http://puck.test', fetchImpl).releases()).toEqual({ latest: VERSION, minVersion: null, assets: [] });
+  });
+
+  it('reads a development server listing through both bounded readers', async () => {
+    const downloads = tmp();
+    mkdirSync(join(downloads, VERSION));
+    writeFileSync(join(downloads, VERSION, FILE), PACKAGE);
+    h = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: downloads });
+    const probe = await fetch(`${h.base}/v1/runner/releases`);
+    expect(probe.headers.get('content-encoding') ?? 'identity').toBe('identity');
+    await probe.body?.cancel();
+    const expected = {
+      latest: VERSION,
+      minVersion: null,
+      assets: [
+        {
+          os: 'linux',
+          arch: 'x64',
+          version: VERSION,
+          file: FILE,
+          url: `http://puck.test/runner/${VERSION}/${FILE}`,
+          sha256: sha256(PACKAGE),
+          size: PACKAGE.length,
+        },
+      ],
+    };
+    useServerDeps({}, h.base);
+    expect(await mainApi.releases()).toEqual(expected);
+    expect(await new ServerApi(h.base).releases()).toEqual(expected);
   });
 });
 
@@ -616,14 +655,5 @@ describe('verifySignedRunnerReleases', () => {
     expect(releaseFailure(() => verifySignedRunnerReleases([{ ...good, manifest: Buffer.alloc(MAX_MANIFEST_BYTES + 1, 0x20).toString('base64') }], [key.pem]))).toBe('malformed');
     expect(releaseFailure(() => verifySignedRunnerReleases([{ ...good, manifest: `${good.manifest}\n` }], [key.pem]))).toBe('malformed');
     expect(releaseFailure(() => verifySignedRunnerReleases({ records: [good] }, [key.pem]))).toBe('malformed');
-  });
-});
-
-describe('currentRunnerTarget', () => {
-  it('maps this machine through the one mapping', () => {
-    expect(currentRunnerTarget('darwin', 'arm64')).toEqual({ os: 'macos', arch: 'arm64' });
-    expect(currentRunnerTarget('win32', 'x64')).toBeNull();
-    const here = currentRunnerTarget();
-    if (process.platform === 'darwin' || process.platform === 'linux') expect(here).toEqual({ os: process.platform === 'darwin' ? 'macos' : 'linux', arch: process.arch });
   });
 });

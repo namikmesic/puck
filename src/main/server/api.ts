@@ -106,5 +106,5 @@ export async function forgetInstance(envId: string): Promise<void> {
 
 /** The server's runner releases, read within the listing bound (src/runner-release/download.ts). */
 export async function releases(): Promise<RunnerReleases> {
-  return readReleases(await serverRequest('GET', '/v1/runner/releases', { maxBodyBytes: MAX_RELEASE_METADATA_BYTES }));
+  return readReleases(await serverRequest('GET', '/v1/runner/releases', { maxBodyBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false }));
 }
