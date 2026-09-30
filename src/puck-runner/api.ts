@@ -174,6 +174,7 @@ export class RunnerSession {
     private readonly key: RunnerKey,
     /** The server's public URL; assertion audiences are built from it. */
     private readonly serverUrl: string,
+    private readonly version: string,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -182,7 +183,7 @@ export class RunnerSession {
     if (!this.inflight) {
       this.inflight = (async () => {
         try {
-          const assertion = signAssertion(this.runnerId, this.key.privateKey, `${this.serverUrl}/v1/runners/token`, this.now());
+          const assertion = signAssertion(this.runnerId, this.key.privateKey, `${this.serverUrl}/v1/runners/token`, this.now(), this.version);
           const res = await this.api.exchange(assertion);
           this.token = { value: res.accessToken, expiresAt: res.expiresAt };
           return res.accessToken;

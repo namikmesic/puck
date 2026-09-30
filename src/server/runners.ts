@@ -9,6 +9,13 @@
  * assertion (EdDSA, `iss = sub = runnerId`, audience this endpoint, at most
  * five minutes, single-use `jti`) and exchanging it at `POST /v1/runners/token`
  * for a one-hour runner access token (`PRA_`), which opens its socket.
+ * An assertion may carry a signed `ver` (`MAJOR.MINOR.PATCH`, with an
+ * optional pre-release suffix; anything else is rejected). The token route
+ * compares `PUCK_RUNNER_MIN_VERSION` against that claim when it is present,
+ * and against the version stored for the runner when it is absent. The
+ * stored version is written at registration and when an accepted relay
+ * hello or status frame is recorded. A removal assertion is accepted
+ * without a version comparison, including after the floor has risen.
  *
  * Removal takes a removal token (`PRR_`, one hour) or the runner's own
  * signed assertion. It revokes the key and either keeps the runner's
@@ -131,11 +138,11 @@ async function enrollToken(ctx: ServerContext, token: string, kind: EnrollKind) 
 }
 
 /**
- * The runner that signed `assertion` for `audPath`, after checking the
- * signature, audience, lifetime and single use. Removed runners are refused
- * with `runner-removed`.
+ * The runner and optional version that signed `assertion` for `audPath`,
+ * after checking the signature, audience, lifetime and single use. Removed
+ * runners are refused with `runner-removed`.
  */
-export async function verifyAssertion(ctx: ServerContext, assertion: string, audPath: string): Promise<Runner> {
+export async function verifyAssertion(ctx: ServerContext, assertion: string, audPath: string): Promise<{ runner: Runner; ver?: string }> {
   const invalid = (why: string) => new HttpError(401, 'invalid-assertion', `The runner assertion is invalid: ${why}.`);
   const parts = assertion.split('.');
   if (parts.length !== 3) throw invalid('not a JWT');
@@ -148,7 +155,7 @@ export async function verifyAssertion(ctx: ServerContext, assertion: string, aud
     throw invalid('unreadable');
   }
   if (header.alg !== 'EdDSA') throw invalid('alg must be EdDSA');
-  const { iss, sub, aud, iat, exp, jti } = claims;
+  const { iss, sub, aud, iat, exp, jti, ver } = claims;
   if (typeof iss !== 'string' || iss !== sub) throw invalid('iss and sub must name the runner');
   const runner = await ctx.store.getRunner(iss);
   if (!runner) throw invalid('unknown runner');
@@ -164,7 +171,10 @@ export async function verifyAssertion(ctx: ServerContext, assertion: string, aud
   if (iat > now + ASSERTION_SKEW_S || exp <= now) throw invalid('expired or not yet valid');
   if (typeof jti !== 'string' || !jti || jti.length > 128) throw invalid('jti is required');
   if (!(await ctx.store.useAssertionId(runner.id, jti, exp * 1000, ctx.clock.now()))) throw invalid('jti was already used');
-  return runner;
+  if (ver !== undefined && (typeof ver !== 'string' || ver.length > 64 || VERSION_RE.exec(ver)?.[0] !== ver)) {
+    throw invalid('ver must be MAJOR.MINOR.PATCH');
+  }
+  return { runner, ver };
 }
 
 export async function authenticateRunner(ctx: ServerContext, token: string | null): Promise<Runner> {
@@ -294,8 +304,8 @@ export function registerRunnerRoutes(router: Router, ctx: ServerContext): void {
 
   router.add('POST', '/v1/runners/token', async (req) => {
     const body = await req.json();
-    const runner = await verifyAssertion(ctx, str(body, 'assertion', { max: 2048 }), '/v1/runners/token');
-    checkVersion(ctx, runner.version);
+    const { runner, ver } = await verifyAssertion(ctx, str(body, 'assertion', { max: 2048 }), '/v1/runners/token');
+    checkVersion(ctx, ver ?? runner.version);
     const token = newSecret('PRA');
     const expiresAt = ctx.clock.now() + RUNNER_TOKEN_TTL_MS;
     await ctx.store.putRunnerToken(hashSecret(token), runner.id, expiresAt);
@@ -312,7 +322,7 @@ export function registerRunnerRoutes(router: Router, ctx: ServerContext): void {
     let runner: Runner | null;
     let by: string;
     if (typeof body.assertion === 'string') {
-      runner = await verifyAssertion(ctx, str(body, 'assertion', { max: 2048 }), '/v1/runners/remove');
+      runner = (await verifyAssertion(ctx, str(body, 'assertion', { max: 2048 }), '/v1/runners/remove')).runner;
       if (runner.id !== runnerId) throw new HttpError(401, 'invalid-assertion', 'The assertion is for another runner.');
       by = 'runner';
     } else {

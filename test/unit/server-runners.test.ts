@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { keyFingerprint } from '../../src/channel/wire';
+import { signAssertion } from '../../src/puck-runner/identity';
 import { NameTakenError } from '../../src/server/store';
 import {
   assertion,
@@ -197,10 +198,10 @@ describe('register', () => {
 });
 
 describe('token exchange by signed assertion', () => {
-  async function registered() {
+  async function registered(version = '0.1.0') {
     const s = await setup();
     const reg = await call(h, 'POST', '/v1/runners/registration-token', { token: s.accessToken });
-    const r = await register(s, String(reg.body.token));
+    const r = await register(s, String(reg.body.token), { runnerVersion: version });
     return { s, runnerId: String(r.res.body.runnerId), privateKey: r.privateKey };
   }
 
@@ -218,17 +219,74 @@ describe('token exchange by signed assertion', () => {
     await expect(connectRunner(h, String(res.body.accessToken))).rejects.toThrow(/401/);
   });
 
-  it('refuses a bad signature, audience, lifetime, expiry or a replayed jti', async () => {
+  it('lets an updated runner reconnect after the floor rises, recording its version only on hello', async () => {
+    const { s, runnerId, privateKey } = await registered();
+    h.server.ctx.config.minRunnerVersion = '0.2.0';
+    const res = await exchange(signAssertion(runnerId, privateKey, TOKEN_AUD, h.clock.now(), '0.2.0'));
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toMatch(/^PRA_/);
+    expect((await h.server.ctx.store.getRunner(runnerId))?.version).toBe('0.1.0');
+
+    const app = await connectApp(h, s.accessToken);
+    const sock = await connectRunner(h, String(res.body.accessToken), { version: '0.2.0' });
+    expect((await app.next('event')).event).toMatchObject({ type: 'runner.upsert', runner: { version: '0.2.0' } });
+    expect((await h.server.ctx.store.getRunner(runnerId))?.version).toBe('0.2.0');
+    expect((await exchange(assertion(runnerId, privateKey, TOKEN_AUD, h.clock.now()))).status).toBe(200);
+    sock.close();
+    app.close();
+  });
+
+  it.each([undefined, '0.1.0'])('refuses an old stored or signed version after the floor rises (ver=%s)', async (ver) => {
+    const { runnerId, privateKey } = await registered();
+    h.server.ctx.config.minRunnerVersion = '0.2.0';
+    const res = await exchange(assertion(runnerId, privateKey, TOKEN_AUD, h.clock.now(), { ver }));
+    expect(res.status).toBe(426);
+    expect(res.body).toMatchObject({ error: 'runner-outdated', minVersion: '0.2.0' });
+    expect((await h.server.ctx.store.getRunner(runnerId))?.version).toBe('0.1.0');
+  });
+
+  it('checks a signed version even when the stored version satisfies the floor', async () => {
+    const { runnerId, privateKey } = await registered('0.2.0');
+    h.server.ctx.config.minRunnerVersion = '0.2.0';
+    const res = await exchange(assertion(runnerId, privateKey, TOKEN_AUD, h.clock.now(), { ver: '0.1.0' }));
+    expect(res.status).toBe(426);
+    expect(res.body).toMatchObject({ error: 'runner-outdated', minVersion: '0.2.0' });
+    expect((await h.server.ctx.store.getRunner(runnerId))?.version).toBe('0.2.0');
+  });
+
+  it.each([null, 200, false, {}, [], '', '0.2', '0.2.0+build', '0.2.0\n', '0.2.0-' + 'a'.repeat(64)].map((ver) => [ver]))(
+    'refuses a present malformed version claim (%j)',
+    async (ver) => {
+      const { runnerId, privateKey } = await registered();
+      const res = await exchange(assertion(runnerId, privateKey, TOKEN_AUD, h.clock.now(), { ver }));
+      expect(res.status).toBe(401);
+      expect(res.body).toMatchObject({ error: 'invalid-assertion' });
+    },
+  );
+
+  it('refuses a version claim changed after signing', async () => {
+    const { runnerId, privateKey } = await registered();
+    h.server.ctx.config.minRunnerVersion = '0.2.0';
+    const [head, body, sig] = assertion(runnerId, privateKey, TOKEN_AUD, h.clock.now(), { ver: '0.1.0' }).split('.');
+    const claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    claims.ver = '0.2.0';
+    const tampered = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const res = await exchange(`${head}.${tampered}.${sig}`);
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ error: 'invalid-assertion', message: expect.stringContaining('bad signature') });
+  });
+
+  it.each([undefined, '0.2.0'])('refuses a bad signature, audience, lifetime, expiry or a replayed jti (ver=%s)', async (ver) => {
     const { runnerId, privateKey } = await registered();
     const now = h.clock.now();
     const other = runnerKeyPair().privateKey;
     const cases: [string, RegExp][] = [
-      [assertion(runnerId, other, TOKEN_AUD, now), /bad signature/],
-      [assertion(runnerId, privateKey, 'http://elsewhere/v1/runners/token', now), /audience/],
-      [assertion(runnerId, privateKey, TOKEN_AUD, now, { exp: Math.floor(now / 1000) + 3600 }), /five minutes/],
-      [assertion(runnerId, privateKey, TOKEN_AUD, now - 10 * 60_000), /expired/],
-      [assertion(runnerId, privateKey, TOKEN_AUD, now, { sub: 'rnr_other' }), /iss and sub/],
-      [assertion('rnr_nope', privateKey, TOKEN_AUD, now), /unknown runner/],
+      [assertion(runnerId, other, TOKEN_AUD, now, { ver }), /bad signature/],
+      [assertion(runnerId, privateKey, 'http://elsewhere/v1/runners/token', now, { ver }), /audience/],
+      [assertion(runnerId, privateKey, TOKEN_AUD, now, { ver, exp: Math.floor(now / 1000) + 3600 }), /five minutes/],
+      [assertion(runnerId, privateKey, TOKEN_AUD, now - 10 * 60_000, { ver }), /expired/],
+      [assertion(runnerId, privateKey, TOKEN_AUD, now, { ver, sub: 'rnr_other' }), /iss and sub/],
+      [assertion('rnr_nope', privateKey, TOKEN_AUD, now, { ver }), /unknown runner/],
       ['a.b', /not a JWT/],
     ];
     for (const [a, why] of cases) {
@@ -236,9 +294,11 @@ describe('token exchange by signed assertion', () => {
       expect(res.status).toBe(401);
       expect(String(res.body.message)).toMatch(why);
     }
-    const once = assertion(runnerId, privateKey, TOKEN_AUD, now, { jti: 'same' });
+    const once = assertion(runnerId, privateKey, TOKEN_AUD, now, { ver, jti: 'same' });
     expect((await exchange(once)).status).toBe(200);
-    expect(String((await exchange(once)).body.message)).toMatch(/already used/);
+    const replay = await exchange(once);
+    expect(replay.status).toBe(401);
+    expect(String(replay.body.message)).toMatch(/already used/);
   });
 });
 
@@ -355,6 +415,29 @@ describe('removal', () => {
     expect((await call(h, 'GET', `/v1/instances/${envId}`, { token: s.accessToken })).status).toBe(404);
   });
 
+  it('keeps the removal audience and accepts versionless removal after the floor rises', async () => {
+    const s = await setup();
+    const r = await registerRunner(h, s);
+    h.server.ctx.config.minRunnerVersion = '0.2.0';
+    const wrongAudience = await call(h, 'POST', '/v1/runners/remove', {
+      body: {
+        assertion: signAssertion(r.runnerId, r.privateKey, TOKEN_AUD, h.clock.now(), '0.2.0'),
+        runnerId: r.runnerId,
+        environments: 'keep',
+      },
+    });
+    expect(wrongAudience.status).toBe(401);
+    expect(wrongAudience.body).toMatchObject({ error: 'invalid-assertion', message: expect.stringContaining('wrong audience') });
+    const removed = await call(h, 'POST', '/v1/runners/remove', {
+      body: {
+        assertion: signAssertion(r.runnerId, r.privateKey, 'http://puck.test/v1/runners/remove', h.clock.now()),
+        runnerId: r.runnerId,
+        environments: 'keep',
+      },
+    });
+    expect(removed.status).toBe(204);
+  });
+
   it('refuses another user’s removal token', async () => {
     const { r } = await withEnvironment();
     h.github.addUser('mallory');
@@ -364,14 +447,14 @@ describe('removal', () => {
     expect(res.status).toBe(404);
   });
 
-  it('force-removes from the app: environments become lost and the runner is told to stop for good', async () => {
+  it.each([undefined, '0.2.0'])('force-removes from the app: environments become lost and the runner is told to stop for good (ver=%s)', async (ver) => {
     const { s, r, sock, envId } = await withEnvironment();
     expect((await call(h, 'DELETE', `/v1/runners/${r.runnerId}`, { token: s.accessToken })).status).toBe(204);
     expect((await sock.waitClosed()).reason).toBe('runner-removed');
     const inst = await call(h, 'GET', `/v1/instances/${envId}`, { token: s.accessToken });
     expect((inst.body.instance as { status: string }).status).toBe('lost');
     const back = await call(h, 'POST', '/v1/runners/token', {
-      body: { assertion: assertion(r.runnerId, r.privateKey, TOKEN_AUD, h.clock.now()) },
+      body: { assertion: assertion(r.runnerId, r.privateKey, TOKEN_AUD, h.clock.now(), { ver }) },
     });
     expect(back.status).toBe(403);
     expect(back.body.error).toBe('runner-removed');
