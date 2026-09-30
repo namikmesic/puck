@@ -268,8 +268,11 @@ function attach(envId: string): void {
       emitDaemon({ envId, snapshot });
       changed(envId);
     },
-    onWelcome: (daemon) => {
+    onWelcome: (daemon, head) => {
+      const previous = daemonBuilds.get(envId);
       daemonBuilds.set(envId, daemon.build);
+      emitDaemon({ envId, welcome: { daemon, head } });
+      if (previous && previous !== daemon.build) log.info('instance.daemon-version-changed', { envId, previous, build: daemon.build, version: daemon.version });
       changed(envId);
     },
     onState: (state: AttachState, detail) => {

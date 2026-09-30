@@ -292,7 +292,8 @@ export function initTopbar(ctx: TopbarContext) {
       const text = live.github.state === 'expiring' ? 'GitHub access expiring' : live.github.state === 'revoked' ? 'GitHub access revoked' : 'No GitHub access';
       els.chips.appendChild(chip('github bad', text, 'The runner keeps GitHub tokens coming from the Puck server; check that the runner is online and Puck is installed on the repositories.'));
     }
-    if (live?.upgrading) els.chips.appendChild(chip('upgrading', 'Daemon updating', live.upgrading === 'drain' ? 'Updating once running turns finish' : 'Updating now'));
+    if (live?.upgradeError) els.chips.appendChild(chip('daemon bad', 'Daemon update failed', live.upgradeError));
+    else if (live?.upgrading) els.chips.appendChild(chip('upgrading', 'Daemon updating', live.upgrading === 'drain' ? 'Updating once running turns finish' : 'Updating now'));
     else if (info.daemonUpdate && info.attach === 'attached') {
       const b = button('tb-chip daemon', 'Daemon update');
       b.title = 'This Puck carries a newer environment daemon';
@@ -303,8 +304,10 @@ export function initTopbar(ctx: TopbarContext) {
 
   function renderBanner(): void {
     const view = ctx.attach();
+    const upgradeError = store.state()?.upgradeError;
     els.banner.textContent = '';
     const show =
+      !!upgradeError ||
       view.phase === 'unreachable' ||
       view.phase === 'incompatible' ||
       view.phase === 'detached' ||
@@ -312,9 +315,17 @@ export function initTopbar(ctx: TopbarContext) {
       view.phase === 'snapshot-failed';
     els.banner.classList.toggle('hidden', !show);
     if (!show) return;
-    els.banner.dataset.phase = view.phase;
-    els.banner.appendChild(el('span', 'tb-banner-text', view.text));
-    if (view.retry) {
+    els.banner.dataset.phase = upgradeError ? 'daemon-update-failed' : view.phase;
+    els.banner.appendChild(el('span', 'tb-banner-text', upgradeError || view.text));
+    if (upgradeError && current()?.attach === 'attached') {
+      const retry = button('btn-ghost', 'Retry update');
+      retry.addEventListener('click', () => {
+        const id = store.envId();
+        if (id) showDaemonDialog(id);
+      });
+      els.banner.appendChild(retry);
+    }
+    if (view.retry || upgradeError) {
       const again = button('btn-ghost', 'Reconnect');
       again.addEventListener('click', () => ctx.reconnect());
       els.banner.appendChild(again);

@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonEvent, Snapshot } from '../../src/harness/daemon-protocol';
 import { DaemonClient, type AttachState } from '../../src/main/instances/daemon-client';
 import { BaseChannel, type ByteChannel } from '../../src/main/runners/channel';
+import { createInstanceStore } from '../../src/renderer/instance-store';
+import { ENV, snap } from './v2-fixtures';
 
 class ScriptedChannel extends BaseChannel {
   readonly sent: Record<string, unknown>[] = [];
@@ -86,6 +88,57 @@ function setup(since: number | null, opts: { idleMs?: number; open?: () => Promi
 }
 
 describe('daemon client', () => {
+  it.each(['events', 'resync'] as const)('finishes a daemon update on restart with %s reattachment', async (replay) => {
+    const store = createInstanceStore({ requestResync: () => undefined });
+    store.reset(ENV);
+    store.applySnapshot(snap(), ENV);
+    const channels: ScriptedChannel[] = [];
+    const snapshots: Snapshot[] = [];
+    const welcomes: unknown[] = [];
+    const updated = { version: '0.1.0+new', build: 'new', protocol: 1 };
+    const client = new DaemonClient({
+      envId: ENV,
+      open: async () => {
+        const c = new ScriptedChannel();
+        channels.push(c);
+        c.onFrame = (f) => {
+          if (f.op === 'snapshot.get') c.frame({ t: 'res', id: f.id, ok: true, result: snap({ head: 13, daemon: updated }) });
+        };
+        return c;
+      },
+      since: () => store.cursor(),
+      saveSeq: () => undefined,
+      onEvent: (seq, _at, event) => store.applyEvent(seq, event, ENV),
+      onSnapshot: (s) => { snapshots.push(s); store.applySnapshot(s, ENV); },
+      onWelcome: (daemon, head) => {
+        welcomes.push(daemon);
+        store.applyWelcome(daemon, head, ENV);
+      },
+      onState: () => undefined,
+      client: { app: 'puck', build: 't' },
+      timing: { backoffMs: [5], pingMs: 10_000 },
+    });
+    running.push(client);
+    client.start();
+    await until(() => channels.length === 1);
+    channels[0].frame({ ...welcome('events', 10), daemon: snap().daemon });
+    channels[0].frame(ev(11, { kind: 'daemon.upgrading', mode: 'now' }));
+    expect(store.state()?.upgrading).toBe('now');
+    channels[0].drop(); // Upgrade restarts the process; the app retains its projection.
+    await until(() => channels.length === 2);
+    expect(channels[1].sent[0]).toMatchObject({ t: 'hello', since: 11 });
+    channels[1].frame({ ...welcome(replay, 13), daemon: updated });
+    if (replay === 'events') {
+      channels[1].frame(ev(12, { kind: 'instance.status', status: 'starting' }));
+      channels[1].frame(ev(13, status));
+    } else await until(() => snapshots.length === 1);
+    expect(welcomes.at(-1)).toMatchObject(updated);
+    expect(snapshots).toHaveLength(replay === 'resync' ? 1 : 0);
+    expect(store.state()?.instance.status).toBe('ready');
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.daemon).toEqual(updated);
+  });
+
   it('says hello with its cursor in the same tick the channel opens, then replays later events once', async () => {
     const { client, channels, cursor, events } = setup(5);
     client.start();

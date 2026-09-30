@@ -22,6 +22,21 @@ function setup(daemon?: (envId: string, op: string) => Promise<unknown>) {
 }
 
 describe('instance sync', () => {
+  it('refreshes the build and finishes upgrading on welcome without reading another snapshot', async () => {
+    const { sync, store, bridge, daemonEvent, daemonWelcome, instanceEvent } = setup(async () => snap());
+    store.setInstances([instance()]);
+    await sync.open(ENV);
+    daemonEvent(11, { kind: 'daemon.upgrading', mode: 'now' });
+    instanceEvent({ kind: 'upsert', instance: instance({ attach: 'reconnecting' }) });
+    daemonWelcome({ version: '0.1.0', build: 'new', protocol: 1 }, 12);
+    instanceEvent({ kind: 'upsert', instance: instance() });
+    daemonEvent(12, { kind: 'instance.status', status: 'ready' });
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.daemon.build).toBe('new');
+    expect(bridge.daemon).toHaveBeenCalledTimes(1);
+    expect(sync.view().phase).toBe('ready');
+  });
+
   it('reads the snapshot right after opening when main is already attached', async () => {
     const s = snap({ head: 3, items: [item()] });
     const { sync, store, bridge } = setup(async () => s);

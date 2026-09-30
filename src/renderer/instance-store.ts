@@ -38,6 +38,8 @@ export type StoreChange =
   | { kind: 'instances' }
   | { kind: 'reset'; envId: string | null }
   | { kind: 'snapshot'; envId: string }
+  /** Attach metadata or the daemon update deadline changed. */
+  | { kind: 'daemon'; envId: string }
   /** An optimistic local reorder, before the daemon confirms it. */
   | { kind: 'order'; envId: string }
   | { kind: 'event'; envId: string; seq: number; ev: DaemonEvent };
@@ -50,8 +52,9 @@ export interface EnvDaemonState {
   github: GithubAuth;
   orchestratorSessionId: string | null;
   capacity: Capacity;
-  /** Set by `daemon.upgrading` until the next snapshot. */
+  /** Set by `daemon.upgrading` until a changed build returns or the restart times out. */
   upgrading: 'drain' | 'now' | null;
+  upgradeError: string | null;
   /** The definition's repositories, from the snapshot or the latest `instance.definition`. */
   repos: { github: string; dir: string }[];
 }
@@ -59,9 +62,16 @@ export interface EnvDaemonState {
 export interface InstanceStoreOptions {
   /** The buffer cannot close a gap in seq: fetch a snapshot (the owner calls applySnapshot). */
   requestResync(envId: string): void;
+  /** Restart deadline; drain time while turns are running is excluded. Test seam. */
+  upgradeTimeoutMs?: number;
 }
 
 const EMPTY_CAPACITY: Capacity = { agents: {}, workers: { running: 0, max: 0 }, paused: false };
+const UPGRADE_TIMEOUT_MS = 120_000;
+
+function sameDaemon(a: Snapshot['daemon'], b: Snapshot['daemon']): boolean {
+  return a.build === b.build && a.version === b.version;
+}
 
 /** Consecutive text deltas with the same parentId merge, and `thinking` is dropped. */
 export function recordLive(events: HarnessEvent[], event: HarnessEvent): void {
@@ -108,9 +118,37 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
   const inflight = new Map<string, InflightTurn>();
   /** The latest tool summary per session while its turn runs. */
   const lastTool = new Map<string, string>();
+  let upgradeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** An old upgrading event replayed through this head belongs to the build we replaced. */
+  let completedUpgradeThrough: number | null = null;
 
   function emit(change: StoreChange): void {
     for (const cb of listeners) cb(change);
+  }
+
+  function cancelUpgradeTimer(): void {
+    if (upgradeTimer) clearTimeout(upgradeTimer);
+    upgradeTimer = null;
+  }
+
+  function finishUpgrade(): void {
+    cancelUpgradeTimer();
+    if (!state) return;
+    state.upgrading = null;
+    state.upgradeError = null;
+  }
+
+  function watchUpgrade(restarting = false): void {
+    if (!state?.upgrading || upgradeTimer) return;
+    if (state.upgrading === 'drain' && inflight.size && !restarting && state.instance.status !== 'stopping') return;
+    upgradeTimer = setTimeout(() => {
+      upgradeTimer = null;
+      if (!state || !envId) return;
+      state.upgrading = null;
+      state.upgradeError = 'The daemon update did not complete within two minutes.';
+      emit({ kind: 'daemon', envId });
+    }, opts.upgradeTimeoutMs ?? UPGRADE_TIMEOUT_MS);
+    upgradeTimer.unref?.();
   }
 
   function clearDaemon(): void {
@@ -123,7 +161,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     lastTool.clear();
   }
 
-  function applyOne(ev: DaemonEvent): void {
+  function applyOne(seq: number, ev: DaemonEvent): void {
     if (!state) return;
     switch (ev.kind) {
       case 'instance.status':
@@ -191,12 +229,16 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         state.capacity = { agents: ev.agents, workers: ev.workers, paused: ev.paused };
         break;
       case 'daemon.upgrading':
+        if (completedUpgradeThrough !== null && seq <= completedUpgradeThrough) break;
+        cancelUpgradeTimer();
         state.upgrading = ev.mode;
+        state.upgradeError = null;
         break;
       case 'turn.user':
       case 'turn.notice':
         break;
     }
+    watchUpgrade();
   }
 
   function drain(): void {
@@ -206,7 +248,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
       const ev = buffered.get(seq) as DaemonEvent;
       buffered.delete(seq);
       cursor = seq;
-      applyOne(ev);
+      applyOne(seq, ev);
       emit({ kind: 'event', envId, seq, ev });
     }
     for (const seq of [...buffered.keys()]) if (seq <= cursor) buffered.delete(seq);
@@ -234,6 +276,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     },
     upsertInstance(info: InstanceInfo): void {
       instances.set(info.id, info);
+      if (info.id === envId && info.attach !== 'attached') watchUpgrade(true);
       emit({ kind: 'instances' });
     },
     removeInstance(id: string): void {
@@ -251,6 +294,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
 
     /** Switch to another environment (or none): its daemon state starts empty until a snapshot. */
     reset(next: string | null): void {
+      cancelUpgradeTimer();
+      completedUpgradeThrough = null;
       envId = next;
       cursor = null;
       resyncAsked = undefined;
@@ -264,6 +309,13 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
 
     applySnapshot(snapshot: Snapshot, forEnv: string): void {
       if (forEnv !== envId) return;
+      // A snapshot of the old process during drain cannot complete its upgrade.
+      const previous = state;
+      const unchanged = previous && sameDaemon(previous.daemon, snapshot.daemon);
+      if (!unchanged) {
+        finishUpgrade();
+        completedUpgradeThrough = snapshot.head;
+      }
       clearDaemon();
       state = {
         envId: forEnv,
@@ -273,7 +325,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         github: { ...snapshot.github },
         orchestratorSessionId: snapshot.orchestratorSessionId,
         capacity: snapshot.capacity ?? EMPTY_CAPACITY,
-        upgrading: null,
+        upgrading: unchanged ? previous.upgrading : null,
+        upgradeError: unchanged ? previous.upgradeError : null,
         repos: snapshot.repos ?? [],
       };
       for (const item of snapshot.items) items.set(item.id, item);
@@ -294,8 +347,20 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
       }
       cursor = snapshot.head;
       resyncAsked = undefined;
+      watchUpgrade();
       emit({ kind: 'snapshot', envId: forEnv });
       drain();
+    },
+
+    /** Welcome arrives on every attach, including replays that need no snapshot. */
+    applyWelcome(daemon: Snapshot['daemon'], head: number, forEnv: string): void {
+      if (forEnv !== envId || !state) return;
+      if (!sameDaemon(state.daemon, daemon)) {
+        completedUpgradeThrough = head;
+        finishUpgrade();
+      }
+      state.daemon = { ...daemon };
+      emit({ kind: 'daemon', envId: forEnv });
     },
 
     applyEvent(seq: number, ev: DaemonEvent, forEnv: string): void {

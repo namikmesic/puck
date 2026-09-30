@@ -59,8 +59,8 @@ export interface DaemonClientDeps {
   /** A resync: the snapshot replaces everything the owner projected. */
   onSnapshot(snapshot: Snapshot): void;
   onState(state: AttachState, detail: string): void;
-  /** Each welcome (the daemon's version, for update checks). */
-  onWelcome?(daemon: { version: string; build: string; protocol: number }): void;
+  /** Each welcome: the current build and the head through which events are replayed. */
+  onWelcome?(daemon: Snapshot['daemon'], head: number): void;
   client: { app: string; build: string };
   now?(): number;
   /** Test seam. */
@@ -203,7 +203,7 @@ export class DaemonClient {
           }
           this.failures = 0;
           this.everAttached = true;
-          this.deps.onWelcome?.({ ...frame.daemon, protocol: frame.protocol });
+          this.deps.onWelcome?.({ ...frame.daemon, protocol: frame.protocol }, frame.head);
           this.setState('attached');
           if (frame.replay === 'resync') {
             held = [];

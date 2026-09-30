@@ -128,6 +128,7 @@ describe('environment manager', { timeout: 30_000 }, () => {
     });
     await first.instances.open(ENV);
     await until('attached', () => first.instances.list()[0]?.attach === 'attached');
+    expect(first.events.find((e) => 'welcome' in e)).toMatchObject({ envId: ENV, welcome: { daemon: { version: 'fake', build: 'fake', protocol: 1 }, head: 0 } });
     expect(first.instances.list()[0]).toMatchObject({ id: ENV, name: 'example', local: true, current: true, repos: ['octo/app'] });
     await first.instances.daemon(ENV, 'chat.send', { text: 'first' });
     await until('the answer', () => first.events.some((e) => 'ev' in e && e.ev.kind === 'turn.end'));

@@ -157,6 +157,7 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
   bridge.onDaemonEvent((payload) => {
     if (payload.envId !== store.envId()) return;
     if ('snapshot' in payload) store.applySnapshot(payload.snapshot, payload.envId);
+    else if ('welcome' in payload) store.applyWelcome(payload.welcome.daemon, payload.welcome.head, payload.envId);
     else store.applyEvent(payload.seq, payload.ev, payload.envId);
     notify();
   });

@@ -5,7 +5,7 @@
  * live turn buffers.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '../../src/harness/daemon-protocol';
 import { createInstanceStore, placeInOrder, recordLive, type StoreChange } from '../../src/renderer/instance-store';
 import { ENV, ENV2, instance, item, ORCH, session, snap, WORKER } from './v2-fixtures';
@@ -20,6 +20,94 @@ function setup() {
 }
 
 const upsert = (n: number, over = {}): DaemonEvent => ({ kind: 'item.upsert', item: item({ number: n, ...over }) });
+
+describe('daemon upgrade state', () => {
+  afterEach(() => vi.useRealTimers());
+  const updated = { version: '0.1.0+new', build: 'new', protocol: 1 };
+
+  it('ignores an old upgrading event replayed after the new build welcomes, but accepts a later update', () => {
+    const { store } = setup();
+    store.applySnapshot(snap(), ENV);
+    // The connection dropped before the app received the upgrade event.
+    store.applyWelcome(updated, 13, ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    store.applyEvent(12, { kind: 'instance.status', status: 'stopping', detail: 'upgrading' }, ENV);
+    store.applyEvent(13, { kind: 'instance.status', status: 'ready' }, ENV);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.daemon).toEqual(updated);
+    store.applyEvent(14, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    expect(store.state()?.upgrading).toBe('now');
+    store.reset(null);
+  });
+
+  it('expires a missing restart, keeps the failure across old-build snapshots, and clears it on a late welcome', () => {
+    vi.useFakeTimers();
+    const { store, changes } = setup();
+    store.applySnapshot(snap(), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgrading).toBe('now');
+    store.applySnapshot(snap({ head: 11 }), ENV);
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toMatch(/did not complete within two minutes/);
+    expect(changes.at(-1)).toEqual({ kind: 'daemon', envId: ENV });
+    store.applySnapshot(snap({ head: 11 }), ENV);
+    expect(store.state()?.upgradeError).not.toBeNull();
+    store.applyWelcome(updated, 12, ENV);
+    expect(store.state()?.upgradeError).toBeNull();
+    expect(store.state()?.daemon).toEqual(updated);
+  });
+
+  it('keeps drain pending across same-build reattach and resync, then starts the deadline after the last turn', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    const turn = { sessionId: ORCH, turnId: 'turn1', startedAt: 1, events: [] };
+    store.applySnapshot(snap({ inflight: [turn] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    vi.advanceTimersByTime(300_000);
+    store.applyWelcome(snap().daemon, 11, ENV);
+    store.applySnapshot(snap({ head: 11, inflight: [turn] }), ENV);
+    vi.advanceTimersByTime(300_000);
+    expect(store.state()?.upgrading).toBe('drain');
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyEvent(12, { kind: 'turn.end', sessionId: ORCH, turnId: 'turn1', stats: { inputTokens: 1, outputTokens: 1, durationMs: 1 } }, ENV);
+    vi.advanceTimersByTime(119_999);
+    expect(store.state()?.upgrading).toBe('drain');
+    store.applyWelcome(updated, 13, ENV);
+    vi.advanceTimersByTime(1);
+    expect(store.state()?.upgrading).toBeNull();
+    expect(store.state()?.upgradeError).toBeNull();
+  });
+
+  it('bounds a drain restart after disconnect even if turn-end events did not reach the app', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    store.applySnapshot(snap({ inflight: [{ sessionId: ORCH, turnId: 'turn1', startedAt: 1, events: [] }] }), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'drain' }, ENV);
+    store.upsertInstance(instance({ attach: 'reconnecting' }));
+    vi.advanceTimersByTime(120_000);
+    expect(store.state()?.upgradeError).not.toBeNull();
+    expect(store.state()?.upgrading).toBeNull();
+  });
+
+  it('cancels the deadline on an updated snapshot or when leaving the environment', () => {
+    vi.useFakeTimers();
+    const { store } = setup();
+    store.applySnapshot(snap(), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    store.applySnapshot(snap({ head: 12, daemon: updated }), ENV);
+    vi.advanceTimersByTime(120_000);
+    expect(store.state()?.upgradeError).toBeNull();
+    store.applyEvent(13, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    store.reset(ENV2);
+    store.applySnapshot(snap({ envId: ENV2 }), ENV2);
+    store.applyWelcome(updated, 13, ENV);
+    vi.advanceTimersByTime(120_000);
+    expect(store.state()?.daemon).toEqual(snap().daemon);
+    expect(store.state()?.upgradeError).toBeNull();
+  });
+});
 
 describe('instance store', () => {
   it('holds events that arrive before the snapshot and applies the ones after its head', () => {

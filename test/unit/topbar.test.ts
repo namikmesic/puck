@@ -6,7 +6,7 @@
  * cannot reach; the switcher menu offers the environment operations.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { InstanceInfo, InstanceUpdate } from '../../src/harness/bridge';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { attachViewOf, type AttachView } from '../../src/renderer/instance-sync';
@@ -186,6 +186,53 @@ describe('top bar', () => {
 });
 
 describe('daemon update', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('clears the updating chip and shows the current daemon version after a replay reattach', () => {
+    const { store, tb, byId } = setup([instance({ daemonUpdate: true })]);
+    store.applySnapshot(snap(), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    tb.render();
+    expect(byId('chips').textContent).toContain('Daemon updating');
+    store.applyWelcome({ version: '0.1.0+new', build: 'new', protocol: 1 }, 12, ENV);
+    store.applyEvent(12, { kind: 'instance.status', status: 'ready' }, ENV);
+    store.upsertInstance(instance({ daemonUpdate: false }));
+    tb.render();
+    expect(byId('chips').textContent).not.toContain('Daemon updating');
+    byId('status').click();
+    expect(document.querySelector('.popover')?.textContent).toContain('0.1.0+new (new)');
+    expect(document.querySelector('.popover')?.textContent).not.toContain('0.0.1 (test)');
+    byId('status').click();
+  });
+
+  it.each(['attached', 'reconnecting'] as const)('replaces an expired update with an error and retry actions while %s', (attach) => {
+    vi.useFakeTimers();
+    const { store, tb, byId, reconnect } = setup([instance({ attach })]);
+    store.applySnapshot(snap(), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    vi.advanceTimersByTime(120_000);
+    tb.render();
+    expect(byId('chips').textContent).not.toContain('Daemon updating');
+    expect(byId('chips').textContent).toContain('Daemon update failed');
+    const banner = byId('banner');
+    expect(banner.classList.contains('hidden')).toBe(false);
+    expect(banner.textContent).toContain('The daemon update did not complete within two minutes.');
+    const buttons = [...banner.querySelectorAll('button')];
+    buttons.find((b) => b.textContent === 'Reconnect')?.click();
+    expect(reconnect).toHaveBeenCalledOnce();
+    const retry = buttons.find((b) => b.textContent === 'Retry update');
+    if (attach === 'attached') {
+      expect(retry).toBeDefined();
+      retry?.click();
+      expect(byId('dialog').classList.contains('hidden')).toBe(false);
+      expect(byId('dialog').querySelector('[data-mode="now"]')).not.toBeNull();
+    } else expect(retry).toBeUndefined();
+    store.applyWelcome({ version: '0.1.0+new', build: 'new', protocol: 1 }, 12, ENV);
+    tb.render();
+    expect(banner.classList.contains('hidden')).toBe(true);
+    expect(byId('chips').textContent).not.toContain('Daemon update failed');
+  });
+
   it('offers drain or now for a daemon older than the app carries', async () => {
     const { store, tb, byId, bridge } = setup([instance({ daemonUpdate: true })]);
     (bridge as unknown as { instanceUpgradeDaemon: unknown }).instanceUpgradeDaemon = vi.fn(async () => undefined);
