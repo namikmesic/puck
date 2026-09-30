@@ -18,6 +18,13 @@ const plantBin = vi.hoisted(() => ({ on: false }));
  * nothing at all, as a full disk or a short POSIX write would.
  */
 const shortWrite = vi.hoisted(() => ({ mode: null as null | 'half' | 'zero', opened: 0 }));
+/**
+ * When `ms` is set, every open for writing takes that long, and each open and
+ * close is recorded in order. `failSourceOnOpen` destroys the archive's read
+ * stream the moment the first open begins, so the stream fails while that
+ * open is in flight.
+ */
+const slowOpen = vi.hoisted(() => ({ ms: 0, events: [] as string[], failSourceOnOpen: false, source: null as null | { destroy(err?: Error): unknown } }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -28,10 +35,28 @@ vi.mock('node:fs', async (importOriginal) => {
       if (plantBin.on) actual.writeFileSync(join(dir, 'bin'), 'not a directory');
       return dir;
     },
+    createReadStream(...args: Parameters<typeof actual.createReadStream>): ReturnType<typeof actual.createReadStream> {
+      const stream = actual.createReadStream(...args);
+      slowOpen.source = stream;
+      return stream;
+    },
     promises: {
       ...actual.promises,
       async open(...args: Parameters<typeof actual.promises.open>): ReturnType<typeof actual.promises.open> {
+        if (slowOpen.failSourceOnOpen) {
+          slowOpen.failSourceOnOpen = false;
+          slowOpen.source?.destroy(new Error('the disk read failed'));
+        }
+        if (slowOpen.ms) await new Promise((resolve) => setTimeout(resolve, slowOpen.ms));
         const handle = await actual.promises.open(...args);
+        if (slowOpen.ms) {
+          slowOpen.events.push(`opened ${String(args[0]).split('/').pop()}`);
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            slowOpen.events.push(`closed ${String(args[0]).split('/').pop()}`);
+            return close();
+          };
+        }
         if (!shortWrite.mode) return handle;
         shortWrite.opened++;
         let calls = 0;
@@ -74,6 +99,10 @@ afterEach(() => {
   plantBin.on = false;
   shortWrite.mode = null;
   shortWrite.opened = 0;
+  slowOpen.ms = 0;
+  slowOpen.events = [];
+  slowOpen.failSourceOnOpen = false;
+  slowOpen.source = null;
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -522,6 +551,23 @@ describe('staging', () => {
     plantBin.on = true;
     const f = await failure(unpack(tarGz(entries())));
     expect(f.code).toBe('write-failed');
+    expect(readdirSync(into)).toEqual([]);
+  });
+
+  it('closes a file whose open was still in flight when the stream failed, before it rejects and removes staging', async () => {
+    // The read stream fails the moment the first entry's open begins, and that open takes a while.
+    slowOpen.ms = 150;
+    slowOpen.failSourceOnOpen = true;
+    const f = await failure(unpack(tarGz(entries())));
+    expect(f).toEqual({ code: 'corrupt', message: 'Reading the package failed: the disk read failed' });
+    // By the time the caller hears of the failure, the late open has completed and its handle is closed.
+    expect(slowOpen.events).toEqual(['opened config.sh', 'closed config.sh']);
+    expect(readdirSync(into)).toEqual([]);
+    // The same ordering when the sink itself is what fails, with an open in flight for the next entry.
+    slowOpen.events = [];
+    const g = await failure(unpack(tarGz(entries({ 'run.sh': { mode: 0o4755 } }))));
+    expect(g.code).toBe('bad-mode');
+    expect(slowOpen.events).toEqual(['opened config.sh', 'closed config.sh']);
     expect(readdirSync(into)).toEqual([]);
   });
 

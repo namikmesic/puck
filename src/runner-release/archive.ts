@@ -222,6 +222,8 @@ class PackageSink extends Writable {
   private crc = 0;
   private zeroBlocks = 0;
   private current: { entry: Entry; remaining: number; padding: number; file: fs.promises.FileHandle | null; version: Buffer[] } | null = null;
+  /** The chunk being consumed, settled either way; destruction waits for it so no file lands in staging after 'close'. */
+  private inflight: Promise<void> = Promise.resolve();
   readonly seen = new Set<string>();
   private readonly dir: string;
   private readonly version: string;
@@ -244,7 +246,12 @@ class PackageSink extends Writable {
   }
 
   _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-    this.consume(chunk).then(() => callback(), callback);
+    const work = this.consume(chunk);
+    this.inflight = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    work.then(() => callback(), callback);
   }
 
   _final(callback: (error?: Error | null) => void): void {
@@ -256,11 +263,23 @@ class PackageSink extends Writable {
     callback(missing.length ? fail('missing-entry', `The package lacks ${missing.join(', ')}.`) : null);
   }
 
-  /** Closes an open file after a failure; pipeline destroys the stream before _final runs. */
+  /**
+   * After a failure: waits for the chunk in hand (its open or write may
+   * still be in the threadpool), then closes the file it left open. Only
+   * then does 'close' fire, so the caller can remove staging with nothing
+   * about to be created in it.
+   */
   _destroy(error: Error | null, callback: (error: Error | null) => void): void {
-    const file = this.current?.file ?? null;
-    this.current = null;
-    (file ? file.close().catch(() => undefined) : Promise.resolve()).then(() => callback(error));
+    this.inflight
+      .then(async () => {
+        const file = this.current?.file ?? null;
+        this.current = null;
+        if (file) await file.close().catch(() => undefined);
+      })
+      .then(
+        () => callback(error),
+        () => callback(error),
+      );
   }
 
   private async consume(chunk: Buffer): Promise<void> {
@@ -303,6 +322,11 @@ class PackageSink extends Writable {
         await file.chmod(spec.mode);
       } catch (err) {
         throw fail('write-failed', `Cannot create ${spec.name} in staging: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (this.destroyed) {
+        // The read failed while this open was in flight: nothing more may stay open in staging.
+        await file.close().catch(() => undefined);
+        throw fail('write-failed', `The read ended while ${spec.name} was being created.`);
       }
     }
     this.current = { entry, remaining: size, padding: (BLOCK - (size % BLOCK)) % BLOCK, file, version: [] };
@@ -409,14 +433,16 @@ export async function unpackRunnerPackage(archive: string, opts: UnpackOptions):
       const source = fs.createReadStream(archive, { start: GZIP_HEADER_BYTES, end: size - GZIP_TRAILER_BYTES - 1 });
       const inflate = createInflateRaw();
       let settled = false;
-      // The first failure anywhere ends all three streams; the sink closes its file as it is destroyed.
+      // The first failure anywhere ends all three streams. The sink's 'close' means its in-flight
+      // work has settled and its file is closed, so the rejection (and the removal of staging) waits for it.
       const end = (err: unknown): void => {
         if (settled) return;
         settled = true;
         source.destroy();
         inflate.destroy();
+        if (sink.closed) reject(err);
+        else sink.once('close', () => reject(err));
         sink.destroy();
-        reject(err);
       };
       source.on('error', end);
       inflate.on('error', end);
@@ -441,7 +467,7 @@ export async function unpackRunnerPackage(archive: string, opts: UnpackOptions):
       throw fail('corrupt', "The package's gzip trailer does not match its contents.");
     }
   } catch (err) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
     throw archiveError(err);
   }
   return { dir };
