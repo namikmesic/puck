@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { allows, type TicketTrigger } from '../../src/harness/item-transitions';
 import type { PullView, WorkItem } from '../../src/harness/daemon-protocol';
+import { LEGACY_READ_ONLY } from '../../src/renderer/board-model';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { initSessionView } from '../../src/renderer/session-view';
 import { compareUrl, initWorkDetail, itemActions, statusLabel, type ItemAction } from '../../src/renderer/work-detail';
@@ -429,6 +430,41 @@ describe('work detail', () => {
     store.applyEvent(3, { kind: 'item.upsert', item: item({ number: 4, title: 'Old', body: 'x', status: 'running' }) }, ENV);
     wd.render();
     expect((host.querySelector('[data-field="body"]') as HTMLTextAreaElement).disabled).toBe(true);
+    expect(host.querySelector('.wd-note')?.textContent).toBe('The title and description are read-only while the item runs.');
+  });
+
+  it('names the older daemon when that is why the title and description are read-only', () => {
+    const todo = item({ number: 8, status: 'todo', title: 'Write the guide', body: 'notes' });
+    const running = item({ number: 9, status: 'running', sessionId: WORKER });
+    const { wd, byId, store } = setup([todo, running], { protocol: 1 });
+    const note = () => byId('details').querySelector('.wd-note')?.textContent ?? null;
+    const title = () => byId('details').querySelector('[data-field="title"]') as HTMLInputElement;
+    wd.show(todo.id, 'details');
+    expect(title().disabled).toBe(true);
+    expect((byId('details').querySelector('[data-field="body"]') as HTMLTextAreaElement).disabled).toBe(true);
+    expect(note()).toBe(LEGACY_READ_ONLY);
+
+    wd.show(running.id, 'details');
+    expect(note()).toBe(LEGACY_READ_ONLY);
+
+    wd.show(todo.id, 'details');
+    store.applySnapshot(
+      snap({
+        head: 2,
+        items: [todo, running],
+        sessions: [session(), session({ id: WORKER, kind: 'worker', agent: 'implementer' })],
+        capacity: { agents: { implementer: { running: 0, max: 2 }, reviewer: { running: 0, max: 1 } }, workers: { running: 0, max: 3 }, paused: false },
+        repos: [{ github: 'octo/web', dir: 'web' }],
+        daemon: { version: '0.0.2', build: 'new', protocol: 2 },
+      }),
+      ENV,
+    );
+    wd.render();
+    expect(note()).toBeNull();
+    expect(title().disabled).toBe(false);
+
+    wd.show(running.id, 'details');
+    expect(note()).toBe('The title and description are read-only while the item runs.');
   });
 
   it('shows a waiting banner with Answer myself, and the card when the question is routed to the user', async () => {

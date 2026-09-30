@@ -514,7 +514,8 @@ export function initWorkDetail(ctx: WorkDetailContext) {
 
   function renderDetails(it: WorkItem): void {
     const knownAgent = it.agent ?? (it.sessionId ? (store.session(it.sessionId)?.agent ?? null) : null);
-    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos, knownAgent]);
+    const legacy = readOnly();
+    const key = JSON.stringify([it, Object.keys(store.capacity().agents), store.state()?.repos, knownAgent, legacy]);
     if (built.details === key) return;
     built.details = key;
     const host = els.details;
@@ -527,7 +528,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     host.dataset.item = it.id;
     host.dataset.dirty = dirty ? '1' : '0';
 
-    const editable = !isRunning(it) && !readOnly();
+    const editable = !isRunning(it) && !legacy;
     const form = el('div', 'wd-form config-form');
     const title = el('input', 'wd-title-input');
     title.dataset.field = 'title';
@@ -562,7 +563,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       }
     });
     form.append(el('label', 'wd-label', 'Title'), title, el('label', 'wd-label', 'Description'), body);
-    if (!editable) form.appendChild(el('p', 'wd-note', 'The title and description are read-only while the item runs.'));
+    if (!editable) form.appendChild(el('p', 'wd-note', legacy ? LEGACY_READ_ONLY : 'The title and description are read-only while the item runs.'));
     else {
       const row = el('div', 'wd-row');
       row.appendChild(save);
