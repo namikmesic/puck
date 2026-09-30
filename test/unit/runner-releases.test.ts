@@ -1,17 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import {
   checkSha256Sums,
+  ED25519_SIGNATURE_BYTES,
   formatRunnerRelease,
   formatSha256Sums,
+  formatSignedRunnerRelease,
   formatVersionProbe,
   isReleaseVersion,
   isRunnerTrustMode,
+  MAX_MANIFEST_BASE64_CHARS,
+  MAX_MANIFEST_BYTES,
+  MAX_RELEASE_METADATA_BYTES,
+  MAX_RELEASE_RECORDS,
   readRunnerRelease,
   readSha256Sums,
+  readSignedRunnerRelease,
+  readSignedRunnerReleases,
   readVersionProbe,
+  RUNNER_PACKAGE_ENTRIES,
   RUNNER_TARGETS,
   runnerPackageFile,
+  runnerReleaseTag,
   RunnerReleaseError,
+  runnerTargetFor,
   selectRunnerAsset,
   type RunnerReleaseErrorCode,
   type RunnerReleaseManifest,
@@ -234,5 +245,97 @@ describe('version probe', () => {
     expect(isRunnerTrustMode('development')).toBe(true);
     expect(isRunnerTrustMode('production')).toBe(true);
     for (const bad of ['Production', 'dev', '', undefined]) expect(isRunnerTrustMode(bad)).toBe(false);
+  });
+});
+
+describe('release tags and package targets', () => {
+  it('names the tag a release hangs off', () => {
+    expect(runnerReleaseTag('1.2.3')).toBe('v1.2.3');
+  });
+
+  it("maps Node's platform names to the manifest's once: darwin is macos", () => {
+    expect(runnerTargetFor('darwin', 'arm64')).toEqual({ os: 'macos', arch: 'arm64' });
+    expect(runnerTargetFor('linux', 'x64')).toEqual({ os: 'linux', arch: 'x64' });
+    expect(runnerTargetFor('linux', 'arm64')).toEqual({ os: 'linux', arch: 'arm64' });
+    for (const [platform, arch] of [
+      ['win32', 'x64'],
+      ['freebsd', 'x64'],
+      ['linux', 'ia32'],
+      ['darwin', 'ppc64'],
+      ['', ''],
+    ]) {
+      expect(runnerTargetFor(platform, arch), `${platform}-${arch}`).toBeNull();
+    }
+  });
+
+  it('lists the fixed package layout: nine regular files and bin/, with plain modes', () => {
+    expect(RUNNER_PACKAGE_ENTRIES.map((e) => e.name)).toEqual(['config.sh', 'run.sh', 'svc.sh', 'VERSION', 'README.md', 'LICENSE', 'bin/', 'bin/node', 'bin/node.LICENSE', 'bin/puck-runner.cjs']);
+    expect(RUNNER_PACKAGE_ENTRIES.filter((e) => e.type === 'file')).toHaveLength(9);
+    expect(RUNNER_PACKAGE_ENTRIES.filter((e) => e.type === 'dir').map((e) => e.name)).toEqual(['bin/']);
+    for (const e of RUNNER_PACKAGE_ENTRIES) {
+      expect([0o755, 0o644], e.name).toContain(e.mode);
+      expect(e.mode & 0o7000, e.name).toBe(0);
+    }
+    expect(RUNNER_PACKAGE_ENTRIES.filter((e) => e.mode === 0o755).map((e) => e.name)).toEqual(['config.sh', 'run.sh', 'svc.sh', 'bin/', 'bin/node']);
+  });
+});
+
+describe('signed release records', () => {
+  const bytes = (n: number, fill = 0x7b): Uint8Array => new Uint8Array(n).fill(fill);
+  const sig = bytes(ED25519_SIGNATURE_BYTES, 0xab);
+
+  it('carries the exact bytes through standard base64, and reads them back unchanged', () => {
+    const manifest = new TextEncoder().encode('{"exact": "bytes"}\n');
+    const record = formatSignedRunnerRelease(manifest, sig);
+    expect(record).toEqual({ manifest: Buffer.from(manifest).toString('base64'), signature: Buffer.from(sig).toString('base64') });
+    expect(readSignedRunnerRelease(record)).toEqual({ manifest, signature: sig });
+    expect(readSignedRunnerRelease(JSON.parse(JSON.stringify(record)))).toEqual({ manifest, signature: sig });
+    // Every byte value survives, including the ones base64 encodes with + and /.
+    const all = new Uint8Array(256).map((_, i) => i);
+    expect(readSignedRunnerRelease(formatSignedRunnerRelease(all, sig)).manifest).toEqual(all);
+    expect(formatSignedRunnerRelease(bytes(MAX_MANIFEST_BYTES), sig).manifest).toHaveLength(MAX_MANIFEST_BASE64_CHARS);
+  });
+
+  it('is the record shape exactly', () => {
+    const record = formatSignedRunnerRelease(bytes(10), sig);
+    for (const value of [null, 'text', [], 42, { ...record, extra: 1 }, { manifest: record.manifest }, { signature: record.signature }, { ...record, manifest: 7 }, { ...record, signature: null }]) {
+      expect(failure(() => readSignedRunnerRelease(value)).code).toBe('malformed');
+    }
+  });
+
+  it('takes canonical base64 only: no whitespace, no URL alphabet, full padding, zero trailing bits', () => {
+    const good = formatSignedRunnerRelease(bytes(10), sig);
+    for (const manifest of [`${good.manifest}\n`, good.manifest.replace(/^(..)/, '$1 '), 'e3t7e3t7e3t7e3s', 'e3t7e3t7e3t7e3s==', 'QR==', 'e3t7-_t7', '====', 'e3t7e3t7e3t7e3s=x']) {
+      expect(failure(() => readSignedRunnerRelease({ ...good, manifest })).message, manifest).toMatch(/base64/);
+    }
+    expect(readSignedRunnerRelease({ ...good, manifest: '' }).manifest).toEqual(new Uint8Array(0));
+    expect(readSignedRunnerRelease({ ...good, manifest: 'QQ==' }).manifest).toEqual(new Uint8Array([0x41]));
+  });
+
+  it('bounds the manifest by its text before decoding and by its bytes after', () => {
+    const over = formatSignedRunnerRelease(bytes(MAX_MANIFEST_BYTES + 3), sig);
+    expect(over.manifest.length).toBeGreaterThan(MAX_MANIFEST_BASE64_CHARS);
+    expect(failure(() => readSignedRunnerRelease(over)).message).toMatch(`over ${MAX_MANIFEST_BASE64_CHARS} characters`);
+    // One byte over fits the text bound (the last base64 group is padded) and fails the byte bound.
+    const byOne = formatSignedRunnerRelease(bytes(MAX_MANIFEST_BYTES + 1), sig);
+    expect(byOne.manifest.length).toBe(MAX_MANIFEST_BASE64_CHARS);
+    expect(failure(() => readSignedRunnerRelease(byOne)).message).toMatch(`over ${MAX_MANIFEST_BYTES} bytes`);
+    expect(readSignedRunnerRelease(formatSignedRunnerRelease(bytes(MAX_MANIFEST_BYTES), sig)).manifest).toHaveLength(MAX_MANIFEST_BYTES);
+  });
+
+  it('requires a 64-byte signature, bounding its text first', () => {
+    for (const n of [0, 63, 65]) {
+      expect(failure(() => readSignedRunnerRelease(formatSignedRunnerRelease(bytes(10), bytes(n)))).message, String(n)).toMatch(`is ${n} bytes, not 64`);
+    }
+    expect(failure(() => readSignedRunnerRelease(formatSignedRunnerRelease(bytes(10), bytes(128)))).message).toMatch('over 88 characters');
+  });
+
+  it('reads a listing of at most MAX_RELEASE_RECORDS records', () => {
+    const record = formatSignedRunnerRelease(bytes(10), sig);
+    expect(readSignedRunnerReleases([])).toEqual([]);
+    expect(readSignedRunnerReleases(Array.from({ length: MAX_RELEASE_RECORDS }, () => record))).toHaveLength(MAX_RELEASE_RECORDS);
+    expect(failure(() => readSignedRunnerReleases(Array.from({ length: MAX_RELEASE_RECORDS + 1 }, () => record))).message).toMatch(`at most ${MAX_RELEASE_RECORDS}`);
+    for (const value of [null, {}, 'x', [record, 1]]) expect(failure(() => readSignedRunnerReleases(value)).code).toBe('malformed');
+    expect(MAX_RELEASE_METADATA_BYTES).toBe(4 * 1024 * 1024);
   });
 });

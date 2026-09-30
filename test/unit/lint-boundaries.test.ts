@@ -39,10 +39,14 @@ describe('runner-release import boundary', () => {
     }
   });
 
-  it('lets the verifier import only the harness, itself and node:crypto', async () => {
+  it('lets runner-release import only the harness, itself and the built-ins the transport and the archive reader need', async () => {
     const file = 'src/runner-release/x.ts';
     expect(await boundaryErrors(file, "import { createHash } from 'node:crypto';\nimport { readRunnerRelease } from '../harness/runner-releases';\nimport { RELEASE_KEYS } from './trust';\nexport const v = [createHash, readRunnerRelease, RELEASE_KEYS];\n")).toEqual([]);
-    for (const from of ['node:fs', 'fs', 'electron', '../channel/wire', '../main/log', '../server/http', '../puck-runner/tar', '../daemon/main', '../renderer/format']) {
+    for (const from of ['node:fs', 'node:path', 'node:stream', 'node:zlib']) {
+      expect(await boundaryErrors(file, `import * as m from '${from}';\nexport const v = m;\n`), from).toEqual([]);
+    }
+    // No unprefixed built-in, nothing that runs a process (a package is never probed here), no other directory.
+    for (const from of ['fs', 'crypto', 'node:child_process', 'node:http', 'node:https', 'node:os', 'electron', '../channel/wire', '../main/log', '../server/http', '../puck-runner/tar', '../daemon/main', '../renderer/format']) {
       expect(await boundaryErrors(file, `import * as m from '${from}';\nexport const v = m;\n`), from).not.toEqual([]);
     }
   });

@@ -257,7 +257,7 @@
                   "**/channel",
                   "**/channel/**"
                 ],
-                "message": "src/runner-release may import only src/harness, itself and node:crypto."
+                "message": "src/runner-release may import only src/harness, itself and the Node built-ins .eslintrc.json allows it (no child_process: nothing here runs a package)."
               }
             ]
           }
@@ -266,7 +266,11 @@
           "error",
           {
             "allow": [
-              "node:crypto"
+              "node:crypto",
+              "node:fs",
+              "node:path",
+              "node:stream",
+              "node:zlib"
             ]
           }
         ]

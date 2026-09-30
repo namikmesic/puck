@@ -26,6 +26,7 @@
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { runnerTargetFor } from '../harness/runner-releases';
 import { ApiError, RunnerRemovedError, ServerApi, type Fetch, type RegisterResponse } from './api';
 import type { DockerRunner } from './docker/client';
 import { dockerHealth } from './docker/health';
@@ -62,10 +63,9 @@ export interface Platform {
   arch: 'x64' | 'arm64';
 }
 
+/** This machine as a package target (the one mapping is runnerTargetFor in src/harness/runner-releases.ts). */
 export function currentPlatform(platform: NodeJS.Platform = process.platform, arch: string = process.arch): Platform | null {
-  const o = platform === 'linux' ? 'linux' : platform === 'darwin' ? 'macos' : null;
-  const a = arch === 'x64' || arch === 'arm64' ? arch : null;
-  return o && a ? { os: o, arch: a } : null;
+  return runnerTargetFor(platform, arch);
 }
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,63}$/;

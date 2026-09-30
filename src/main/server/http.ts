@@ -15,6 +15,7 @@
  */
 
 import { shell } from 'electron';
+import { readBoundedBody } from '../../runner-release/download';
 
 export const SERVER_URL_ENV = 'PUCK_SERVER_URL';
 export const DEFAULT_SERVER_URL = 'http://localhost:8765';
@@ -80,6 +81,12 @@ export interface RequestOptions {
   body?: unknown;
   token?: string;
   timeoutMs?: number;
+  /**
+   * Bounds the answer: read through the runner-release transport, which
+   * refuses a longer or an encoded body before parsing. Release listings
+   * set it; other requests read as before.
+   */
+  maxBodyBytes?: number;
 }
 
 /** One JSON request; resolves with the parsed body (null for 204), throws ServerApiError otherwise. */
@@ -88,6 +95,7 @@ export async function serverRequest<T = Record<string, unknown>>(method: string,
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
+  if (opts.maxBodyBytes !== undefined) headers['Accept-Encoding'] = 'identity';
   let res: Response;
   try {
     res = await deps.fetch(base + path, {
@@ -99,7 +107,7 @@ export async function serverRequest<T = Record<string, unknown>>(method: string,
   } catch (err) {
     throw new ServerUnreachableError(base, err);
   }
-  const text = await res.text().catch(() => '');
+  const text = opts.maxBodyBytes === undefined ? await res.text().catch(() => '') : new TextDecoder().decode(await readBoundedBody(res, opts.maxBodyBytes));
   let parsed: unknown = null;
   if (text) {
     try {

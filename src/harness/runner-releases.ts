@@ -20,6 +20,15 @@
  * never re-serialises a manifest to check it. The manifest names SHA256SUMS
  * by digest, so the two agree or the release is refused.
  *
+ * A signed release travels through other documents (a server's listing)
+ * as a record carrying the manifest's exact bytes and its signature, both
+ * in standard base64 (`SignedRunnerRelease`). The reader here checks the
+ * encoding and its bounds; the bytes go to the verifier unchanged.
+ *
+ * Each package unpacks into the fixed layout `RUNNER_PACKAGE_ENTRIES`, as
+ * scripts/package-runner.mjs writes it; src/runner-release/archive.ts
+ * accepts nothing else.
+ *
  * Only erasable TypeScript here: the build scripts load this file with
  * Node's type stripping.
  */
@@ -39,6 +48,10 @@ export const ED25519_SIGNATURE_BYTES = 64;
 export const MAX_MANIFEST_BYTES = 256 * 1024;
 /** Most bytes a SHA256SUMS file may have. */
 export const MAX_SUMS_BYTES = 16 * 1024;
+/** Most signed releases one listing carries. */
+export const MAX_RELEASE_RECORDS = 16;
+/** Most bytes a whole release listing may have on the wire; readers refuse larger responses unread. */
+export const MAX_RELEASE_METADATA_BYTES = 4 * 1024 * 1024;
 
 /**
  * How a runner build treats packages, compiled in by scripts/build-runner.mjs.
@@ -73,6 +86,45 @@ export const targetName = (target: RunnerTarget): string => `${target.os}-${targ
 export function runnerPackageFile(target: RunnerTarget, version: string): string {
   return `puck-runner-${target.os}-${target.arch}-${version}.tar.gz`;
 }
+
+/** The Git tag of a release, and so the GitHub Release its assets hang off (RELEASE.md). */
+export const runnerReleaseTag = (version: string): string => `v${version}`;
+
+/**
+ * The one mapping from Node's platform and architecture names to the
+ * manifest's: `darwin` is `macos` in package names. Null for anything
+ * runners do not run on.
+ */
+export function runnerTargetFor(platform: string, arch: string): RunnerTarget | null {
+  const os: RunnerOs | null = platform === 'linux' ? 'linux' : platform === 'darwin' ? 'macos' : null;
+  const a: RunnerArch | null = arch === 'x64' || arch === 'arm64' ? arch : null;
+  return os && a ? { os, arch: a } : null;
+}
+
+export interface RunnerPackageEntry {
+  /** Relative path; a directory's ends with '/'. */
+  name: string;
+  type: 'file' | 'dir';
+  /** The permission bits the packager writes and the archive reader restores; never setuid, setgid or sticky. */
+  mode: number;
+}
+
+/**
+ * What a package holds, in the order scripts/package-runner.mjs writes it:
+ * nine regular files and `bin/`, nothing else, with these exact modes.
+ */
+export const RUNNER_PACKAGE_ENTRIES: readonly RunnerPackageEntry[] = [
+  { name: 'config.sh', type: 'file', mode: 0o755 },
+  { name: 'run.sh', type: 'file', mode: 0o755 },
+  { name: 'svc.sh', type: 'file', mode: 0o755 },
+  { name: 'VERSION', type: 'file', mode: 0o644 },
+  { name: 'README.md', type: 'file', mode: 0o644 },
+  { name: 'LICENSE', type: 'file', mode: 0o644 },
+  { name: 'bin/', type: 'dir', mode: 0o755 },
+  { name: 'bin/node', type: 'file', mode: 0o755 },
+  { name: 'bin/node.LICENSE', type: 'file', mode: 0o644 },
+  { name: 'bin/puck-runner.cjs', type: 'file', mode: 0o644 },
+];
 
 export interface RunnerReleaseAsset {
   os: RunnerOs;
@@ -312,4 +364,72 @@ export function readVersionProbe(text: string): RunnerVersionProbe {
   if (!isRunnerTrustMode(trustMode)) throw malformed(`The runner reports trust mode ${JSON.stringify(trustMode)}.`);
   if (!isPositiveSafeInteger(runnerProtocol)) throw malformed(`The runner reports protocol ${JSON.stringify(runnerProtocol)}.`);
   return { version, trustMode, runnerProtocol };
+}
+
+/**
+ * A signed release as a listing carries it: runner-release.json's exact
+ * bytes and its detached signature, each standard base64 with padding.
+ */
+export interface SignedRunnerRelease {
+  manifest: string;
+  signature: string;
+}
+
+/** Base64 text of a maximal manifest: the byte bound, accounting for the encoding. */
+export const MAX_MANIFEST_BASE64_CHARS = Math.ceil(MAX_MANIFEST_BYTES / 3) * 4;
+const SIGNATURE_BASE64_CHARS = Math.ceil(ED25519_SIGNATURE_BYTES / 3) * 4;
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const RECORD_KEYS = ['manifest', 'signature'] as const;
+
+/**
+ * Decodes canonical base64: the standard alphabet with padding, no
+ * whitespace, and exactly one encoding of the bytes (a re-encoding must
+ * give the text back). `maxChars` bounds the text before it is decoded.
+ */
+function decodeBase64(value: unknown, maxChars: number, what: string): Uint8Array {
+  if (typeof value !== 'string') throw malformed(`${what} must be a base64 string.`);
+  if (value.length > maxChars) throw malformed(`${what} is over ${maxChars} characters of base64.`);
+  if (!BASE64_RE.test(value)) throw malformed(`${what} is not standard base64.`);
+  const binary = atob(value);
+  if (btoa(binary) !== value) throw malformed(`${what} is not canonical base64.`);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** Standard base64 with padding, the encoding readSignedRunnerRelease accepts. */
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x2000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x2000));
+  return btoa(binary);
+}
+
+/**
+ * Reads one signed release record strictly: exactly its two fields, the
+ * manifest at most MAX_MANIFEST_BYTES once decoded and the signature
+ * exactly ED25519_SIGNATURE_BYTES. The bytes come back as sent, for the
+ * verifier (src/runner-release/verify.ts); nothing here trusts them.
+ */
+export function readSignedRunnerRelease(value: unknown): { manifest: Uint8Array; signature: Uint8Array } {
+  if (!isObject(value)) throw malformed('A signed release record must be an object.');
+  exactKeys(value, RECORD_KEYS, 'A signed release record');
+  const manifest = decodeBase64(value.manifest, MAX_MANIFEST_BASE64_CHARS, "A signed release record's manifest");
+  if (manifest.length > MAX_MANIFEST_BYTES) throw malformed(`A signed release record's manifest is over ${MAX_MANIFEST_BYTES} bytes.`);
+  const signature = decodeBase64(value.signature, SIGNATURE_BASE64_CHARS, "A signed release record's signature");
+  if (signature.length !== ED25519_SIGNATURE_BYTES) {
+    throw malformed(`A signed release record's signature is ${signature.length} bytes, not ${ED25519_SIGNATURE_BYTES}.`);
+  }
+  return { manifest, signature };
+}
+
+/** Reads a listing's records: an array of at most MAX_RELEASE_RECORDS, each read strictly. */
+export function readSignedRunnerReleases(value: unknown): { manifest: Uint8Array; signature: Uint8Array }[] {
+  if (!Array.isArray(value)) throw malformed('Signed release records must be an array.');
+  if (value.length > MAX_RELEASE_RECORDS) throw malformed(`A listing carries at most ${MAX_RELEASE_RECORDS} signed releases; this one has ${value.length}.`);
+  return value.map(readSignedRunnerRelease);
+}
+
+/** The record for a manifest's exact bytes and its signature. */
+export function formatSignedRunnerRelease(manifest: Uint8Array, signature: Uint8Array): SignedRunnerRelease {
+  return { manifest: encodeBase64(manifest), signature: encodeBase64(signature) };
 }
