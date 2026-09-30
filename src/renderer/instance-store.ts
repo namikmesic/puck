@@ -67,7 +67,7 @@ export interface EnvDaemonState {
 export interface InstanceStoreOptions {
   /** The buffer cannot close a gap in seq: fetch a snapshot (the owner calls applySnapshot). */
   requestResync(envId: string): void;
-  /** Restart deadline; drain time while turns are running is excluded. Test seam. */
+  /** Restart deadline. An attached drain's original turns do not count; staying disconnected still bounds the wait. Test seam. */
   upgradeTimeoutMs?: number;
 }
 
