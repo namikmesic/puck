@@ -46,7 +46,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
 import {
   formatSha256Sums,
   RELEASE_KEY_ID_RE,
@@ -58,7 +57,7 @@ import {
   targetName,
 } from '../src/harness/runner-releases.ts';
 import { tarGz } from '../src/puck-runner/tar.ts';
-import { buildRunner, probeRunner, runnerTrustMode } from './build-runner.mjs';
+import { buildRunner, parseScriptArgs, probeRunner, runnerTrustMode } from './build-runner.mjs';
 import { RELEASE_KEYS, loadReleaseKeys, writeReleaseManifest } from './runner-release.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -226,9 +225,11 @@ export async function packageRunner({
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   Promise.resolve()
     .then(() => {
-      const { values } = parseArgs({
-        options: { mode: { type: 'string' }, targets: { type: 'string' }, out: { type: 'string' }, 'signing-key-id': { type: 'string' } },
-        strict: true,
+      const values = parseScriptArgs(process.argv.slice(2), {
+        mode: { type: 'string' },
+        targets: { type: 'string' },
+        out: { type: 'string' },
+        'signing-key-id': { type: 'string' },
       });
       return packageRunner({
         mode: values.mode,

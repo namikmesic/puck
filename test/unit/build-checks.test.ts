@@ -227,9 +227,11 @@ function npmScript(argv: string[]): string | undefined {
   return undefined;
 }
 
-function commandMode(command: string, entry: string): string | undefined {
+/** Every --mode the command passes to `entry`, in either spelling. */
+function commandModes(command: string, entry: string): string[] {
   const argv = shellWords(command);
-  return invokes(argv, entry) ? optionValue(argv, '--mode') : undefined;
+  if (!invokes(argv, entry)) return [];
+  return argv.flatMap((token, i) => (token === '--mode' ? [argv[i + 1]] : token.startsWith('--mode=') ? [token.slice('--mode='.length)] : []));
 }
 
 function dockerfileInstructions(source: string): { name: string; args: string }[] {
@@ -290,10 +292,10 @@ describe('runner trust mode and release signing', () => {
   const jobs = Object.values(workflow.jobs ?? {});
   const steps = jobs.flatMap((job) => job.steps ?? []);
 
-  it('builds and packages the runner in an explicit trust mode', () => {
-    expect(commandMode(pkg.scripts['build:runner'], 'build-runner.mjs')).toBe('development');
-    expect(commandMode(pkg.scripts['package:runner'], 'package-runner.mjs')).toBe('development');
-    expect(commandMode(pkg.scripts['package:runner:release'], 'package-runner.mjs')).toBe('production');
+  it('builds and packages the runner in exactly one explicit trust mode', () => {
+    expect(commandModes(pkg.scripts['build:runner'], 'build-runner.mjs')).toEqual(['development']);
+    expect(commandModes(pkg.scripts['package:runner'], 'package-runner.mjs')).toEqual(['development']);
+    expect(commandModes(pkg.scripts['package:runner:release'], 'package-runner.mjs')).toEqual(['production']);
   });
 
   it('packages the development server image in development mode', () => {

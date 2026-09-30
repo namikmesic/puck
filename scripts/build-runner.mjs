@@ -90,6 +90,24 @@ export async function buildRunner({ mode } = {}) {
   return { bundlePath, version, trustMode, sha256 };
 }
 
+/**
+ * Parses a build script's command line and refuses any option given more
+ * than once, in either spelling (`--mode x`, `--mode=x`). parseArgs keeps
+ * the last value, and npm appends forwarded arguments after a script's own,
+ * so `npm run package:runner:release -- --mode development` would otherwise
+ * silently build development trust.
+ */
+export function parseScriptArgs(args, options) {
+  const { values, tokens } = parseArgs({ args, options, strict: true, tokens: true });
+  const seen = new Set();
+  for (const token of tokens) {
+    if (token.kind !== 'option') continue;
+    if (seen.has(token.name)) throw new Error(`--${token.name} is given more than once; pass it once.`);
+    seen.add(token.name);
+  }
+  return values;
+}
+
 /** Runs a built bundle's `version --json` on this Node and reads it (stdout only; Node warnings go to stderr). */
 export function probeRunner(bundlePath) {
   const out = execFileSync(process.execPath, [bundlePath, 'version', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
@@ -98,7 +116,7 @@ export function probeRunner(bundlePath) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   Promise.resolve()
-    .then(() => buildRunner({ mode: parseArgs({ options: { mode: { type: 'string' } }, strict: true }).values.mode }))
+    .then(() => buildRunner({ mode: parseScriptArgs(process.argv.slice(2), { mode: { type: 'string' } }).mode }))
     .catch((err) => {
       console.error(err instanceof Error ? err.message : err);
       process.exit(1);

@@ -7,7 +7,7 @@ import { gunzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formatSha256Sums, RUNNER_TARGETS, targetName } from '../../src/harness/runner-releases';
 import { releaseKeyId, verifyRunnerRelease } from '../../src/runner-release/verify';
-import { buildRunner } from '../../scripts/build-runner.mjs';
+import { buildRunner, parseScriptArgs, RUNNER_OUT } from '../../scripts/build-runner.mjs';
 import { packageRunner, signingKeyIdFor, TARGETS } from '../../scripts/package-runner.mjs';
 import { checkReleaseDir, generateReleaseKey, keygen, PRIVATE_KEY_ENV, signRelease, verifyReleaseDir, writeReleaseManifest } from '../../scripts/runner-release.mjs';
 
@@ -386,5 +386,70 @@ describe('package-runner command line', () => {
     const r = cli(['--mode', 'production']);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('No release key is committed in RELEASE_KEYS');
+  });
+});
+
+describe('a repeated option never overrides the trust mode', () => {
+  const REPEATED = 'is given more than once; pass it once.';
+  const script = (name: string, args: string[]) =>
+    spawnSync(process.execPath, ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', join(root, 'scripts', name), ...args], { encoding: 'utf8' });
+  /** What the runner build left in .webpack/runner, to show a refused build wrote nothing. */
+  const buildOutput = (): string => {
+    try {
+      return String(statSync(join(RUNNER_OUT, 'puck-runner.meta.json')).mtimeMs);
+    } catch {
+      return 'absent';
+    }
+  };
+
+  it('refuses a second option in either spelling and accepts each option once', () => {
+    const options = { mode: { type: 'string' }, out: { type: 'string' } } as const;
+    expect(parseScriptArgs(['--mode', 'production', '--out=dist'], options)).toEqual({ mode: 'production', out: 'dist' });
+    for (const args of [
+      ['--mode', 'production', '--mode', 'development'],
+      ['--mode=production', '--mode', 'development'],
+      ['--mode', 'production', '--mode=development'],
+      ['--mode=production', '--mode=production'],
+      ['--out', 'a', '--mode', 'production', '--out', 'b'],
+    ]) {
+      expect(() => parseScriptArgs(args, options), args.join(' ')).toThrow(REPEATED);
+    }
+  });
+
+  it('build-runner refuses a repeated --mode before building', () => {
+    const before = buildOutput();
+    for (const args of [
+      ['--mode', 'production', '--mode', 'development'],
+      ['--mode=production', '--mode', 'development'],
+    ]) {
+      const r = script('build-runner.mjs', args);
+      expect(r.status, args.join(' ')).toBe(1);
+      expect(r.stderr).toContain(`--mode ${REPEATED}`);
+    }
+    expect(buildOutput()).toBe(before);
+  });
+
+  it('package-runner refuses a repeated --mode before packaging', () => {
+    const out = join(tmp(), 'out');
+    for (const args of [
+      ['--mode', 'production', '--mode', 'development', '--targets', 'macos-arm64', '--out', out],
+      ['--mode', 'production', '--mode=development', '--targets', 'macos-arm64', '--out', out],
+    ]) {
+      const r = script('package-runner.mjs', args);
+      expect(r.status, args.join(' ')).toBe(1);
+      expect(r.stderr).toContain(`--mode ${REPEATED}`);
+    }
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it('npm run package:runner:release with a forwarded --mode development fails instead of packaging development trust', () => {
+    const out = join(tmp(), 'out');
+    const r = spawnSync('npm', ['run', '--silent', 'package:runner:release', '--', '--mode', 'development', '--targets', 'macos-arm64', '--out', out], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(`--mode ${REPEATED}`);
+    expect(existsSync(out)).toBe(false);
   });
 });
