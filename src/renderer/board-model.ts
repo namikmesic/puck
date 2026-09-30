@@ -30,6 +30,9 @@ export interface Column {
   hint: string;
 }
 
+/** What the board, the sheet and Chat say against a daemon that predates protocol 2: tickets are read-only (12.3). */
+export const LEGACY_READ_ONLY = "This environment's daemon predates the three-column board. Update it to work here.";
+
 export const COLUMNS: readonly Column[] = [
   { id: 'todo', title: 'Todo', hint: 'New and imported tickets wait here. Assign an agent, or let the orchestrator plan them.' },
   { id: 'progress', title: 'In progress', hint: 'Agents work, checks run and reviewers review here: one card per ticket, every step inside it.' },

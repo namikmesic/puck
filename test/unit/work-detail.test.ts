@@ -26,7 +26,7 @@ const RESULT = {
   head: 'abcdef1234567',
 };
 
-function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: string; dir: string }[] } = {}) {
+function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: string; dir: string }[]; protocol?: number } = {}) {
   document.body.innerHTML = `
     <button id="close"></button><span id="wid"></span><h2 id="title"></h2>
     <span id="status"></span><div id="meta"></div><div id="actions"></div><div id="banner" class="hidden"></div>
@@ -42,6 +42,7 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
       sessions: [session(), session({ id: WORKER, kind: 'worker', agent: 'implementer' })],
       capacity: { agents: { implementer: { running: 0, max: 2 }, reviewer: { running: 0, max: 1 } }, workers: { running: 0, max: 3 }, paused: false },
       repos: over.repos ?? [{ github: 'octo/web', dir: 'web' }],
+      ...(over.protocol ? { daemon: { version: '0.0.1', build: 'old', protocol: over.protocol } } : {}),
     }),
     ENV,
   );
@@ -452,6 +453,28 @@ describe('work detail', () => {
     store.applyEvent(5, { kind: 'item.upsert', item: item({ number: 5, status: 'running', sessionId: WORKER }) }, ENV);
     wd.render();
     expect(banner.classList.contains('hidden')).toBe(true);
+  });
+
+  it('shows an older daemon’s question read-only: no card and no takeover', async () => {
+    const q = [{ question: 'Which file?', header: '', options: [{ label: 'README', description: '' }], multiSelect: false }];
+    for (const routedTo of ['user', 'orchestrator'] as const) {
+      const waiting = item({ number: 7, status: 'needs-input', agent: 'implementer', sessionId: WORKER, pendingAsk: { askId: 'a3', routedTo } });
+      const { wd, byId, store, daemon } = setup([waiting], { protocol: 1 });
+      store.applyEvent(2, { kind: 'turn.start', sessionId: WORKER, turnId: 't' }, ENV);
+      store.applyEvent(3, { kind: 'turn.event', sessionId: WORKER, turnId: 't', event: { kind: 'ask', askId: 'a3', questions: q } }, ENV);
+      for (const tab of ['details', 'conversation'] as const) {
+        wd.show(waiting.id, tab);
+        const banner = byId('banner');
+        expect(banner.classList.contains('hidden'), `${routedTo} ${tab}`).toBe(false);
+        expect(banner.querySelector('.ask'), `${routedTo} ${tab}`).toBeNull();
+        expect(banner.querySelector('button'), `${routedTo} ${tab}`).toBeNull();
+        expect(banner.textContent).toBe(
+          `implementer is waiting on ${routedTo === 'user' ? 'you' : 'the orchestrator'} to answer a question. This environment's daemon predates the three-column board. Update it to work here.`,
+        );
+      }
+      await flush();
+      expect(daemon.mock.calls.some(([op]) => op === 'ask.answer'), routedTo).toBe(false);
+    }
   });
 
   it('keeps the banner to one line on Conversation, where the thread shows the question', async () => {

@@ -15,6 +15,7 @@
 import type { AskQuestion } from '../harness/types';
 import type { OpenAsk, WorkItem } from '../harness/daemon-protocol';
 import { askCard } from './ask-card';
+import { LEGACY_READ_ONLY } from './board-model';
 import { el } from './dom';
 import { button, errText } from './util';
 
@@ -56,6 +57,8 @@ export function waitingEntries(items: readonly WorkItem[], asks: readonly OpenAs
 export interface WaitingStackContext {
   host: HTMLElement;
   store: { items(): WorkItem[]; asks(): OpenAsk[] };
+  /** True against a daemon that predates the three-column board: its tickets' questions show, but are not answered here. */
+  readOnly(): boolean;
   daemon(op: 'ask.answer', args: { sessionId: string; askId: string; answers: Record<string, string> | null }): Promise<unknown>;
   openItem(itemId: string): void;
   /** The Board, In progress narrowed to the tickets that need you. */
@@ -82,7 +85,9 @@ export function initWaitingStack(ctx: WaitingStackContext) {
     const all = waitingEntries(ctx.store.items(), asks).filter((e) => !sending.has(e.askId));
     const shown = all.slice(0, WAITING_SHOWN);
     if (open && !shown.some((e) => e.askId === open)) open = null;
-    const key = JSON.stringify([visible, shown.map((e) => [e.askId, e.number, e.title]), all.length, open]);
+    const readOnly = ctx.readOnly();
+    if (readOnly) open = null;
+    const key = JSON.stringify([visible, readOnly, shown.map((e) => [e.askId, e.number, e.title]), all.length, open]);
     if (key === built) return;
     built = key;
     host.textContent = '';
@@ -92,8 +97,8 @@ export function initWaitingStack(ctx: WaitingStackContext) {
     head.append(el('span', 'oc-wait-title', 'Waiting on you'), el('span', 'oc-wait-count', String(all.length)));
     host.appendChild(head);
     const list = el('ul', 'oc-wait-list');
-    const single = all.length === 1;
-    for (const entry of shown) list.appendChild(row(entry, single || open === entry.askId));
+    const single = all.length === 1 && !readOnly;
+    for (const entry of shown) list.appendChild(row(entry, single || open === entry.askId, readOnly));
     const rest = all.length - shown.length;
     if (rest > 0) {
       const li = el('li', 'oc-wait-more');
@@ -105,7 +110,7 @@ export function initWaitingStack(ctx: WaitingStackContext) {
     host.appendChild(list);
   }
 
-  function row(entry: WaitingEntry, expanded: boolean): HTMLElement {
+  function row(entry: WaitingEntry, expanded: boolean, readOnly: boolean): HTMLElement {
     const li = el('li', `oc-wait-entry${expanded ? ' open' : ''}`);
     li.dataset.askId = entry.askId;
     const line = el('div', 'oc-wait-line');
@@ -116,7 +121,11 @@ export function initWaitingStack(ctx: WaitingStackContext) {
     const who = `${entry.agent ?? 'The worker'} asks`;
     // Open, the card below carries the question.
     if (expanded) line.appendChild(el('span', 'oc-wait-text', `${who}:`));
-    else {
+    else if (readOnly) {
+      const text = el('span', 'oc-wait-text', `${who}: ${entry.questions[0]?.question ?? ''}`);
+      text.title = LEGACY_READ_ONLY;
+      line.appendChild(text);
+    } else {
       const summary = `${who}: ${entry.questions[0]?.question ?? ''}`;
       const toggle = button('oc-wait-text', summary);
       toggle.setAttribute('aria-expanded', 'false');

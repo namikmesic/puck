@@ -157,6 +157,22 @@ describe('session view', () => {
     expect(host.querySelector('.msg-row')?.textContent).toContain('Part two.');
   });
 
+  it('does not answer a worker’s question on a daemon that predates the three-column board, and says why', async () => {
+    const q = [{ question: 'Which?', header: '', options: [{ label: 'A', description: '' }], multiSelect: false }];
+    const { view, host, live, store, answerAsk, toast } = setup(async () => page([], 10));
+    store.applySnapshot(snap({ head: 10, daemon: { version: '0.0.1', build: 'old', protocol: 1 }, sessions: [session(), session({ id: WORKER, kind: 'worker', agent: 'implementer' })] }), ENV);
+    view.mount(WORKER, host);
+    await flush();
+    live(11, { kind: 'turn.start', sessionId: WORKER, turnId: 'tw' });
+    live(12, { kind: 'turn.event', sessionId: WORKER, turnId: 'tw', event: { kind: 'ask', askId: 'aw', questions: q } });
+    (host.querySelector('[data-ask-id="aw"] .ask-option') as HTMLButtonElement).click();
+    await flush();
+    expect(answerAsk).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("Couldn't send the answer: This environment's daemon predates the three-column board. Update it to work here.");
+    // The card re-arms: nothing was answered.
+    expect(host.querySelector('[data-ask-id="aw"]')?.classList.contains('answered')).toBe(false);
+  });
+
   it('closes a question card the orchestrator answered', async () => {
     const q = [{ question: 'Which?', header: '', options: [{ label: 'A', description: '' }], multiSelect: false }];
     const { view, host, live } = setup(async () => page([], 10));

@@ -34,7 +34,7 @@ import type { ClientResult, OpArgs, OpResult, PullView, Reference, RendererOp, R
 import { allows } from '../harness/item-transitions';
 import { deliveryPull, referenceLabel, sourceIssue } from '../harness/references';
 import { askCard } from './ask-card';
-import { activeImplement, assignable, canUnassign, isRunning } from './board-model';
+import { activeImplement, assignable, canUnassign, isRunning, LEGACY_READ_ONLY } from './board-model';
 import { armDelete, conceal, el } from './dom';
 import { fmtTime, relTime } from './format';
 import type { InstanceStore } from './instance-store';
@@ -275,7 +275,7 @@ export function initWorkDetail(ctx: WorkDetailContext) {
   function renderBanner(it: WorkItem): void {
     const pending = pendingOf(it);
     const ask = pending ? store.ask(pending.askId) : undefined;
-    const key = JSON.stringify([it.id, pending, answering, inline, !!ask, tab]);
+    const key = JSON.stringify([it.id, pending, answering, inline, !!ask, tab, readOnly()]);
     if (built.banner === key) return;
     built.banner = key;
     els.banner.textContent = '';
@@ -285,8 +285,17 @@ export function initWorkDetail(ctx: WorkDetailContext) {
       inline = false;
       return;
     }
+    // An older daemon's tickets are read-only: the question shows, and nothing answers or takes it over from here.
+    if (readOnly()) {
+      answering = false;
+      inline = false;
+      const who = pending.routedTo === 'orchestrator' ? 'the orchestrator' : 'you';
+      els.banner.appendChild(el('span', 'wd-banner-text', `${it.agent ?? 'The worker'} is waiting on ${who} to answer a question. ${LEGACY_READ_ONLY}`));
+      return;
+    }
     const submit = async (answers: Record<string, string> | null): Promise<void> => {
       if (!it.sessionId) return;
+      if (readOnly()) throw new Error(LEGACY_READ_ONLY);
       try {
         await ctx.daemon('ask.answer', { sessionId: it.sessionId, askId: pending.askId, answers });
         answering = false;

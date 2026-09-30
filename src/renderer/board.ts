@@ -52,6 +52,7 @@ import {
   doneEmptyText,
   dropAction,
   isRunning,
+  LEGACY_READ_ONLY,
   outcomeChip,
   parseIssueRef,
   queueLine,
@@ -134,7 +135,7 @@ export function initBoard(ctx: BoardContext) {
 
   /* ---------- Structure (built once) ---------- */
 
-  const legacy = el('p', 'bd-legacy hidden', "This environment's daemon predates the three-column board. Update it to work here.");
+  const legacy = el('p', 'bd-legacy hidden', LEGACY_READ_ONLY);
   legacy.setAttribute('role', 'status');
   els.columns.before(legacy);
 

@@ -22,7 +22,7 @@ import './styles/overlays.css';
 import type { HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from './harness/bridge';
 import type { ClientResult, OpArgs, RendererOp } from './harness/daemon-protocol';
 import { initBoard } from './renderer/board';
-import { liveWork } from './renderer/board-model';
+import { LEGACY_READ_ONLY, liveWork } from './renderer/board-model';
 import { initWaitingStack } from './renderer/waiting-stack';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
 import { initComposer } from './renderer/composer';
@@ -173,7 +173,7 @@ function boot(bridge: PuckBridge): void {
         gate = { ready: false, placeholder: `The ticket is ${word}: retry it to work on it again.`, reason: `The ticket is ${word}.` };
       }
       if (gate.ready && (store.state()?.daemon.protocol ?? 2) < 2) {
-        gate = { ready: false, placeholder: "This environment's daemon predates the three-column board. Update it to work here.", reason: 'The daemon predates the three-column board.' };
+        gate = { ready: false, placeholder: LEGACY_READ_ONLY, reason: 'The daemon predates the three-column board.' };
       }
       return { sessionId: s?.id ?? null, running: s?.status === 'running', gate, who: 'the worker' };
     },
@@ -213,6 +213,7 @@ function boot(bridge: PuckBridge): void {
   const waiting = initWaitingStack({
     host: byId('oc-waiting'),
     store,
+    readOnly: () => (store.state()?.daemon.protocol ?? 2) < 2,
     daemon: (op, args) => daemon(op, args),
     openItem: (itemId) => openItem(itemId),
     showNeedsYou: () => {

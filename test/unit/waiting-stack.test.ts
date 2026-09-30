@@ -36,12 +36,12 @@ function asking(number: number, since: number, askId = `ask_${number}`): WorkIte
 function setup(items: WorkItem[], asks: OpenAsk[]) {
   document.body.innerHTML = '<div id="host" class="hidden"></div>';
   const host = document.getElementById('host') as HTMLElement;
-  const state = { items, asks };
+  const state = { items, asks, readOnly: false };
   const daemon = vi.fn(async () => ({}));
   const openItem = vi.fn();
   const showNeedsYou = vi.fn();
   const say = vi.fn();
-  const stack = initWaitingStack({ host, store: { items: () => state.items, asks: () => state.asks }, daemon, openItem, showNeedsYou, say });
+  const stack = initWaitingStack({ host, store: { items: () => state.items, asks: () => state.asks }, readOnly: () => state.readOnly, daemon, openItem, showNeedsYou, say });
   stack.render();
   return { host, state, stack, daemon, openItem, showNeedsYou, say };
 }
@@ -131,6 +131,20 @@ describe('the Waiting on you stack', () => {
     expect(say).toHaveBeenCalledWith("Couldn't send the answer: The daemon is shutting down.");
     expect(host.classList.contains('hidden')).toBe(false);
     expect(host.querySelector('.ask')).not.toBeNull();
+  });
+
+  it('shows an older daemon’s questions without answering them', () => {
+    const { host, state, stack, daemon } = setup([asking(4, 1)], [ask(4, 'ses_w4')]);
+    state.readOnly = true;
+    stack.render();
+    const entry = host.querySelector<HTMLElement>('.oc-wait-entry');
+    expect(entry?.classList.contains('open')).toBe(false);
+    expect(entry?.querySelector('.oc-wait-text')?.textContent).toBe('implementer asks: Question 4?');
+    expect(entry?.querySelector('button.oc-wait-text')).toBeNull();
+    expect(host.querySelector('.ask')).toBeNull();
+    expect(daemon).not.toHaveBeenCalled();
+    // The chip still opens the (read-only) sheet.
+    expect(entry?.querySelector('button.oc-wait-ticket')).not.toBeNull();
   });
 
   it('hides while the chat shows an earlier session or a sub-agent, and comes back', () => {
