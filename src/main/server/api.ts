@@ -4,6 +4,7 @@
  * read leniently (src/harness/server-api.ts).
  */
 
+import { MAX_RELEASE_METADATA_BYTES } from '../../harness/runner-releases';
 import {
   readInstance,
   readReleases,
@@ -103,6 +104,7 @@ export async function forgetInstance(envId: string): Promise<void> {
   await authed('DELETE', `/v1/instances/${encodeURIComponent(envId)}`);
 }
 
+/** The server's runner releases, read within the listing bound (src/runner-release/download.ts). */
 export async function releases(): Promise<RunnerReleases> {
-  return readReleases(await serverRequest('GET', '/v1/runner/releases'));
+  return readReleases(await serverRequest('GET', '/v1/runner/releases', { maxBodyBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false }));
 }

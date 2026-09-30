@@ -15,6 +15,7 @@
  */
 
 import { shell } from 'electron';
+import { readBoundedBody } from '../../runner-release/download';
 
 export const SERVER_URL_ENV = 'PUCK_SERVER_URL';
 export const DEFAULT_SERVER_URL = 'http://localhost:8765';
@@ -80,9 +81,22 @@ export interface RequestOptions {
   body?: unknown;
   token?: string;
   timeoutMs?: number;
+  /**
+   * Bounds the answer through the runner-release transport: a longer body
+   * is refused before parsing. Release listings set it; other requests
+   * read as before.
+   */
+  maxBodyBytes?: number;
+  /** With maxBodyBytes. Listings pass false and keep a content encoding. */
+  refuseContentEncoding?: boolean;
 }
 
-/** One JSON request; resolves with the parsed body (null for 204), throws ServerApiError otherwise. */
+/**
+ * One JSON request; resolves with the parsed body (null for 204).
+ * A non-2xx answer is ServerApiError, and an unreachable server is
+ * ServerUnreachableError. A bounded body (`maxBodyBytes`) throws
+ * RunnerDownloadError from the runner-release transport before parsing.
+ */
 export async function serverRequest<T = Record<string, unknown>>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
   const base = serverUrl();
   const headers: Record<string, string> = { Accept: 'application/json' };
@@ -99,7 +113,10 @@ export async function serverRequest<T = Record<string, unknown>>(method: string,
   } catch (err) {
     throw new ServerUnreachableError(base, err);
   }
-  const text = await res.text().catch(() => '');
+  const text =
+    opts.maxBodyBytes === undefined
+      ? await res.text().catch(() => '')
+      : new TextDecoder().decode(await readBoundedBody(res, opts.maxBodyBytes, { refuseContentEncoding: opts.refuseContentEncoding }));
   let parsed: unknown = null;
   if (text) {
     try {

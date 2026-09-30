@@ -57,7 +57,7 @@
                   "**/runner-release",
                   "**/runner-release/**"
                 ],
-                "message": "src/harness is pure: the runner-release verifier (Node crypto) imports it, never the other way."
+                "message": "src/harness is pure: src/runner-release imports it, never the other way."
               }
             ]
           }
@@ -220,7 +220,7 @@
                   "**/runner-release",
                   "**/runner-release/**"
                 ],
-                "message": "Runner releases are verified in the main process (src/runner-release); the renderer and preload never import it."
+                "message": "src/runner-release uses Node built-ins (the main process and the runner import it); the renderer and preload never do."
               }
             ]
           }
@@ -257,7 +257,7 @@
                   "**/channel",
                   "**/channel/**"
                 ],
-                "message": "src/runner-release may import only src/harness, itself and node:crypto."
+                "message": "src/runner-release may import only src/harness, itself and the Node built-ins .eslintrc.json allows it (no child_process: nothing here runs a package)."
               }
             ]
           }
@@ -266,7 +266,11 @@
           "error",
           {
             "allow": [
-              "node:crypto"
+              "node:crypto",
+              "node:fs",
+              "node:path",
+              "node:stream",
+              "node:zlib"
             ]
           }
         ]

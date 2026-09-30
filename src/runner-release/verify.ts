@@ -1,9 +1,9 @@
 /**
  * Verifies a signed runner release (src/harness/runner-releases.ts)
  * against trust roots: the one check the Puck server, the app's main
- * process and the runner run before they trust a runner package. Node's
- * crypto only; the renderer and the daemon never import this directory
- * (.eslintrc.json).
+ * process and the runner run before they trust a runner package. This
+ * file uses Node's crypto only. The renderer and the daemon never import
+ * this directory (.eslintrc.json).
  *
  * The order is the contract. Load the roots: Ed25519 SPKI public keys
  * only, at most MAX_RELEASE_KEYS, none twice. No roots means no trusted
