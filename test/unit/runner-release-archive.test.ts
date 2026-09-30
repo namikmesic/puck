@@ -366,17 +366,68 @@ describe('the stream and the trailer', () => {
     await refused(gzipSync(Buffer.concat([withoutTrailer, Buffer.alloc(512), withoutTrailer, Buffer.alloc(1024)])), 'bad-header', 'An entry follows a zero block');
   });
 
-  it('refuses a second gzip member, a truncated one, and bytes that are not gzip', async () => {
+  it('reads exactly one gzip member: nothing before it, between its deflate stream and its trailer, or after', async () => {
+    const raw = Buffer.from(tar(entries()));
+    const gz = gzipSync(raw, { level: 9 });
+    const empty = gzipSync(Buffer.alloc(0));
+    const ONE_MEMBER = 'a package is one gzip member and nothing else';
+    // gunzip would join or ignore every one of these; the reader refuses them all.
+    await refused(Buffer.concat([gz, empty]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([empty, gz]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gzipSync(raw.subarray(0, 3000)), gzipSync(raw.subarray(3000))]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gz, gz]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gz, Buffer.from([0]), Buffer.from('trailing garbage')]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gz, Buffer.alloc(8)]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gz, Buffer.from('garbage')]), 'trailing-data', ONE_MEMBER);
+    await refused(Buffer.concat([gz, Buffer.from([0])]), 'trailing-data', ONE_MEMBER);
+    // A member is intact only with its own trailer: the CRC-32 and the inflated size.
+    for (const at of [gz.length - 8, gz.length - 5, gz.length - 4, gz.length - 1]) {
+      const bad = Buffer.from(gz);
+      bad[at] ^= 0x01;
+      await refused(bad, 'corrupt', 'gzip trailer does not match its contents');
+    }
+    // One byte short: the trailer is then the deflate stream's last bytes, so the stream itself ends early.
+    await refused(gz.subarray(0, gz.length - 1), 'truncated', 'gzip stream ended early');
+  });
+
+  it('takes the fixed gzip header only: deflate, no optional fields', async () => {
     const gz = tarGz(entries());
-    await refused(Buffer.concat([gz, gz]), 'trailing-data', 'bytes after its trailer');
+    expect(gz.subarray(0, 4)).toEqual(Buffer.from([0x1f, 0x8b, 0x08, 0x00]));
+    const withFlag = (flag: number): Buffer => {
+      const out = Buffer.from(gz);
+      out[3] = flag;
+      return out;
+    };
+    for (const [flag, what] of [
+      [0x01, 'text'],
+      [0x02, 'header CRC'],
+      [0x04, 'extra field'],
+      [0x08, 'name'],
+      [0x10, 'comment'],
+      [0x20, 'reserved'],
+    ] as [number, string][]) {
+      await refused(withFlag(flag), 'corrupt', new RegExp(`gzip header sets flags.*${what === 'text' || what === 'reserved' ? '' : what}`));
+    }
+    const method = Buffer.from(gz);
+    method[2] = 0x09;
+    await refused(method, 'corrupt', 'compression method 9, not deflate');
+    const magic = Buffer.from(gz);
+    magic[1] = 0x8c;
+    await refused(magic, 'corrupt', 'not a gzip file');
+    await refused(Buffer.from('not a gzip stream at all'), 'corrupt', 'not a gzip file');
+    for (const short of [gz.subarray(0, 10), gz.subarray(0, 18), Buffer.alloc(0)]) await refused(short, 'corrupt', 'too short to be a gzip file');
+  });
+
+  it('refuses a truncated or corrupt deflate stream', async () => {
+    const gz = tarGz(entries());
     await refused(gz.subarray(0, gz.length - 100), 'truncated', 'gzip stream ended early');
-    await refused(gz.subarray(0, 10), 'truncated', 'gzip stream ended early');
-    await refused(Buffer.from('not a gzip stream at all'), 'corrupt', 'not a readable gzip stream');
-    await refused(Buffer.concat([gz, Buffer.from('garbage')]), 'corrupt', 'not a readable gzip stream');
+    await refused(gz.subarray(0, 40), 'truncated', 'gzip stream ended early');
     const flipped = Buffer.from(gz);
-    flipped[flipped.length - 30] ^= 0xff;
+    flipped[gz.length - 30] ^= 0xff;
     expect((await failure(unpack(flipped))).code).toMatch(/corrupt|truncated/);
     expect(readdirSync(into)).toEqual([]);
+    const garbageBody = Buffer.concat([gz.subarray(0, 10), Buffer.from('this is not a deflate stream, whatever the framing says'), gz.subarray(gz.length - 8)]);
+    await refused(garbageBody, 'corrupt', 'not a readable gzip stream');
   });
 
   it('caps what the package may inflate to, and how large the file may be', async () => {

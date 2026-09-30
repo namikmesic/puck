@@ -7,17 +7,26 @@
  * was written. Nothing here runs or installs anything: a caller activates
  * a staging directory itself, after its own checks.
  *
- * The archive is inflated as a stream and read block by block. Every
- * header must be ustar (magic `ustar\0`, version `00`) with a verified
- * checksum, octal fields (no base-256), an empty prefix and link name, and
- * a type flag of a regular file or a directory: links, devices, FIFOs, PAX
- * and GNU extension entries are refused. A name must be exactly one of
- * the layout's; absolute, traversing or otherwise unsafe paths are refused
- * before that lookup. Modes must equal the layout's, so setuid, setgid and
- * sticky bits never pass. After the last entry come two zero blocks and
- * nothing else; a further byte, a missing trailer, a member seen twice or
- * a member missing fails the read. Inflated bytes are counted against
- * MAX_UNPACKED_BYTES and the compressed file against MAX_PACKAGE_BYTES.
+ * The file is one gzip member and nothing else, framed here rather than by
+ * zlib's gunzip (which joins concatenated members and ignores trailing
+ * NULs): a fixed ten-byte header with no optional fields, one raw deflate
+ * stream that must consume every byte up to the eight-byte trailer, and a
+ * trailer whose CRC-32 and size must match what was inflated. A second
+ * member, bytes between the stream and the trailer, or bytes after the
+ * trailer fail the read.
+ *
+ * The deflate stream is inflated as a stream and read block by block.
+ * Every header must be ustar (magic `ustar\0`, version `00`) with a
+ * verified checksum, octal fields (no base-256), an empty prefix and link
+ * name, and a type flag of a regular file or a directory: links, devices,
+ * FIFOs, PAX and GNU extension entries are refused. A name must be exactly
+ * one of the layout's; absolute, traversing or otherwise unsafe paths are
+ * refused before that lookup. Modes must equal the layout's, so setuid,
+ * setgid and sticky bits never pass. After the last entry come two zero
+ * blocks and nothing else; a further byte, a missing trailer, a member
+ * seen twice or a member missing fails the read. Inflated bytes are
+ * counted against MAX_UNPACKED_BYTES and the compressed file against
+ * MAX_PACKAGE_BYTES.
  *
  * Entries are written as they are validated, into a fresh directory of
  * mode 0700 under the caller's parent, with the layout's modes. VERSION
@@ -30,7 +39,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Writable } from 'node:stream';
-import { createGunzip } from 'node:zlib';
+import { crc32, createInflateRaw } from 'node:zlib';
 import { RUNNER_PACKAGE_ENTRIES, type RunnerPackageEntry } from '../harness/runner-releases';
 import { MAX_PACKAGE_BYTES, writeAll } from './download';
 
@@ -39,9 +48,12 @@ export const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
 /** Most bytes VERSION may have; a version line is a few. */
 const MAX_VERSION_BYTES = 64;
 const BLOCK = 512;
+/** A gzip member: ID1, ID2, CM, FLG, MTIME(4), XFL, OS; then the deflate stream; then CRC-32 and ISIZE, little-endian. */
+const GZIP_HEADER_BYTES = 10;
+const GZIP_TRAILER_BYTES = 8;
 
 export type RunnerArchiveErrorCode =
-  /** Not a gzip stream, or a corrupt one. */
+  /** Not one plain gzip member with a matching trailer, or a corrupt deflate stream. */
   | 'corrupt'
   /** A header's checksum, magic, version or fields are wrong. */
   | 'bad-header'
@@ -57,7 +69,7 @@ export type RunnerArchiveErrorCode =
   | 'too-large'
   /** The stream ended before the trailer. */
   | 'truncated'
-  /** Bytes after the two-block trailer. */
+  /** Bytes after the two-block tar trailer, or between the deflate stream and the gzip trailer (a second member, say). */
   | 'trailing-data'
   /** VERSION is not the expected version. */
   | 'version-mismatch'
@@ -111,6 +123,25 @@ function octal(block: Buffer, at: number, length: number, what: string): number 
 }
 
 const allZero = (bytes: Buffer): boolean => bytes.every((b) => b === 0);
+
+/** The fixed gzip header: deflate, and no optional field (zlib writes a package that way). */
+function checkGzipHeader(head: Buffer): void {
+  if (head[0] !== 0x1f || head[1] !== 0x8b) throw fail('corrupt', 'The package is not a gzip file.');
+  if (head[2] !== 8) throw fail('corrupt', `The package's gzip member uses compression method ${head[2]}, not deflate.`);
+  if (head[3] !== 0) throw fail('corrupt', "The package's gzip header sets flags (an extra field, a name, a comment, a header CRC or a reserved bit); packages carry none.");
+}
+
+/** Exactly `length` bytes at `position` of an open file. */
+function readAt(fd: number, position: number, length: number): Buffer {
+  const out = Buffer.alloc(length);
+  let got = 0;
+  while (got < length) {
+    const n = fs.readSync(fd, out, got, length - got, position + got);
+    if (n <= 0) throw fail('corrupt', 'The package file is shorter than its size says.');
+    got += n;
+  }
+  return out;
+}
 
 /** The typeflags this reader refuses, named for the error. */
 const REFUSED_TYPES: Record<string, string> = {
@@ -183,6 +214,7 @@ function readHeader(block: Buffer, seen: Set<string>): Entry {
 class PackageSink extends Writable {
   private pending: Buffer = Buffer.alloc(0);
   private inflated = 0;
+  private crc = 0;
   private zeroBlocks = 0;
   private current: { entry: Entry; remaining: number; padding: number; file: fs.promises.FileHandle | null; version: Buffer[] } | null = null;
   readonly seen = new Set<string>();
@@ -195,6 +227,15 @@ class PackageSink extends Writable {
     this.dir = dir;
     this.version = version;
     this.maxUnpackedBytes = maxUnpackedBytes;
+  }
+
+  /** What the gzip trailer must name: the inflated byte count and its CRC-32. */
+  get inflatedBytes(): number {
+    return this.inflated;
+  }
+
+  get inflatedCrc32(): number {
+    return this.crc;
   }
 
   _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
@@ -220,6 +261,7 @@ class PackageSink extends Writable {
   private async consume(chunk: Buffer): Promise<void> {
     this.inflated += chunk.length;
     if (this.inflated > this.maxUnpackedBytes) throw fail('too-large', `The package inflates to over ${this.maxUnpackedBytes} bytes.`);
+    this.crc = crc32(chunk, this.crc);
     let buf = this.pending.length ? Buffer.concat([this.pending, chunk]) : chunk;
     this.pending = Buffer.alloc(0);
     let at = 0;
@@ -323,6 +365,23 @@ export async function unpackRunnerPackage(archive: string, opts: UnpackOptions):
     throw fail('corrupt', `Cannot read ${archive}: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (size > MAX_PACKAGE_BYTES) throw fail('too-large', `The package is ${size} bytes; at most ${MAX_PACKAGE_BYTES} are read.`);
+  if (size <= GZIP_HEADER_BYTES + GZIP_TRAILER_BYTES) throw fail('corrupt', 'The package is too short to be a gzip file.');
+  let head: Buffer;
+  let trailer: Buffer;
+  let fd: number;
+  try {
+    fd = fs.openSync(archive, 'r');
+  } catch (err) {
+    throw fail('corrupt', `Cannot read ${archive}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    head = readAt(fd, 0, GZIP_HEADER_BYTES);
+    trailer = readAt(fd, size - GZIP_TRAILER_BYTES, GZIP_TRAILER_BYTES);
+  } finally {
+    fs.closeSync(fd);
+  }
+  checkGzipHeader(head);
+  const deflateBytes = size - GZIP_HEADER_BYTES - GZIP_TRAILER_BYTES;
   let dir: string;
   try {
     dir = fs.mkdtempSync(path.join(opts.into, 'puck-runner-'));
@@ -338,31 +397,44 @@ export async function unpackRunnerPackage(archive: string, opts: UnpackOptions):
     fs.rmSync(dir, { recursive: true, force: true });
     throw fail('write-failed', `Cannot make a staging directory under ${opts.into}: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const sink = new PackageSink(dir, opts.version, opts.maxUnpackedBytes ?? MAX_UNPACKED_BYTES);
   try {
     await new Promise<void>((resolve, reject) => {
-      const source = fs.createReadStream(archive);
-      const gunzip = createGunzip();
-      const sink = new PackageSink(dir, opts.version, opts.maxUnpackedBytes ?? MAX_UNPACKED_BYTES);
+      // Only the bytes between the gzip header and trailer reach the inflater.
+      const source = fs.createReadStream(archive, { start: GZIP_HEADER_BYTES, end: size - GZIP_TRAILER_BYTES - 1 });
+      const inflate = createInflateRaw();
       let settled = false;
       // The first failure anywhere ends all three streams; the sink closes its file as it is destroyed.
       const end = (err: unknown): void => {
         if (settled) return;
         settled = true;
         source.destroy();
-        gunzip.destroy();
+        inflate.destroy();
         sink.destroy();
         reject(err);
       };
       source.on('error', end);
-      gunzip.on('error', end);
+      inflate.on('error', end);
       sink.on('error', end);
+      // The deflate stream ended: it must have consumed every byte before the trailer. Registered
+      // before the pipe's own 'end' listener, so a leftover is reported before the sink judges the tar.
+      inflate.on('end', () => {
+        const leftover = deflateBytes - inflate.bytesWritten;
+        if (leftover !== 0) {
+          end(fail('trailing-data', `The package has ${leftover} bytes between its deflate stream and its gzip trailer (a second gzip member, or other data); a package is one gzip member and nothing else.`));
+        }
+      });
       sink.on('finish', () => {
         if (settled) return;
         settled = true;
+        source.destroy();
         resolve();
       });
-      source.pipe(gunzip).pipe(sink);
+      source.pipe(inflate).pipe(sink);
     });
+    if (trailer.readUInt32LE(0) !== sink.inflatedCrc32 || trailer.readUInt32LE(4) !== sink.inflatedBytes % 0x1_0000_0000) {
+      throw fail('corrupt', "The package's gzip trailer does not match its contents.");
+    }
   } catch (err) {
     fs.rmSync(dir, { recursive: true, force: true });
     throw archiveError(err);
