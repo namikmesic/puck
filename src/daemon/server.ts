@@ -9,22 +9,43 @@
  * log (then every missed event follows, then live ones) or it must resync
  * from `snapshot.get`. Commands are answered by id, in any order. Several
  * connections may be attached; every one gets every event.
+ *
+ * Each connection keeps the protocol it said hello with. A protocol-1
+ * connection gets the projection of `protocol-v1.ts`: every event with its
+ * own seq (unknown kinds as substitutes), projected results, and
+ * `snapshot.get` whole. A protocol-2 connection whose cursor is from
+ * before the state's format boundary resyncs, so it never applies an
+ * eight-state record. Every result is measured before it is sent, and one
+ * larger than a frame is refused with `limit` (protocol 1's whole snapshot
+ * is the one exception, as today). Protocol 2's `snapshot.get` freezes the
+ * whole snapshot and serves its growing collections in parts
+ * (`SnapshotParts`), each below 512 KiB, all from the one copy.
  */
 
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import {
+  PAGE_LIMITS,
+  SNAPSHOT_COLLECTIONS,
   WIRE_LIMITS,
   isOp,
   protocolSupported,
   type ClientFrame,
+  type DaemonEvent,
   type DaemonFrame,
   type ErrorCode,
+  type InflightTurn,
   PROTOCOL_VERSION,
+  type Snapshot,
+  type SnapshotHead,
+  type SnapshotPart,
+  type SnapshotV1,
 } from '../harness/daemon-protocol';
+import { newId } from '../harness/ulid';
 import type { EventLog, LoggedEvent } from './eventlog';
 import type { Logger } from './log';
 import { OpError } from './ops';
+import { projectEvent, projectResult, V1_OPS, type ProjectionState } from './protocol-v1';
 
 /** A client this far behind on reading is dropped (it reconnects and replays). */
 const MAX_BACKLOG_BYTES = 64 * 1024 * 1024;
@@ -33,12 +54,127 @@ function exceedsFrame(text: string): boolean {
   return Buffer.byteLength(text, 'utf8') > WIRE_LIMITS.maxFrameBytes;
 }
 
+export const FRAME_LIMIT_MESSAGE = 'The result is larger than one frame; page it.';
+
+/** What a command knows about the connection it came on. */
+export interface OpContext {
+  protocol: number;
+}
+
 export interface ServerDeps {
   socketPath: string;
   log: Logger;
   events: EventLog;
   identity(): { envId: string; version: string; build: string };
-  dispatch(op: string, args: unknown): Promise<unknown>;
+  dispatch(op: string, args: unknown, ctx: OpContext): Promise<unknown>;
+  /** Protocol 1's whole snapshot. */
+  snapshotV1(): SnapshotV1;
+  /** What protocol-1 substitutes are projected from, and the format boundary. */
+  projection(): ProjectionState;
+}
+
+/* ---------- Snapshot parts ---------- */
+
+const PART_ENVELOPE_BYTES = 512;
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+/** An in-flight turn too large for a part continues in the next records under the same turnId. */
+function splitInflight(turn: InflightTurn, budget: number): InflightTurn[] {
+  if (jsonBytes(turn) <= budget) return [turn];
+  const out: InflightTurn[] = [];
+  let events: InflightTurn['events'] = [];
+  let bytes = jsonBytes({ ...turn, events: [] });
+  for (const event of turn.events) {
+    const size = jsonBytes(event) + 1;
+    if (events.length && bytes + size > budget) {
+      out.push({ ...turn, events });
+      events = [];
+      bytes = jsonBytes({ ...turn, events: [] });
+    }
+    events.push(event);
+    bytes += size;
+  }
+  out.push({ ...turn, events });
+  return out;
+}
+
+/** A snapshot's growing collections cut into parts of whole records, each below `pageBytes` serialized. */
+export function snapshotParts(snapshot: Snapshot, pageBytes: number = PAGE_LIMITS.pageBytes): Omit<SnapshotPart, 'partsCursor'>[] {
+  const budget = pageBytes - PART_ENVELOPE_BYTES;
+  const parts: Omit<SnapshotPart, 'partsCursor'>[] = [];
+  for (const collection of SNAPSHOT_COLLECTIONS) {
+    const all: unknown[] =
+      collection === 'inflight' ? snapshot.inflight.flatMap((t) => splitInflight(t, budget)) : (snapshot[collection] as unknown[]);
+    let records: unknown[] = [];
+    let bytes = 0;
+    for (const record of all) {
+      const size = jsonBytes(record) + 1;
+      if (records.length && bytes + size > budget) {
+        parts.push({ collection, records });
+        records = [];
+        bytes = 0;
+      }
+      records.push(record);
+      bytes += size;
+    }
+    if (records.length) parts.push({ collection, records });
+  }
+  return parts;
+}
+
+export function snapshotHead(snapshot: Snapshot, partsCursor: string | null): SnapshotHead {
+  const { items: _i, order: _o, sessions: _s, inflight: _f, asks: _a, decisions: _d, ...rest } = snapshot;
+  void [_i, _o, _s, _f, _a, _d];
+  return { ...rest, partsCursor };
+}
+
+/**
+ * Frozen protocol-2 snapshots. `freeze` copies the whole snapshot at its
+ * head and returns the bounded fields with the first part's cursor; each
+ * part names the next. A copy lives `ttlMs` after its last request.
+ */
+export class SnapshotParts {
+  private readonly frozen = new Map<string, { parts: SnapshotPart[]; expiresAt: number }>();
+  private readonly ttlMs: number;
+  private readonly pageBytes: number;
+
+  constructor(private readonly opts: { now: () => number; ttlMs?: number; pageBytes?: number }) {
+    this.ttlMs = opts.ttlMs ?? PAGE_LIMITS.snapshotTtlMs;
+    this.pageBytes = opts.pageBytes ?? PAGE_LIMITS.pageBytes;
+  }
+
+  private sweep(): void {
+    const now = this.opts.now();
+    for (const [id, entry] of this.frozen) if (entry.expiresAt <= now) this.frozen.delete(id);
+  }
+
+  freeze(snapshot: Snapshot): SnapshotHead {
+    this.sweep();
+    const id = newId('snp', this.opts.now());
+    const cut = snapshotParts(snapshot, this.pageBytes);
+    const cursor = (i: number): string | null => (i < cut.length ? `${id}.${i}` : null);
+    const parts = cut.map((p, i) => ({ ...p, partsCursor: cursor(i + 1) }));
+    if (parts.length) this.frozen.set(id, { parts, expiresAt: this.opts.now() + this.ttlMs });
+    return snapshotHead(snapshot, cursor(0));
+  }
+
+  next(cursor: string): SnapshotPart {
+    this.sweep();
+    const m = /^(snp_[0-9A-Z]{26})\.(\d{1,6})$/.exec(cursor);
+    const entry = m ? this.frozen.get(m[1] as string) : undefined;
+    const part = entry && m ? entry.parts[Number(m[2])] : undefined;
+    if (!entry || !part) throw new OpError('not-found', 'The snapshot expired; take a new one.');
+    entry.expiresAt = this.opts.now() + this.ttlMs;
+    return part;
+  }
+
+  /** Frozen copies still held (tests). */
+  size(): number {
+    return this.frozen.size;
+  }
 }
 
 export class DaemonServer {
@@ -83,16 +219,22 @@ export class DaemonServer {
     this.clients.add(socket);
     let buffer = '';
     let welcomed = false;
+    let protocol = 0;
     let unsubscribe: (() => void) | null = null;
 
-    const send = (frame: DaemonFrame): void => {
+    const write = (text: string): void => {
       if (socket.destroyed) return;
       if (socket.writableLength > MAX_BACKLOG_BYTES) {
         log.warn('client.dropped', { reason: 'backlog' });
         socket.destroy();
         return;
       }
-      socket.write(JSON.stringify(frame) + '\n');
+      socket.write(text + '\n');
+    };
+    const send = (frame: DaemonFrame): void => write(JSON.stringify(frame));
+    const sendEvent = (e: LoggedEvent): void => {
+      const ev = protocol === 1 ? projectEvent(e.seq, e.ev, this.deps.projection()) : e.ev;
+      send({ t: 'event', seq: e.seq, at: e.at, ev: ev as DaemonEvent });
     };
     const fatal = (code: 'protocol-mismatch' | 'bad-frame', message: string): void => {
       send({ t: 'error', code, message });
@@ -111,9 +253,12 @@ export class DaemonServer {
           );
         }
         const since = typeof frame.since === 'number' && Number.isInteger(frame.since) && frame.since >= 0 ? frame.since : null;
+        protocol = frame.protocol;
         // Replay list, welcome and subscription happen in one tick, so no
-        // event can fall between the replay and the live stream.
-        const replay = events.since(since);
+        // event can fall between the replay and the live stream. A
+        // protocol-2 cursor from before the format boundary resyncs.
+        const boundary = this.deps.projection().formatBoundary;
+        const replay = protocol >= 2 && since !== null && since < boundary ? null : events.since(since);
         const id = this.deps.identity();
         welcomed = true;
         send({
@@ -124,8 +269,8 @@ export class DaemonServer {
           head: events.head(),
           replay: replay ? 'events' : 'resync',
         });
-        for (const e of replay ?? []) send({ t: 'event', seq: e.seq, at: e.at, ev: e.ev });
-        unsubscribe = events.subscribe((e: LoggedEvent) => send({ t: 'event', seq: e.seq, at: e.at, ev: e.ev }));
+        for (const e of replay ?? []) sendEvent(e);
+        unsubscribe = events.subscribe((e: LoggedEvent) => sendEvent(e));
         log.info('client.attached', { protocol: frame.protocol, replay: replay ? replay.length : 'resync' });
         return;
       }
@@ -137,11 +282,28 @@ export class DaemonServer {
       const cmdId = typeof frame.id === 'string' && frame.id.length <= 100 ? frame.id : null;
       if (!cmdId) return fatal('bad-frame', 'A command needs an id.');
       const fail = (code: ErrorCode, message: string): void => send({ t: 'res', id: cmdId, ok: false, error: { code, message } });
-      if (!isOp(frame.op)) return fail('invalid-args', `Unknown op ${String(frame.op).slice(0, 40)}.`);
+      if (!isOp(frame.op) || (protocol === 1 && !V1_OPS.has(frame.op))) return fail('invalid-args', `Unknown op ${String(frame.op).slice(0, 40)}.`);
       if (!this.accepting) return fail('not-ready', 'The daemon is shutting down.');
+      const op = frame.op;
+      if (protocol === 1 && op === 'snapshot.get') {
+        // Protocol 1 cannot page: its snapshot goes out whole and unmeasured, as it always did.
+        try {
+          send({ t: 'res', id: cmdId, ok: true, result: this.deps.snapshotV1() });
+        } catch (err) {
+          log.error('command.failed', err, { op });
+          fail('internal', err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
       this.deps
-        .dispatch(frame.op, frame.args)
-        .then((result) => send({ t: 'res', id: cmdId, ok: true, result: result ?? {} }))
+        .dispatch(op, frame.args, { protocol })
+        .then((result) => {
+          const text = JSON.stringify({ t: 'res', id: cmdId, ok: true, result: (protocol === 1 ? projectResult(op, result) : result) ?? {} });
+          if (exceedsFrame(text)) {
+            log.warn('command.too-large', { op, bytes: Buffer.byteLength(text, 'utf8') });
+            fail('limit', FRAME_LIMIT_MESSAGE);
+          } else write(text);
+        })
         .catch((err: unknown) => {
           if (err instanceof OpError) fail(err.code, err.message);
           else {

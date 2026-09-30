@@ -32,6 +32,8 @@ export interface SessionRecord {
   agent: string;
   harness: string;
   itemId?: string;
+  /** A worker session: the implement step it works for now (4.5). */
+  stepId?: string;
   cwd: string;
   status: SessionStatus;
   resumeId?: string;
@@ -84,6 +86,7 @@ function normalize(raw: unknown): SessionMap {
       agent: value.agent,
       harness: value.harness ?? 'claude-code',
       ...(value.itemId ? { itemId: value.itemId } : {}),
+      ...(typeof value.stepId === 'string' && value.stepId ? { stepId: value.stepId } : {}),
       cwd: value.cwd ?? '/workspace',
       status: value.status ?? 'idle',
       ...(value.resumeId ? { resumeId: value.resumeId } : {}),

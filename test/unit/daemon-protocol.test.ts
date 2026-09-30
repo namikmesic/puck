@@ -11,17 +11,18 @@ import {
 import { VALIDATORS, OpError, dispatch, type Handlers } from '../../src/daemon/ops';
 
 describe('daemon protocol', () => {
-  it('declares version 1 and supports N and N-1 only', () => {
-    expect(PROTOCOL_VERSION).toBe(1);
+  it('declares version 2 and supports N and N-1 only', () => {
+    expect(PROTOCOL_VERSION).toBe(2);
+    expect(protocolSupported(2)).toBe(true);
     expect(protocolSupported(1)).toBe(true);
     expect(protocolSupported(0)).toBe(false);
-    expect(protocolSupported(2)).toBe(false);
-    expect(protocolSupported('1')).toBe(false);
+    expect(protocolSupported(3)).toBe(false);
+    expect(protocolSupported('2')).toBe(false);
   });
 
   it('the op table is total: every op has a daemon-side validator, and nothing else does', () => {
     expect(Object.keys(VALIDATORS).sort()).toEqual([...OPS].sort());
-    expect(OPS).toHaveLength(27);
+    expect(OPS).toHaveLength(32);
     for (const op of OPS) expect(isOp(op)).toBe(true);
     expect(isOp('toString')).toBe(false);
     expect(isOp('item.explode')).toBe(false);
@@ -37,10 +38,14 @@ describe('daemon protocol', () => {
         'item.cancel',
         'item.create',
         'item.delete',
+        'item.link',
         'item.move',
         'item.publish',
+        'item.records',
         'item.retry',
+        'item.unlink',
         'item.update',
+        'item.workflow',
         'issue.import',
         'issue.search',
         'item.pr',
@@ -50,6 +55,7 @@ describe('daemon protocol', () => {
         'session.history',
         'session.interrupt',
         'snapshot.get',
+        'snapshot.part',
       ].sort(),
     );
     for (const op of ['credentials.put', 'credentials.get', 'github.put', 'github.nudge', 'secrets.put', 'definition.apply', 'daemon.upgrade', 'nope']) {

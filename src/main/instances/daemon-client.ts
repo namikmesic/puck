@@ -19,21 +19,40 @@
  * - Attach states: connecting, attached, reconnecting (a channel dropped),
  *   unreachable (the runner or server cannot be reached; it keeps trying),
  *   incompatible (protocol mismatch: stop), detached.
+ * - Protocol. Every connection says hello with PROTOCOL_VERSION first. A
+ *   daemon that predates it refuses with `protocol-mismatch`; the client
+ *   then connects again at once with protocol 1 and maps what it receives
+ *   up to the three-state model (`upgradeV1Item` in
+ *   src/harness/workflow.ts): tickets in events, snapshots and results. The
+ *   window shows such an environment read-only (the welcome's protocol
+ *   says which), and the daemon update, a protocol-1 op, keeps working.
+ *   The next reconnect tries PROTOCOL_VERSION again.
+ * - Snapshots. Protocol 2's `snapshot.get` returns the bounded fields and
+ *   a cursor; the client reads every part (`snapshot.part`) from the one
+ *   frozen copy before it applies anything, holding live events meanwhile.
+ *   `cmd('snapshot.get')` returns the assembled snapshot.
  */
 
 import {
+  addSnapshotPart,
   isKnownEvent,
   PROTOCOL_VERSION,
   protocolSupported,
+  snapshotFromHead,
   WIRE_LIMITS,
+  type ClientResult,
   type DaemonEvent,
   type DaemonFrame,
   type ErrorCode,
   type Op,
   type OpArgs,
-  type OpResult,
   type Snapshot,
+  type SnapshotHead,
+  type SnapshotV1,
+  type WorkItem,
+  type WorkItemV1,
 } from '../../harness/daemon-protocol';
+import { upgradeV1Item } from '../../harness/workflow';
 import { lines, type ByteChannel } from '../runners/channel';
 
 export type AttachState = 'connecting' | 'attached' | 'reconnecting' | 'unreachable' | 'incompatible' | 'detached';
@@ -75,6 +94,20 @@ interface Pending {
 
 const WELCOME_TIMEOUT_MS = 20_000;
 
+/** Ops whose protocol-1 result is one ticket. */
+const ITEM_RESULTS: ReadonlySet<string> = new Set(['item.create', 'item.update', 'item.assign', 'item.cancel', 'item.retry', 'item.accept', 'issue.import']);
+
+/** A protocol-1 event in the three-state model. */
+export function upgradeV1Event(ev: DaemonEvent): DaemonEvent {
+  if (ev.kind === 'item.upsert') return { kind: 'item.upsert', item: upgradeV1Item(ev.item as unknown as WorkItemV1) };
+  return ev;
+}
+
+/** A protocol-1 snapshot in the three-state model. */
+export function upgradeV1Snapshot(snapshot: SnapshotV1): Snapshot {
+  return { ...snapshot, items: snapshot.items.map(upgradeV1Item), decisions: [] };
+}
+
 export class DaemonClient {
   private channel: ByteChannel | null = null;
   private send: ((frame: unknown) => boolean) | null = null;
@@ -89,6 +122,9 @@ export class DaemonClient {
   private state: AttachState = 'detached';
   private everAttached = false;
   private connecting = false;
+  /** The protocol the current connection said hello with, and whether the next one falls back to 1. */
+  private protocol: number = PROTOCOL_VERSION;
+  private fallback = false;
 
   constructor(private readonly deps: DaemonClientDeps) {}
 
@@ -111,6 +147,11 @@ export class DaemonClient {
 
   get envId(): string {
     return this.deps.envId;
+  }
+
+  /** The protocol of the current connection (1 when the daemon predates protocol 2). */
+  get protocolVersion(): number {
+    return this.protocol;
   }
 
   private setState(state: AttachState, detail = ''): void {
@@ -176,6 +217,9 @@ export class DaemonClient {
     }
     this.channel = channel;
     this.lastFrameAt = this.now();
+    const protocol = this.fallback ? 1 : PROTOCOL_VERSION;
+    this.fallback = false;
+    this.protocol = protocol;
     let welcomed = false;
     let held: { seq: number; at: number; ev: DaemonEvent }[] | null = null;
     const welcomeTimer = setTimeout(() => {
@@ -215,10 +259,12 @@ export class DaemonClient {
           }
           return;
         }
-        case 'event':
-          if (held) held.push({ seq: frame.seq, at: frame.at, ev: frame.ev });
-          else this.apply(frame.seq, frame.at, frame.ev);
+        case 'event': {
+          const ev = protocol === 1 ? upgradeV1Event(frame.ev) : frame.ev;
+          if (held) held.push({ seq: frame.seq, at: frame.at, ev });
+          else this.apply(frame.seq, frame.at, ev);
           return;
+        }
         case 'res': {
           const p = this.pending.get(frame.id);
           if (!p) return;
@@ -232,6 +278,12 @@ export class DaemonClient {
           return;
         case 'error':
           if (frame.code === 'protocol-mismatch') {
+            if (!welcomed && protocol > 1) {
+              // A daemon that predates this protocol: try protocol 1 at once.
+              this.fallback = true;
+              channel.close('protocol-fallback');
+              return;
+            }
             this.stopped = true;
             this.setState('incompatible', frame.message);
             channel.close('protocol-mismatch');
@@ -241,7 +293,7 @@ export class DaemonClient {
     });
     this.send = out.send;
     // Same tick as the open: the daemon's hello timer is already running.
-    out.send({ t: 'hello', protocol: PROTOCOL_VERSION, client: this.deps.client, since: this.cursor });
+    out.send({ t: 'hello', protocol, client: this.deps.client, since: this.cursor });
 
     this.pinger = setInterval(() => {
       if (this.channel !== channel) return;
@@ -257,6 +309,10 @@ export class DaemonClient {
       if (this.channel !== channel) return;
       this.drop(reason);
       if (this.stopped) return;
+      if (this.fallback) {
+        void this.connect();
+        return;
+      }
       this.setState(this.everAttached ? 'reconnecting' : 'unreachable', reasonText(reason));
       this.schedule();
     });
@@ -264,7 +320,7 @@ export class DaemonClient {
 
   private async resync(channel: ByteChannel, release: () => void): Promise<void> {
     try {
-      const snapshot = await this.cmd('snapshot.get', {} as OpArgs<'snapshot.get'>);
+      const snapshot = await this.snapshot();
       if (this.channel !== channel) return;
       this.cursor = snapshot.head;
       this.deps.saveSeq(snapshot.head);
@@ -297,20 +353,46 @@ export class DaemonClient {
     }
   }
 
-  /** One daemon command; fails with `not-ready` while not attached. */
-  cmd<O extends Op>(op: O, args: OpArgs<O>, timeoutMs?: number): Promise<OpResult<O>> {
+  /**
+   * The whole snapshot: protocol 2's head and every part, read from the one
+   * frozen copy; protocol 1's whole snapshot, mapped up.
+   */
+  async snapshot(): Promise<Snapshot> {
+    const raw = await this.raw('snapshot.get', {});
+    if (this.protocol === 1 || Array.isArray((raw as { items?: unknown }).items)) return upgradeV1Snapshot(raw as SnapshotV1);
+    const head = raw as SnapshotHead;
+    const snapshot = snapshotFromHead(head);
+    let cursor = head.partsCursor;
+    while (cursor) {
+      const part = (await this.raw('snapshot.part', { cursor })) as { collection: never; records: unknown[]; partsCursor: string | null };
+      addSnapshotPart(snapshot, part);
+      cursor = part.partsCursor;
+    }
+    return snapshot;
+  }
+
+  /** One daemon command; fails with `not-ready` while not attached. `snapshot.get` returns the assembled snapshot. */
+  cmd<O extends Op>(op: O, args: OpArgs<O>, timeoutMs?: number): Promise<ClientResult<O>> {
+    if (op === 'snapshot.get') return this.snapshot() as Promise<ClientResult<O>>;
+    const legacy = this.protocol === 1;
+    return this.raw(op, args, timeoutMs).then((result) =>
+      legacy && ITEM_RESULTS.has(op) && result && typeof result === 'object' ? (upgradeV1Item(result as unknown as WorkItemV1) as WorkItem) : result,
+    ) as Promise<ClientResult<O>>;
+  }
+
+  private raw(op: Op, args: unknown, timeoutMs?: number): Promise<unknown> {
     const send = this.send;
     if (!send || this.state !== 'attached') {
       return Promise.reject(new DaemonCommandError('not-ready', 'The environment is not attached yet.'));
     }
     const id = `a${++this.n}`;
-    const ms = timeoutMs ?? (op === 'session.history' || op === 'snapshot.get' ? 60_000 : 30_000);
-    return new Promise<OpResult<O>>((resolve, reject) => {
+    const ms = timeoutMs ?? (op === 'session.history' || op === 'snapshot.get' || op === 'snapshot.part' ? 60_000 : 30_000);
+    return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new DaemonCommandError('timeout', `The environment did not answer ${op} in time.`));
       }, ms);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      this.pending.set(id, { resolve, reject, timer });
       send({ t: 'cmd', id, op, args });
     });
   }

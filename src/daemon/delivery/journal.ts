@@ -28,8 +28,13 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { DaemonEvent, WorkItem } from '../../harness/daemon-protocol';
 import { newId } from '../../harness/ulid';
 import { nullLogger, type Logger } from '../log';
+import type { TablesFile } from '../store/delivery';
+import type { ItemRecord, ItemsFile } from '../store/items';
+import type { JsonStore } from '../store/store';
+import { applyItems, applyTables, asJournalEvents, JOURNAL_ONLY, type ItemsDelta, type LedgerEvent } from './derive';
 
 export const JOURNAL_LIMITS = {
   /** A single-line transaction, newline included. */
@@ -310,5 +315,69 @@ export class Journal {
     } catch {
       // closing at exit
     }
+  }
+}
+
+/* ---------- The write path over the checkpoints ---------- */
+
+export interface LedgerDeps {
+  journal: Journal;
+  items: JsonStore<ItemsFile>;
+  tables: JsonStore<TablesFile>;
+  /** Emit on the event log; throws when the log cannot record (the state is already durable). */
+  emit(ev: DaemonEvent): void;
+  /** The public shape of a ticket, with its workflow summary. */
+  publicItem(item: ItemRecord): WorkItem;
+  log: Logger;
+  /** Test seam: the write path's crash points after the journal's fsync. */
+  hooks?: { afterJournal?(tx: Transaction): void; afterItems?(tx: Transaction): void };
+}
+
+/**
+ * Steps 4 and 5 of the write path: after the journal's one fsync, apply the
+ * transaction to the in-memory state through the reducer, commit items.json
+ * synchronously when a ticket record changed, save tables.json, and emit
+ * the events clients see. The caller runs the transaction's side effects
+ * (queue an input, start a session) after `commit` returns.
+ */
+export class Ledger {
+  constructor(private readonly deps: LedgerDeps) {}
+
+  failing(): boolean {
+    return this.deps.journal.failing();
+  }
+
+  head(): number {
+    return this.deps.journal.head();
+  }
+
+  commit(op: string, events: LedgerEvent[], at: number): { tx: Transaction; delta: ItemsDelta } {
+    const tx = this.deps.journal.append(op, asJournalEvents(events), at);
+    this.deps.hooks?.afterJournal?.(tx);
+    const delta = applyItems(this.deps.items.get(), tx);
+    if (delta.changed.size || delta.removed.size || delta.order) {
+      try {
+        this.deps.items.commit();
+      } catch (err) {
+        // The journal holds the change; the next boot rolls items.json forward.
+        this.deps.log.error('store.write', err, { file: 'items.json' });
+      }
+    }
+    this.deps.hooks?.afterItems?.(tx);
+    applyTables(this.deps.tables.get(), tx);
+    this.deps.tables.save();
+    this.publish(events, delta);
+    return { tx, delta };
+  }
+
+  private publish(events: readonly LedgerEvent[], delta: ItemsDelta): void {
+    for (const ev of events) if (!JOURNAL_ONLY.has(ev.kind)) this.deps.emit(ev as DaemonEvent);
+    const file = this.deps.items.get();
+    for (const itemId of delta.removed) this.deps.emit({ kind: 'item.removed', itemId });
+    for (const itemId of delta.changed) {
+      const item = file.items[itemId];
+      if (item) this.deps.emit({ kind: 'item.upsert', item: this.deps.publicItem(item) });
+    }
+    if (delta.order) this.deps.emit({ kind: 'backlog.order', order: file.order.slice() });
   }
 }

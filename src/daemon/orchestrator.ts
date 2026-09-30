@@ -7,9 +7,12 @@
  * the backlog) become notices in notices.json. The next orchestrator turn
  * carries every pending notice at the top of its prompt.
  *
- * Wake: a new notice opens a 3 s batching window; when it closes and the
- * orchestrator is idle, the daemon starts a turn for the notices alone. A
- * running turn keeps them until it ends, then a new window opens.
+ * Wake: a new notice that wakes (`Notice.wake`, true unless the notice says
+ * otherwise) opens a 3 s batching window; when it closes and the
+ * orchestrator is idle, the daemon starts a turn for the pending notices. A
+ * running turn keeps them until it ends, then a new window opens. A notice
+ * with `wake: false` opens no window: it rides along with the next turn,
+ * however that turn starts.
  *
  * Runaway guard: notice-started turns are counted over a sliding hour. At
  * `maxAutoTurnsPerHour` auto-wake pauses (the session reports
@@ -18,7 +21,7 @@
  * `autoWake: false` notices only ever ride along with user messages.
  */
 
-import type { Notice, NoticeKind } from '../harness/transcript';
+import { wakes, type Notice, type NoticeKind } from '../harness/transcript';
 import { newId } from '../harness/ulid';
 import type { Logger } from './log';
 import { realTimers, type Timers } from './scheduler';
@@ -63,8 +66,15 @@ export class Orchestrator {
 
   /* ---------- Notices ---------- */
 
-  push(kind: NoticeKind, text: string, itemId?: string): Notice {
-    const notice: Notice = { id: newId('ntc', this.now()), kind, at: this.now(), text, ...(itemId ? { itemId } : {}) };
+  push(kind: NoticeKind, text: string, itemId?: string, opts: { wake?: boolean } = {}): Notice {
+    const notice: Notice = {
+      id: newId('ntc', this.now()),
+      kind,
+      at: this.now(),
+      text,
+      ...(itemId ? { itemId } : {}),
+      ...(opts.wake === false ? { wake: false } : {}),
+    };
     this.deps.notices.get().pending.push(notice);
     this.deps.notices.commit();
     this.deps.log.info('notice.push', { kind, itemId });
@@ -95,11 +105,16 @@ export class Orchestrator {
     return this.paused;
   }
 
-  /** Open a batching window if notices wait and auto-wake may run. */
+  /** True when a pending notice wakes the orchestrator. */
+  private waking(): boolean {
+    return this.deps.notices.get().pending.some(wakes);
+  }
+
+  /** Open a batching window if a notice that wakes waits and auto-wake may run. */
   schedule(): void {
     const settings = this.deps.settings();
     if (!settings?.autoWake || this.paused || this.timer !== null) return;
-    if (this.deps.notices.get().pending.length === 0) return;
+    if (!this.waking()) return;
     this.timer = this.timers.setTimeout(() => {
       this.timer = null;
       this.fire();
@@ -112,7 +127,7 @@ export class Orchestrator {
     const session = this.deps.turns.orchestrator();
     if (!settings?.autoWake || this.paused || !session || !this.deps.canWake()) return;
     if (this.deps.turns.isRunning(session.id)) return; // its end reschedules
-    if (this.deps.notices.get().pending.length === 0) return;
+    if (!this.waking()) return;
     const now = this.now();
     this.autoTurns = this.autoTurns.filter((at) => now - at < RUNAWAY_WINDOW_MS);
     if (this.autoTurns.length >= settings.maxAutoTurnsPerHour) {

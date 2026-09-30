@@ -45,6 +45,13 @@ export interface Notice {
   /** One line, as the orchestrator reads it in its prompt. */
   text: string;
   itemId?: string;
+  /** False: rides along with the next turn and opens no wake window. Absent (stored notices) means true. */
+  wake?: boolean;
+}
+
+/** Whether a notice opens a wake window: every notice does unless it says otherwise. */
+export function wakes(notice: Pick<Notice, 'wake'>): boolean {
+  return notice.wake !== false;
 }
 
 export interface UserEntry {

@@ -14,19 +14,23 @@
  */
 
 import type * as Z from 'zod';
-import type { ItemPosition, ItemStatus, Pin, WorkItem } from '../harness/daemon-protocol';
+import type { ItemOutcome, ItemPosition, ItemStatus, Pin, WorkItem, WorkflowSummary } from '../harness/daemon-protocol';
 import type { DaemonDefinition } from '../harness/env-definition';
+import { deliveryPull, referenceLabel, sourceIssue } from '../harness/references';
 import type { GithubSync } from './github-sync';
 import type { OrchestratorTool } from './harness/types';
-import { type Backlog, itemLabel, publicItem } from './items';
+import { type Backlog, itemLabel } from './items';
 import type { ItemRecord } from './store/items';
 import type { Work } from './work';
+import { publicItem, type Workflow } from './workflow';
 
-const STATUSES: [ItemStatus, ...ItemStatus[]] = ['backlog', 'queued', 'running', 'needs-input', 'review', 'done', 'failed', 'cancelled'];
+const STATUSES: [ItemStatus, ...ItemStatus[]] = ['todo', 'in-progress', 'done'];
+const OUTCOMES: [ItemOutcome, ...ItemOutcome[]] = ['merged', 'accepted', 'failed', 'cancelled'];
 
 export interface ToolDeps {
   work: Work;
   backlog: Backlog;
+  workflow: Pick<Workflow, 'workflow'>;
   definition(): DaemonDefinition | null;
   instance(): { name: string; pin: Pin | null; sha: string | null };
   /** Running (slot-holding) items per agent. */
@@ -60,23 +64,61 @@ function position(deps: ToolDeps, raw: unknown): ItemPosition | undefined {
   return p.before !== undefined ? { before: item.id } : { after: item.id };
 }
 
-function compact(item: ItemRecord): Record<string, unknown> {
+const STATE_WORDS: Record<string, string> = {
+  pending: 'pending',
+  queued: 'queued for a slot',
+  running: 'running',
+  'needs-input': 'waiting on a question',
+  waiting: 'waiting',
+  done: 'done',
+};
+
+/** "round 2 · implement: running", "round 1 · merge: waiting for the user to accept or merge". */
+export function workflowLine(summary: WorkflowSummary | null): string | null {
+  if (!summary) return null;
+  const step = summary.steps.find((s) => s.state !== 'done') ?? summary.steps[summary.steps.length - 1];
+  const rounds = `round ${summary.round}${summary.roundsAllowed ? ` of ${summary.roundsAllowed}` : ''}`;
+  if (!step) return rounds;
+  const words = step.kind === 'merge' && step.state === 'waiting' && summary.policy.merge === 'manual' ? 'waiting for the user to accept or merge' : (STATE_WORDS[step.state] ?? step.state);
+  return `${rounds} · ${step.kind}: ${step.state === 'done' ? (step.result ?? 'done') : words}`;
+}
+
+/** "question for the user", "question for you" (the orchestrator), and the count when several are open. */
+export function needsLine(item: Pick<WorkItem, 'needsInput' | 'openAsks' | 'userAsks'>): string | null {
+  if (!item.needsInput) return null;
+  const who = item.userAsks > 0 ? 'the user' : 'you';
+  const what = item.needsInput.kind === 'decision' ? 'decision' : 'question';
+  return item.openAsks > 1 ? `${item.openAsks} ${what}s, ${item.userAsks} for the user` : `${what} for ${who}`;
+}
+
+function compact(deps: ToolDeps, item: ItemRecord): Record<string, unknown> {
+  const pub = publicItem(item, deps.workflow.workflow(item.id));
+  const src = sourceIssue(item);
+  const needs = needsLine(item);
+  const line = workflowLine(pub.workflow);
   return {
     item: itemLabel(item),
     title: item.title,
     status: item.status,
+    stage: item.stage,
+    outcome: item.outcome,
     agent: item.agent,
     repo: item.repo,
     attempts: item.attempts,
-    pr: item.pr?.url ?? null,
-    ...(item.source ? { issue: `${item.source.repo}#${item.source.number}` } : {}),
-    ...(item.pendingAsk ? { question: `waiting on the ${item.pendingAsk.routedTo}` } : {}),
+    pr: deliveryPull(item)?.url ?? null,
+    ...(src ? { issue: `${src.repo}#${src.number}` } : {}),
+    ...(needs ? { needs } : {}),
+    ...(line ? { workflow: line } : {}),
   };
 }
 
-function full(item: ItemRecord): Record<string, unknown> {
-  const pub: WorkItem = publicItem(item);
-  return { item: itemLabel(item), ...pub };
+function full(deps: ToolDeps, item: ItemRecord): Record<string, unknown> {
+  const pub: WorkItem = publicItem(item, deps.workflow.workflow(item.id));
+  return {
+    item: itemLabel(item),
+    ...pub,
+    references: pub.references.map((r) => ({ id: r.id, role: r.role, kind: r.kind, ref: referenceLabel(r), ...('url' in r ? { url: r.url } : {}) })),
+  };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -86,35 +128,42 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
   return [
     {
       name: 'backlog_list',
-      description: 'List work items in backlog order (compact): item, title, status, agent, repo, attempts, pull request URL.',
+      description:
+        'List tickets in backlog order (compact): item, title, status (todo, in-progress, done), stage (the current step), outcome (done only), agent, repo, attempts, pull request URL, what needs an answer, and one workflow line.',
       shape: (z) => ({
-        status: zod(z).array(zod(z).enum(STATUSES)).optional().describe('Only items in these statuses.'),
-        limit: zod(z).number().int().min(1).max(100).optional().describe('At most this many items (default 50).'),
+        status: zod(z).array(zod(z).enum(STATUSES)).optional().describe('Only tickets in these statuses.'),
+        outcome: zod(z).array(zod(z).enum(OUTCOMES)).optional().describe('Only done tickets with these outcomes.'),
+        limit: zod(z).number().int().min(1).max(100).optional().describe('At most this many tickets (default 50).'),
       }),
       run: (a: Args) => {
         const wanted = Array.isArray(a.status) ? (a.status as ItemStatus[]) : null;
-        const items = deps.backlog.list().filter((i) => !wanted || wanted.includes(i.status));
-        return { items: items.slice(0, typeof a.limit === 'number' ? a.limit : 50).map(compact), total: items.length };
+        const outcomes = Array.isArray(a.outcome) ? (a.outcome as ItemOutcome[]) : null;
+        const items = deps.backlog
+          .list()
+          .filter((i) => (!wanted || wanted.includes(i.status)) && (!outcomes || (i.outcome !== null && outcomes.includes(i.outcome))));
+        return { items: items.slice(0, typeof a.limit === 'number' ? a.limit : 50).map((i) => compact(deps, i)), total: items.length };
       },
     },
     {
       name: 'backlog_get',
-      description: 'One work item in full, including its body and its latest result.',
+      description: 'One ticket in full: its body, latest result, workflow summary (the current round and its steps) and references.',
       shape: (z) => ({ item: itemRef(zod(z)) }),
-      run: (a: Args) => full(work.item(str(a.item))),
+      run: (a: Args) => full(deps, work.item(str(a.item))),
     },
     {
       name: 'backlog_create',
-      description: 'Create a work item. With an agent it is queued and starts when that agent has a free slot; without one it waits in the backlog.',
+      description: 'Create a ticket in Todo. With an agent its implement step is queued and starts when that agent has a free slot; without one it waits unassigned.',
       shape: (z) => ({
         title: zod(z).string().min(1).max(200),
         body: zod(z).string().max(64 * 1024).describe('What to do, in markdown: goal, scope, how to verify.'),
         agent: zod(z).string().max(64).optional().describe('An assigned agent (see agents_list).'),
         repo: zod(z).string().max(64).optional().describe('The repository directory; required to assign when there is more than one.'),
         position: positionSchema(zod(z)).optional(),
+        links: zod(z).array(zod(z).string().max(2048)).max(20).optional().describe('Related links: GitHub issues or pull requests (owner/name#12, a github.com URL) or https URLs.'),
       }),
       run: (a: Args) =>
         compact(
+          deps,
           work.create(
             {
               title: str(a.title),
@@ -122,6 +171,7 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
               agent: typeof a.agent === 'string' ? a.agent : null,
               repo: typeof a.repo === 'string' ? a.repo : null,
               position: position(deps, a.position),
+              ...(Array.isArray(a.links) ? { links: (a.links as unknown[]).filter((l): l is string => typeof l === 'string') } : {}),
             },
             'orchestrator',
           ),
@@ -138,6 +188,7 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
       }),
       run: (a: Args) =>
         compact(
+          deps,
           work.update(
             str(a.item),
             {
@@ -161,35 +212,35 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
     },
     {
       name: 'backlog_assign',
-      description: 'Assign a work item to an agent (queues it) or pass null to move it back to the backlog.',
+      description: 'Assign a Todo ticket to an agent (its implement step is queued) or pass null to unassign it. Tickets in progress or done keep their agent.',
       shape: (z) => ({ item: itemRef(zod(z)), agent: zod(z).string().max(64).nullable() }),
-      run: (a: Args) => compact(work.assign(str(a.item), typeof a.agent === 'string' ? a.agent : null, 'orchestrator')),
+      run: (a: Args) => compact(deps, work.assign(str(a.item), typeof a.agent === 'string' ? a.agent : null, 'orchestrator')),
     },
     {
       name: 'backlog_cancel',
       description: 'Cancel a work item, interrupting its worker if it is running.',
       shape: (z) => ({ item: itemRef(zod(z)), reason: zod(z).string().max(2000) }),
-      run: (a: Args) => compact(work.cancel(str(a.item), 'orchestrator', str(a.reason))),
+      run: (a: Args) => compact(deps, work.cancel(str(a.item), 'orchestrator', str(a.reason))),
     },
     {
       name: 'work_retry',
-      description: 'Queue a failed or cancelled work item again. Its worker continues in the same branch and conversation.',
+      description: 'Retry a failed or cancelled ticket: a new round queues its implement step. A ticket that had started continues in the same branch and conversation.',
       shape: (z) => ({ item: itemRef(zod(z)) }),
-      run: (a: Args) => compact(work.retry(str(a.item))),
+      run: (a: Args) => compact(deps, work.retry(str(a.item), 'orchestrator')),
     },
     {
       name: 'work_accept',
-      description: 'Accept a work item and move it to done. One that is queued, running or waiting stops its worker and drops follow-ups still queued.',
+      description: 'Accept a ticket as finished: it moves to done (accepted). One whose worker is queued or running stops it and drops follow-ups still queued.',
       shape: (z) => ({ item: itemRef(zod(z)), note: zod(z).string().max(2000).optional() }),
-      run: (a: Args) => compact(work.accept(str(a.item), typeof a.note === 'string' ? a.note : undefined)),
+      run: (a: Args) => compact(deps, work.accept(str(a.item), typeof a.note === 'string' ? a.note : undefined, 'orchestrator')),
     },
     {
       name: 'work_request_changes',
-      description: "Send a work item's worker a follow-up; the item is queued again and continues in its branch and conversation.",
+      description: "Send a ticket's worker a follow-up. A finished worker gets a new round and continues in its branch and conversation.",
       shape: (z) => ({ item: itemRef(zod(z)), message: zod(z).string().min(1).max(100 * 1024) }),
       run: async (a: Args) => {
         await work.followUp(str(a.item), str(a.message), 'orchestrator');
-        return compact(work.item(str(a.item)));
+        return compact(deps, work.item(str(a.item)));
       },
     },
     {
@@ -209,6 +260,18 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
           },
           'orchestrator',
         ),
+    },
+    {
+      name: 'ticket_link',
+      description: 'Add a related link to a ticket: a GitHub issue or pull request (owner/name#12, a github.com URL) or an https URL. Related links are shown only; Puck never pushes, polls or merges them.',
+      shape: (z) => ({ item: itemRef(zod(z)), ref: zod(z).string().min(1).max(2048) }),
+      run: (a: Args) => full(deps, work.link(str(a.item), str(a.ref))),
+    },
+    {
+      name: 'ticket_unlink',
+      description: "Remove a related link from a ticket, by the reference id backlog_get lists. The source issue and the delivery pull request are not removed by hand.",
+      shape: (z) => ({ item: itemRef(zod(z)), reference: zod(z).string().max(64) }),
+      run: (a: Args) => full(deps, work.unlink(str(a.item), str(a.reference))),
     },
     {
       name: 'work_read',
@@ -265,6 +328,7 @@ export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
       }),
       run: async (a: Args) =>
         compact(
+          deps,
           await deps.github.importIssue(
             str(a.repo),
             typeof a.number === 'number' ? a.number : 0,

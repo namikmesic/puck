@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonEvent, DaemonFrame, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
+import { addSnapshotPart, snapshotFromHead, type DaemonEvent, type DaemonFrame, type Snapshot, type SnapshotHead, type SnapshotPart, type WorkItem } from '../../src/harness/daemon-protocol';
 import type { TranscriptEntry } from '../../src/harness/transcript';
 import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
@@ -130,7 +130,8 @@ async function launch(): Promise<void> {
   await daemon.start();
 }
 
-function client() {
+/** A client of the socket. Most suites speak protocol 1, so they run through the daemon's protocol-1 projection. */
+function client(protocol = 1) {
   const socket = net.connect(root.paths.socket);
   sockets.push(socket);
   const frames: DaemonFrame[] = [];
@@ -145,7 +146,7 @@ function client() {
     }
   });
   const send = (frame: unknown) => socket.write(JSON.stringify(frame) + '\n');
-  send({ t: 'hello', protocol: 1, client: { app: 'test', build: 'x' }, since: null });
+  send({ t: 'hello', protocol, client: { app: 'test', build: 'x' }, since: null });
   let n = 0;
   async function raw(op: string, args: unknown = {}) {
     const id = `c${++n}`;
@@ -161,9 +162,24 @@ function client() {
     return defined(res);
   }
   async function cmd<T = unknown>(op: string, args: unknown = {}): Promise<T> {
+    if (op === 'snapshot.get' && protocol >= 2) return (await assembled()) as T;
     const res = await raw(op, args);
     if (!res.ok) throw new Error(`${op}: ${res.error.code}: ${res.error.message}`);
     return res.result as T;
+  }
+  /** Protocol 2's snapshot: the head, then every part. */
+  async function assembled(): Promise<Snapshot> {
+    const head = await raw('snapshot.get');
+    if (!head.ok) throw new Error(head.error.message);
+    const snap = snapshotFromHead(head.result as SnapshotHead);
+    let cursor = (head.result as SnapshotHead).partsCursor;
+    while (cursor) {
+      const part = await raw('snapshot.part', { cursor });
+      if (!part.ok) throw new Error(part.error.message);
+      addSnapshotPart(snap, part.result as SnapshotPart);
+      cursor = (part.result as SnapshotPart).partsCursor;
+    }
+    return snap;
   }
   const events = (): DaemonEvent[] => frames.flatMap((f) => (f.t === 'event' ? [f.ev] : []));
   /** Several commands in one write, so the daemon accepts them in one turn. */
@@ -562,6 +578,7 @@ describe('work items through the daemon', () => {
 
   it('a second delete while the first still holds the item does not emit it again', async () => {
     const c = client();
+    const v2 = client(2);
     await c.cmd('item.create', { title: 'Gone', agent: 'implementer' });
     const reviewed = await until(c, 1, 'review');
     await c.cmd('item.accept', { itemId: reviewed.id });
@@ -570,7 +587,10 @@ describe('work items through the daemon', () => {
       { op: 'item.delete', args: { itemId: reviewed.id } },
     ]);
     expect(results.map((r) => r.ok)).toEqual([true, true]);
-    expect(c.events().filter((e) => e.kind === 'item.removed' && e.itemId === reviewed.id)).toHaveLength(1);
+    await vi.waitFor(() => expect(v2.events().some((e) => e.kind === 'item.removed')).toBe(true));
+    // One deletion: its tombstone and its removal, once each.
+    expect(v2.events().filter((e) => e.kind === 'item.removed' && e.itemId === reviewed.id)).toHaveLength(1);
+    expect(v2.events().filter((e) => e.kind === 'ticket.removed' && e.itemId === reviewed.id)).toHaveLength(1);
     expect((await c.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === reviewed.id)).toBeUndefined();
   });
 });
@@ -688,6 +708,8 @@ describe('orchestrator tools', () => {
       'work_accept',
       'work_request_changes',
       'work_publish',
+      'ticket_link',
+      'ticket_unlink',
       'work_read',
       'answer_worker',
       'escalate_to_user',
@@ -700,13 +722,23 @@ describe('orchestrator tools', () => {
       'environment_info',
     ]);
     const created = (await tool('backlog_create').run({ title: 'Plan', body: 'Write the plan.' })) as { item: string; status: string };
-    expect(created).toMatchObject({ item: 'W-1', status: 'backlog' });
+    expect(created).toMatchObject({ item: 'W-1', status: 'todo', stage: null, outcome: null });
+    expect(created).not.toHaveProperty('workflow');
     expect((await item(c, 1)).createdBy).toBe('orchestrator');
     await tool('backlog_create').run({ title: 'First', body: '', position: { before: 'W-1' } });
     expect(((await tool('backlog_list').run({})) as { items: Array<{ item: string }> }).items.map((i) => i.item)).toEqual(['W-2', 'W-1']);
     expect(() => tool('backlog_assign').run({ item: 'W-1', agent: 'nobody' })).toThrow(/not assigned in this environment/);
     await tool('backlog_assign').run({ item: 'W-1', agent: 'implementer' });
     await until(c, 1, 'review');
+    // Tool results carry the three-state fields, and one workflow line.
+    const listed = (await tool('backlog_list').run({ status: ['in-progress'] })) as { items: Array<Record<string, unknown>> };
+    expect(listed.items).toEqual([expect.objectContaining({ item: 'W-1', status: 'in-progress', stage: 'merge', outcome: null, workflow: 'round 1 · merge: waiting for the user to accept or merge' })]);
+    const got = tool('backlog_get').run({ item: 'W-1' }) as { workflow: { steps: Array<{ kind: string; state: string }> } };
+    expect(got.workflow.steps.map((s) => [s.kind, s.state])).toEqual([
+      ['decompose', 'done'],
+      ['implement', 'done'],
+      ['merge', 'waiting'],
+    ]);
     expect(tool('work_read').run({ item: 'W-1' })).toMatch(/\[system\] You are working on work item W-1: Plan[\s\S]*\[assistant\] Done\./);
     await expect(Promise.resolve().then(() => tool('work_publish').run({ item: 'W-1' }))).rejects.toThrow(/Publishing is manual/);
     expect(tool('agents_list').run({})).toEqual({

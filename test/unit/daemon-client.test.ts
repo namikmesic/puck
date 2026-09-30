@@ -144,7 +144,7 @@ describe('daemon client', () => {
     client.start();
     await until(() => channels.length === 1 && channels[0].sent.length > 0);
     const c = channels[0];
-    expect(c.sent[0]).toEqual({ t: 'hello', protocol: 1, client: { app: 'puck', build: 't' }, since: 5 });
+    expect(c.sent[0]).toEqual({ t: 'hello', protocol: 2, client: { app: 'puck', build: 't' }, since: 5 });
     c.frame(welcome('events', 8));
     c.frame(ev(5, status)); // overlap: already applied
     c.frame(ev(6, status));

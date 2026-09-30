@@ -74,7 +74,7 @@ describe('state format migrations', () => {
   it('a fresh volume starts at the current format', () => {
     const r = migrateState(dir, opts);
     expect(r).toMatchObject({ ok: true, from: null, to: FORMAT_VERSION });
-    expect(readJsonFile(path.join(dir, 'meta.json'))).toEqual({ formatVersion: FORMAT_VERSION, daemonVersion: '0.0.1+abc', createdAt: 1000 });
+    expect(readJsonFile(path.join(dir, 'meta.json'))).toEqual({ formatVersion: FORMAT_VERSION, daemonVersion: '0.0.1+abc', createdAt: 1000, formatBoundary: 0 });
   });
 
   it('runs ordered migrations over the store files and records the new format', () => {

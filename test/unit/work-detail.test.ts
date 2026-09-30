@@ -7,11 +7,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { nextStatus, TRANSITIONS, type ItemTrigger } from '../../src/harness/item-transitions';
-import type { ItemStatus, PullView, WorkItem } from '../../src/harness/daemon-protocol';
+import { allows, type TicketTrigger } from '../../src/harness/item-transitions';
+import type { PullView, WorkItem } from '../../src/harness/daemon-protocol';
 import { createInstanceStore } from '../../src/renderer/instance-store';
 import { initSessionView } from '../../src/renderer/session-view';
-import { compareUrl, initWorkDetail, ITEM_ACTIONS, type ItemAction } from '../../src/renderer/work-detail';
+import { compareUrl, initWorkDetail, itemActions, statusLabel, type ItemAction } from '../../src/renderer/work-detail';
 import { ENV, item, ORCH, session, snap, WORKER } from './v2-fixtures';
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -23,14 +23,15 @@ const RESULT = {
   uncommitted: ['notes.txt'],
   interrupted: false,
   endedAt: 5,
+  head: 'abcdef1234567',
 };
 
 function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: string; dir: string }[] } = {}) {
   document.body.innerHTML = `
     <button id="close"></button><span id="wid"></span><h2 id="title"></h2>
     <span id="status"></span><div id="meta"></div><div id="actions"></div><div id="banner" class="hidden"></div>
-    <div id="tabs"><button data-tab="conversation"></button><button data-tab="changes"></button><button data-tab="details"></button></div>
-    <div id="conv"><div id="thread"></div><div id="cz"></div></div><div id="changes"></div><div id="details"></div>`;
+    <div id="tabs"><button data-tab="conversation"></button><button data-tab="changes"></button><button data-tab="workflow"></button><button data-tab="details"></button></div>
+    <div id="conv"><div id="thread"></div><div id="cz"></div></div><div id="changes"></div><div id="workflow"></div><div id="details"></div>`;
   const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
   const store = createInstanceStore({ requestResync: () => undefined });
   store.reset(ENV);
@@ -78,6 +79,7 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
       thread: byId('thread'),
       composerZone: byId('cz'),
       changes: byId('changes'),
+      workflow: byId('workflow'),
       details: byId('details'),
     },
     store,
@@ -94,30 +96,35 @@ function setup(items: WorkItem[], over: { pull?: PullView; repos?: { github: str
   return { store, wd, daemon, composer, onTab, close, openExternal, say, byId, actions, action, history, sessions };
 }
 
-const TRIGGER: Partial<Record<ItemAction, ItemTrigger>> = {
+const TRIGGER: Partial<Record<ItemAction, TicketTrigger>> = {
   accept: 'accept',
-  'request-changes': 'follow-up',
   retry: 'retry',
   cancel: 'cancel',
   delete: 'delete',
 };
 
+const PLACES = ['backlog', 'queued', 'running', 'needs-input', 'review', 'done', 'failed', 'cancelled'] as const;
+
 describe('work detail', () => {
-  it('offers only actions the daemon state machine allows', () => {
-    const statuses = [...new Set(TRANSITIONS.flatMap((t) => t.from))] as ItemStatus[];
-    for (const status of statuses) {
-      for (const action of ITEM_ACTIONS[status]) {
+  it('offers only actions the ticket table allows', () => {
+    for (const place of PLACES) {
+      const it = item({ status: place });
+      const state = { status: it.status, outcome: it.outcome };
+      for (const action of itemActions(it)) {
         const trigger = TRIGGER[action];
-        if (trigger) expect(() => nextStatus(status, trigger), `${action} from ${status}`).not.toThrow();
+        if (trigger) expect(allows(state, trigger), `${action} on ${place}`).toBe(true);
       }
-      // Cancel and Delete show wherever the state machine allows them.
+      // Cancel, Delete and Retry show wherever the ticket table allows them.
       for (const [action, trigger] of [['cancel', 'cancel'], ['delete', 'delete'], ['retry', 'retry']] as const) {
-        const allowed = TRANSITIONS.some((t) => t.trigger === trigger && t.from.includes(status));
-        expect(ITEM_ACTIONS[status].includes(action), `${action} on ${status}`).toBe(allowed);
+        expect(itemActions(it).includes(action), `${action} on ${place}`).toBe(allows(state, trigger));
       }
     }
-    expect(ITEM_ACTIONS.running).toContain('stop');
-    expect(ITEM_ACTIONS.review).toEqual(['accept', 'request-changes', 'publish', 'cancel']);
+    expect(itemActions(item({ status: 'running' }))).toEqual(['stop', 'cancel']);
+    // The worker finished: the merge step waits for you.
+    expect(itemActions(item({ status: 'review' }))).toEqual(['accept', 'request-changes', 'publish', 'cancel']);
+    expect(itemActions(item({ status: 'failed' }))).toEqual(['retry', 'delete']);
+    expect(itemActions(item({ status: 'done' }))).toEqual(['delete']);
+    expect(PLACES.map((p) => statusLabel(item({ status: p })))).toEqual(['Todo', 'Todo', 'In progress', 'In progress', 'In progress', 'Done · accepted', 'Done · failed', 'Done · cancelled']);
   });
 
   it('shows the header and runs review actions', async () => {
@@ -127,7 +134,7 @@ describe('work detail', () => {
     expect(byId('wid').textContent).toBe('W-12');
     expect(byId('title').textContent).toBe('Fix login redirect');
     expect(byId('status').className).toBe('wd-status tone-on');
-    expect(byId('status').textContent).toBe('In review');
+    expect(byId('status').textContent).toBe('In progress');
     expect(byId('meta').querySelector('.wd-repo')?.textContent).toBe('web');
     expect(byId('meta').querySelector('.wd-branch')?.textContent).toBe('puck/W-12-fix-login');
     expect(byId('meta').textContent).toContain('Attempt 2');
@@ -157,7 +164,7 @@ describe('work detail', () => {
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.cancel', { itemId: running.id });
     wd.show('itm_2', 'conversation');
-    expect(store.item('itm_2')?.status).toBe('failed');
+    expect(store.item('itm_2')).toMatchObject({ status: 'done', outcome: 'failed' });
     action('retry').click();
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.retry', { itemId: 'itm_2' });
@@ -418,7 +425,7 @@ describe('work detail', () => {
     repo.dispatchEvent(new Event('change'));
     await flush();
     expect(daemon).toHaveBeenCalledWith('item.update', { itemId: it0.id, repo: 'api' });
-    store.applyEvent(3, { kind: 'item.upsert', item: { ...it0, status: 'running' } }, ENV);
+    store.applyEvent(3, { kind: 'item.upsert', item: item({ number: 4, title: 'Old', body: 'x', status: 'running' }) }, ENV);
     wd.render();
     expect((host.querySelector('[data-field="body"]') as HTMLTextAreaElement).disabled).toBe(true);
   });
@@ -438,11 +445,11 @@ describe('work detail', () => {
     option.click();
     await flush();
     expect(daemon).toHaveBeenCalledWith('ask.answer', { sessionId: WORKER, askId: 'a1', answers: { 'Which file?': 'README' } });
-    store.applyEvent(4, { kind: 'item.upsert', item: { ...waiting, pendingAsk: { askId: 'a1', routedTo: 'user' } } }, ENV);
+    store.applyEvent(4, { kind: 'item.upsert', item: item({ number: 5, status: 'needs-input', sessionId: WORKER, pendingAsk: { askId: 'a1', routedTo: 'user' } }) }, ENV);
     wd.render();
     // The thread has no card for it, so the banner keeps answering in place.
     expect(banner.querySelector('.ask')).not.toBeNull();
-    store.applyEvent(5, { kind: 'item.upsert', item: { ...waiting, status: 'running', pendingAsk: null } }, ENV);
+    store.applyEvent(5, { kind: 'item.upsert', item: item({ number: 5, status: 'running', sessionId: WORKER }) }, ENV);
     wd.render();
     expect(banner.classList.contains('hidden')).toBe(true);
   });
@@ -471,6 +478,86 @@ describe('work detail', () => {
     // Elsewhere the banner carries the card itself.
     wd.show(waiting.id, 'details');
     expect(banner.querySelector('.ask')).not.toBeNull();
+  });
+
+  it('shows the Workflow tab: the round’s implement and merge steps, the next step, and its references', async () => {
+    const finished = item({ number: 7, status: 'review', sessionId: WORKER, result: RESULT, source: { kind: 'github-issue', repo: 'octo/web', number: 12, url: 'https://github.com/octo/web/issues/12', updatedAt: 1 } });
+    const withLink = { ...finished, references: [...finished.references, { id: 'ref_01J0000000000000000000000R', role: 'related' as const, kind: 'url' as const, url: 'https://example.com/spec', label: null }] };
+    const { wd, byId, daemon, onTab, openExternal } = setup([withLink]);
+    const step = (over: Record<string, unknown>) => ({
+      id: 'stp_x',
+      kind: 'implement',
+      round: 1,
+      state: 'done',
+      result: 'passed',
+      agent: 'implementer',
+      sessionId: WORKER,
+      reviewId: null,
+      task: null,
+      purpose: 'task',
+      group: 1,
+      after: null,
+      logicalId: 'stp_x',
+      attempt: 1,
+      retryOf: null,
+      work: { head: 'abcdef1234567', commits: 1, summary: 'Usage' },
+      queuedAt: 1,
+      startedAt: 1_000,
+      finishedAt: 4_000,
+      detail: '',
+      ...over,
+    });
+    daemon.mockImplementation(async (op: string) => {
+      if (op === 'item.workflow') {
+        return {
+          roundsTotal: 1,
+          round: { round: 1, roundId: 'rnd_1', purpose: 'task', headSha: null, gate: 'pending', settledGate: null, outcome: 'open', startedAt: 1, settledAt: null },
+          steps: [step({ id: 'stp_d', kind: 'decompose', result: 'skipped', agent: null, work: null, group: 0 }), step({}), step({ id: 'stp_m', kind: 'merge', state: 'waiting', result: null, agent: null, work: null, group: 7, startedAt: null, finishedAt: null })],
+          stepsCursor: null,
+          reviews: [],
+          decisions: [],
+          findingsTotal: 0,
+        };
+      }
+      return {};
+    });
+    wd.show(withLink.id, 'workflow');
+    await flush();
+    await flush();
+    const host = byId('workflow');
+    expect(daemon).toHaveBeenCalledWith('item.workflow', { itemId: withLink.id });
+    expect(host.querySelector('.wd-flow-policy')?.textContent).toContain('This environment has no delivery block');
+    expect(host.querySelector('.wd-flow-next')?.textContent).toContain('Finished: accept it');
+    // A skipped plan step is not shown; implement and merge are.
+    expect([...host.querySelectorAll('.wd-step .wd-step-kind')].map((n) => n.textContent)).toEqual(['Implement', 'Merge']);
+    expect([...host.querySelectorAll('.wd-step .wd-step-detail')].map((n) => n.textContent)).toEqual(['Passed', 'Waiting for you to accept or merge']);
+    expect(host.querySelector('.wd-step-work')?.textContent).toBe('1 commit · abcdef1');
+    expect(host.querySelector('.wd-step-time')?.textContent).toBe('3s');
+    ([...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Open conversation') as HTMLButtonElement).click();
+    expect(onTab).toHaveBeenCalledWith('conversation');
+    // References: the source issue, a related link that can be removed, and Add link.
+    expect([...host.querySelectorAll('.wd-ref')].map((r) => r.querySelector('.wd-ref-role')?.textContent)).toEqual(['Source issue', 'Related']);
+    (host.querySelector('.wd-ref.role-related .wd-ref-link') as HTMLButtonElement).click();
+    expect(openExternal).toHaveBeenCalledWith('https://example.com/spec');
+    (host.querySelector('.wd-ref-remove') as HTMLButtonElement).click();
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.unlink', { itemId: withLink.id, referenceId: 'ref_01J0000000000000000000000R' });
+    const input = host.querySelector('.wd-ref-input') as HTMLInputElement;
+    input.value = 'octo/web#9';
+    (host.querySelector('.wd-ref-add') as HTMLFormElement).dispatchEvent(new Event('submit', { cancelable: true }));
+    await flush();
+    expect(daemon).toHaveBeenCalledWith('item.link', { itemId: withLink.id, ref: 'octo/web#9' });
+  });
+
+  it('says nothing has started on the Workflow tab of a ticket without steps', async () => {
+    const todo = item({ number: 8, status: 'backlog' });
+    const { wd, byId, daemon } = setup([todo]);
+    daemon.mockImplementation(async (op: string) => (op === 'item.workflow' ? { roundsTotal: 0, round: null, steps: [], stepsCursor: null, reviews: [], decisions: [], findingsTotal: 0 } : {}));
+    wd.show(todo.id, 'workflow');
+    await flush();
+    await flush();
+    expect(byId('workflow').textContent).toContain('Nothing has started. Assign an agent, or plan the ticket.');
+    expect(byId('workflow').textContent).toContain('No links. Add an issue, a pull request or a URL.');
   });
 
   it('builds compare links only once published', () => {

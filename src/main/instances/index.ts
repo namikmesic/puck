@@ -15,7 +15,7 @@
  */
 
 import type { DaemonEventPayload, InstanceEvent, InstanceInfo, InstanceOp, InstanceUpdate, Pin, StartSpec } from '../../harness/bridge';
-import type { DaemonEvent, InstanceState, Op, OpArgs, OpResult, RendererOp } from '../../harness/daemon-protocol';
+import type { ClientResult, DaemonEvent, InstanceState, Op, OpArgs, RendererOp } from '../../harness/daemon-protocol';
 import type { ResolvedEnvironment } from '../../harness/definitions/types';
 import type { InstanceStage } from '../../harness/runner-protocol';
 import { app } from 'electron';
@@ -312,9 +312,9 @@ export function resumeCurrent(): void {
 
 /* ---------- Commands ---------- */
 
-export function daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<OpResult<K>> {
+export function daemon<K extends RendererOp>(envId: string, op: K, args: OpArgs<K>): Promise<ClientResult<K>> {
   if (!attached || attached.envId !== envId) return Promise.reject(new Error('Open this environment first.'));
-  return attached.cmd(op as Op, args) as Promise<OpResult<K>>;
+  return attached.cmd(op as Op, args) as Promise<ClientResult<K>>;
 }
 
 function indexOf(envId: string) {

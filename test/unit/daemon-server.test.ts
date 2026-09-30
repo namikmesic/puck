@@ -165,6 +165,7 @@ describe('puckd server (in process)', () => {
       agents: { implementer: { running: 0, max: 2 }, reviewer: { running: 0, max: 1 } },
       workers: { running: 0, max: 3 },
       paused: false,
+      verifying: 0,
     });
     expect(snap.result.head).toBe(welcome.head);
   });
@@ -741,6 +742,10 @@ describe('daemon wire frame limit', () => {
       dispatch: async () => {
         throw new Error('an oversized frame must not be dispatched');
       },
+      snapshotV1: () => {
+        throw new Error('no snapshot here');
+      },
+      projection: () => ({ item: () => null, capacity: () => ({ agents: {}, workers: { running: 0, max: 0 }, paused: false }), formatBoundary: 0 }),
     });
     await server.listen();
     return server;
@@ -791,6 +796,10 @@ describe('daemon wire frame limit', () => {
         seen.push(op);
         return {};
       },
+      snapshotV1: () => {
+        throw new Error('no snapshot here');
+      },
+      projection: () => ({ item: () => null, capacity: () => ({ agents: {}, workers: { running: 0, max: 0 }, paused: false }), formatBoundary: 0 }),
     });
     await server.listen();
     try {

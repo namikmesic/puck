@@ -20,7 +20,7 @@ import './styles/flows.css';
 import './styles/chat.css';
 import './styles/overlays.css';
 import type { HarnessProviderInfo, IntegrationProviderInfo, ProviderInfo, PuckBridge, RunnersState } from './harness/bridge';
-import type { OpArgs, OpResult, RendererOp } from './harness/daemon-protocol';
+import type { ClientResult, OpArgs, RendererOp } from './harness/daemon-protocol';
 import { initBoard } from './renderer/board';
 import { liveWork } from './renderer/board-model';
 import { initCommandPalette, type PaletteCommand } from './renderer/command-palette';
@@ -60,14 +60,9 @@ const storage = ((): Storage | null => {
 const UPDATE_CHECK_MS = 15 * 60_000;
 
 const STATUS_WORD: Record<string, string> = {
-  backlog: 'backlog',
-  queued: 'ready',
-  running: 'running',
-  'needs-input': 'needs input',
-  review: 'in review',
+  todo: 'todo',
+  'in-progress': 'in progress',
   done: 'done',
-  failed: 'failed',
-  cancelled: 'cancelled',
 };
 
 function boot(bridge: PuckBridge): void {
@@ -95,7 +90,7 @@ function boot(bridge: PuckBridge): void {
     return id ? store.instance(id) : undefined;
   };
 
-  function daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<OpResult<K>> {
+  function daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<ClientResult<K>> {
     const envId = store.envId();
     if (!envId) return Promise.reject(new Error('Open an environment first.'));
     return bridge.daemon(envId, op, args);
@@ -123,7 +118,7 @@ function boot(bridge: PuckBridge): void {
     },
     describeRef: (ref) => {
       const item = store.findItem(ref);
-      return item ? `${ref} · ${item.title} · ${STATUS_WORD[item.status] ?? item.status}` : null;
+      return item ? `${ref} · ${item.title} · ${item.status === 'done' && item.outcome ? `done (${item.outcome})` : (STATUS_WORD[item.status] ?? item.status)}` : null;
     },
     onChild: (title, host) => {
       if (host === wdThread) {
@@ -172,8 +167,12 @@ function boot(bridge: PuckBridge): void {
       const item = nav.itemId ? store.item(nav.itemId) : undefined;
       const s = item?.sessionId ? store.session(item.sessionId) : undefined;
       let gate = composerGate(current(), store.state()?.instance ?? null, item?.agent ?? null);
-      if (gate.ready && item && !['running', 'needs-input', 'review', 'queued'].includes(item.status)) {
-        gate = { ready: false, placeholder: `The item is ${STATUS_WORD[item.status] ?? item.status}: retry it to work on it again.`, reason: `The item is ${item.status}.` };
+      if (gate.ready && item && item.status !== 'in-progress') {
+        const word = item.status === 'done' && item.outcome ? `done (${item.outcome})` : (STATUS_WORD[item.status] ?? item.status);
+        gate = { ready: false, placeholder: `The ticket is ${word}: retry it to work on it again.`, reason: `The ticket is ${word}.` };
+      }
+      if (gate.ready && (store.state()?.daemon.protocol ?? 2) < 2) {
+        gate = { ready: false, placeholder: "This environment's daemon predates the three-column board. Update it to work here.", reason: 'The daemon predates the three-column board.' };
       }
       return { sessionId: s?.id ?? null, running: s?.status === 'running', gate, who: 'the worker' };
     },
@@ -224,6 +223,7 @@ function boot(bridge: PuckBridge): void {
       thread: wdThread,
       composerZone: byId('wd-composer-zone'),
       changes: byId('wd-changes'),
+      workflow: byId('wd-workflow'),
       details: byId('wd-details'),
     },
     store,

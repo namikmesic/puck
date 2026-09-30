@@ -1,13 +1,17 @@
 /**
- * The scheduler: starts queued work items in backlog order whenever the
- * assigned agent has a free slot.
+ * The scheduler: starts queued steps whenever their agent has a free slot.
  *
- * Selection is a pure function of the backlog: walk the order from the
- * top; a `queued` item starts when its agent's running count (items in
- * `running` or `needs-input`) is below the assignment's `maxParallel` and
- * the environment's total is below `maxWorkers`. Scanning continues past
- * an item that cannot start, so one busy agent never blocks another, and
- * because the order is total the choice is deterministic.
+ * Selection is a pure function of the steps that hold or want a slot
+ * (implement, checks and review steps not done): the `queued` ones are
+ * walked by `(tier, order)` — verification of work already done first
+ * (tier 0: checks and reviews, by queue time), then implement steps of
+ * tickets already in progress (tier 1: fix rounds, retries, restarts),
+ * then those of Todo tickets (tier 2), each by backlog position. A step
+ * starts when its agent's running count (steps for which `stepHoldsSlot`
+ * is true) is below the assignment's `maxParallel` and the environment's
+ * total is below `maxWorkers`. Scanning continues past a step that cannot
+ * start, so one busy agent never blocks another, and because the order is
+ * total the choice is deterministic.
  *
  * Ticks are requested on every event that can free or create work (item
  * create, assign, move and retry; a released slot; a definition applied;
@@ -16,56 +20,73 @@
  * not ready, while it is paused, or while a reprovision waits.
  */
 
-import type { Capacity, ItemStatus } from '../harness/daemon-protocol';
-import { holdsSlot } from './items';
+import type { Capacity, StepState } from '../harness/daemon-protocol';
+import { stepHoldsSlot } from '../harness/workflow';
 import type { Logger } from './log';
 
 export const SCHEDULER_INTERVAL_MS = 30_000;
 
+export interface SchedulerStep {
+  id: string;
+  itemId: string;
+  kind: 'implement' | 'checks' | 'review';
+  state: StepState;
+  agent: string | null;
+  /** 0: checks and review; 1: implement of an in-progress ticket; 2: implement of a todo ticket. */
+  tier: 0 | 1 | 2;
+  /** Tier 0: queuedAt; tiers 1 and 2: the ticket's backlog position. */
+  order: number;
+}
+
 export interface SchedulerView {
-  /** Items in backlog order. */
-  items: ReadonlyArray<{ id: string; status: ItemStatus; agent: string | null }>;
-  /** Assigned agents and their maxParallel. */
+  /** Steps that hold or want a slot: implement, checks and review steps not done. */
+  steps: ReadonlyArray<SchedulerStep>;
+  /** Assigned agents (workers and reviewers) and their maxParallel. */
   assignments: Readonly<Record<string, number>>;
   maxWorkers: number;
 }
 
-/** Running counts per assigned agent and in total (slot-holding items only). */
-export function runningCounts(view: SchedulerView): { perAgent: Record<string, number>; total: number } {
+/** Running counts per agent and in total (slot-holding steps only; a checks step counts in the total only). */
+export function runningCounts(view: SchedulerView): { perAgent: Record<string, number>; total: number; verifying: number } {
   const perAgent: Record<string, number> = {};
   let total = 0;
-  for (const item of view.items) {
-    if (!holdsSlot(item.status)) continue;
+  let verifying = 0;
+  for (const step of view.steps) {
+    if (!stepHoldsSlot(step)) continue;
     total += 1;
-    if (item.agent) perAgent[item.agent] = (perAgent[item.agent] ?? 0) + 1;
+    if (step.kind !== 'implement') verifying += 1;
+    if (step.agent && step.kind !== 'checks') perAgent[step.agent] = (perAgent[step.agent] ?? 0) + 1;
   }
-  return { perAgent, total };
+  return { perAgent, total, verifying };
 }
 
-/** The items to start now, in the order they start. */
+/** The steps to start now, in the order they start. */
 export function pickDispatches(view: SchedulerView): string[] {
   const { perAgent, total } = runningCounts(view);
   let running = total;
   const picked: string[] = [];
-  for (const item of view.items) {
+  const queued = view.steps.filter((s) => s.state === 'queued').sort((a, b) => a.tier - b.tier || a.order - b.order);
+  for (const step of queued) {
     if (running >= view.maxWorkers) break;
-    if (item.status !== 'queued' || !item.agent) continue;
-    const max = view.assignments[item.agent];
-    if (max === undefined) continue; // no longer assigned in this environment
-    if ((perAgent[item.agent] ?? 0) >= max) continue;
-    perAgent[item.agent] = (perAgent[item.agent] ?? 0) + 1;
+    if (step.kind !== 'checks') {
+      if (!step.agent) continue;
+      const max = view.assignments[step.agent];
+      if (max === undefined) continue; // no longer assigned in this environment
+      if ((perAgent[step.agent] ?? 0) >= max) continue;
+      perAgent[step.agent] = (perAgent[step.agent] ?? 0) + 1;
+    }
     running += 1;
-    picked.push(item.id);
+    picked.push(step.id);
   }
   return picked;
 }
 
 export function capacityOf(view: SchedulerView | null, paused: boolean): Capacity {
   const agents: Capacity['agents'] = {};
-  if (!view) return { agents, workers: { running: 0, max: 0 }, paused };
-  const { perAgent, total } = runningCounts(view);
+  if (!view) return { agents, workers: { running: 0, max: 0 }, paused, verifying: 0 };
+  const { perAgent, total, verifying } = runningCounts(view);
   for (const [agent, max] of Object.entries(view.assignments)) agents[agent] = { running: perAgent[agent] ?? 0, max };
-  return { agents, workers: { running: total, max: view.maxWorkers }, paused };
+  return { agents, workers: { running: total, max: view.maxWorkers }, paused, verifying };
 }
 
 export interface Timers {
@@ -91,12 +112,12 @@ export const realTimers: Timers = {
 };
 
 export interface SchedulerDeps {
-  /** The backlog and assignments now; null before a definition exists. */
+  /** The steps and assignments now; null before a definition exists. */
   view(): SchedulerView | null;
   /** True while the environment is ready and no reprovision waits. */
   canRun(): boolean;
-  /** Start one item. Must move it out of `queued` before returning. */
-  dispatch(itemId: string): void;
+  /** Start one step. Must move it out of `queued` before returning. */
+  start(stepId: string): void;
   log: Logger;
   timers?: Timers;
   intervalMs?: number;
@@ -149,18 +170,18 @@ export class Scheduler {
     }, 0);
   }
 
-  /** Start whatever can start now. Returns the items started. */
+  /** Start whatever can start now. Returns the steps started. */
   tick(): string[] {
     if (this.paused || !this.deps.canRun()) return [];
     const view = this.deps.view();
     if (!view) return [];
     const started: string[] = [];
-    for (const itemId of pickDispatches(view)) {
+    for (const stepId of pickDispatches(view)) {
       try {
-        this.deps.dispatch(itemId);
-        started.push(itemId);
+        this.deps.start(stepId);
+        started.push(stepId);
       } catch (err) {
-        this.deps.log.error('scheduler.dispatch-failed', err, { itemId });
+        this.deps.log.error('scheduler.dispatch-failed', err, { stepId });
       }
     }
     return started;

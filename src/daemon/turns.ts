@@ -205,7 +205,7 @@ export class Turns {
     return this.list().find((s) => s.kind === 'orchestrator' && s.status !== 'closed') ?? null;
   }
 
-  create(init: { kind: SessionKind; agent: string; harness: string; cwd: string; itemId?: string }): SessionRecord {
+  create(init: { kind: SessionKind; agent: string; harness: string; cwd: string; itemId?: string; stepId?: string }): SessionRecord {
     const at = this.now();
     const session: SessionRecord = {
       id: newId('ses', at),
@@ -213,6 +213,7 @@ export class Turns {
       agent: init.agent,
       harness: init.harness,
       ...(init.itemId ? { itemId: init.itemId } : {}),
+      ...(init.stepId ? { stepId: init.stepId } : {}),
       cwd: init.cwd,
       status: 'idle',
       queue: [],
@@ -223,10 +224,33 @@ export class Turns {
       lastActiveAt: at,
     };
     this.deps.sessions.get()[session.id] = session;
-    this.deps.sessions.save();
+    // Durable before a journaled ticket names it (the ticket's session is recorded next).
+    this.deps.sessions.commit();
     this.deps.log.info('session.create', { sessionId: session.id, kind: session.kind, agent: session.agent });
     this.upsert(session);
     return session;
+  }
+
+  /** A worker session works for another implement step now (a new round, a retry). */
+  bindStep(sessionId: string, stepId: string): void {
+    const session = this.get(sessionId);
+    if (!session || session.stepId === stepId) return;
+    session.stepId = stepId;
+    this.deps.sessions.save();
+  }
+
+  /**
+   * The texts a session holds as input: queued, handed to the running
+   * turn, or recorded in the transcript at or after `since`. Boot recovery
+   * compares journaled step inputs against it.
+   */
+  inputTexts(sessionId: string, since: number): string[] {
+    const session = this.get(sessionId);
+    if (!session) return [];
+    const texts = (this.queues.get(sessionId) ?? session.queue).map((q) => q.text);
+    for (const q of session.handoff?.inputs ?? []) texts.push(q.text);
+    for (const entry of this.deps.transcripts.get(sessionId).log) if (entry.kind === 'user' && entry.ts >= since) texts.push(entry.text);
+    return texts;
   }
 
   close(sessionId: string): void {

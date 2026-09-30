@@ -1,54 +1,66 @@
 /**
- * The Board view: the environment's work items as a Kanban board, one
- * column per stage of the item state machine (see board-model.ts).
+ * The Board view: the environment's tickets in three columns, Todo, In
+ * progress and Done (see board-model.ts). Every step of a ticket happens
+ * inside its card.
  *
  * - Cards: `W-n`, the title, the agent, the repository when the
- *   environment has more than one, and the status signals: a question
- *   waiting (gold, prominent), the running clock and latest tool call, the
- *   queue position, attempts, the diff and the pull request with its CI
- *   state, the failure or cancel reason. A click or Enter opens the item
- *   in the side sheet; the open item's card is highlighted.
- * - "…" (or Shift+F10 on a focused card) opens the actions the state
- *   machine allows: Assign (one entry per agent, or only the session's
- *   agent once a session exists), Unassign (a queued item with no session),
- *   Stop, Accept, Publish, Retry, Cancel and Delete. Delete, and cancelling
- *   started work, arm on the first click.
+ *   environment has more than one, and the signals: the stage line (a
+ *   question for you, gold and prominent; the running clock and latest
+ *   tool call; the queue position; waiting for you to accept or merge),
+ *   the gold halo and a badge with the count of asks routed to you,
+ *   attempts, the diff, the pull request with its CI state, a Done card's
+ *   outcome chip, the failure or cancel reason. A click or Enter opens the
+ *   ticket in the side sheet; the open ticket's card is highlighted.
+ * - "…" (or Shift+F10 on a focused card) opens `cardActions`: Assign (one
+ *   entry per agent, or only the session's agent once a session exists),
+ *   Stop, Publish, Accept, Retry, Cancel and Delete. Delete, and
+ *   cancelling a started ticket, arm on the first click.
  * - Keyboard: one tab stop for the cards; arrows move between cards and
- *   columns, Home and End jump within a column, Alt+↑/↓ reorders Backlog
- *   and Ready.
- * - Drag and drop only where a transition exists: reorder within Backlog
- *   or Ready, Backlog → Ready assigns (an agent picker when several could
- *   take it), Ready → Backlog unassigns an item that has no session yet.
- *   While dragging, the columns that accept the card are outlined and the rest dim.
- * - Closed (failed and cancelled) is a narrow rail with its counts until
- *   expanded; Done shows its latest 20 until "Show all".
+ *   columns, Home and End jump within a column, Alt+↑/↓ reorders Todo.
+ * - Drag only reorders within Todo. While dragging, Todo is outlined and
+ *   the rest dim.
+ * - Done has a filter with counts: Delivered (the default), Failed,
+ *   Cancelled, All, remembered per environment; the Failed count shows in
+ *   red even while filtered out. Done shows its latest 20 until "Show all".
+ *   In progress can be narrowed to the tickets that need you (the Chat
+ *   view's "+N waiting").
  * - The header: agent capacity, the paused scheduler with Resume, Import
  *   issue (a search popover over the environment's repositories, or
  *   `owner/name#12` and issue URLs) and New item (⌘N: a title field atop
- *   Backlog; Enter adds, ⌘Enter adds and opens).
+ *   Todo; Enter adds, ⌘Enter adds and opens). An environment whose daemon
+ *   predates the three-column board is read-only.
  *
  * Context in, controller out; no DOM lookups.
  */
 
-import type { IssueHit, ItemPosition, OpArgs, OpResult, RendererOp, WorkItem } from '../harness/daemon-protocol';
+import type { ClientResult, IssueHit, ItemPosition, OpArgs, RendererOp, WorkItem } from '../harness/daemon-protocol';
 import { formatElapsed } from '../harness/lifecycle';
+import { deliveryPull, sourceIssue } from '../harness/references';
 import {
   armsFirst,
   assignable,
-  CARD_ACTIONS,
+  cardActions,
   canDrag,
-  canUnassign,
   capacitySlots,
   capacityText,
   columnItems,
   COLUMNS,
   columnOf,
   diffText,
+  DONE_FILTERS,
+  doneCounts,
+  doneEmptyText,
   dropAction,
+  isRunning,
+  outcomeChip,
   parseIssueRef,
   queueLine,
+  readDoneFilter,
+  saveDoneFilter,
+  stageLine,
   type CardAction,
   type ColumnId,
+  type DoneFilter,
 } from './board-model';
 import { el } from './dom';
 import type { InstanceStore } from './instance-store';
@@ -67,7 +79,7 @@ export interface BoardElements {
 export interface BoardContext {
   els: BoardElements;
   store: InstanceStore;
-  daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<OpResult<K>>;
+  daemon<K extends RendererOp>(op: K, args: OpArgs<K>): Promise<ClientResult<K>>;
   openItem(itemId: string, tab?: 'details'): void;
   /** The item open in the side sheet (its card is highlighted). */
   selected(): string | null;
@@ -84,16 +96,14 @@ export interface BoardContext {
   now?(): number;
 }
 
-const CLOSED_KEY = 'puck.board.closedOpen';
 const DONE_LIMIT = 20;
 
 const ACTION_LABEL: Record<Exclude<CardAction, 'assign'>, string> = {
-  unassign: 'Unassign',
   stop: 'Stop the turn',
   accept: 'Accept',
   publish: 'Publish a pull request',
   retry: 'Retry',
-  cancel: 'Cancel item',
+  cancel: 'Cancel ticket',
   delete: 'Delete',
 };
 
@@ -101,8 +111,10 @@ interface ColumnParts {
   section: HTMLElement;
   list: HTMLElement;
   count: HTMLElement;
-  /** New-item field slot (Backlog only). */
+  /** New-item field slot (Todo only). */
   slot: HTMLElement | null;
+  /** The Done filter (Done only). */
+  filter: HTMLElement | null;
   built: string;
 }
 
@@ -110,12 +122,10 @@ export function initBoard(ctx: BoardContext) {
   const { els, store } = ctx;
   const now = ctx.now ?? Date.now;
   const cols = new Map<ColumnId, ColumnParts>();
-  let closedOpen = false;
-  try {
-    closedOpen = ctx.prefs?.getItem(CLOSED_KEY) === '1';
-  } catch {
-    closedOpen = false;
-  }
+  let filterEnv: string | null = store.envId();
+  let doneFilter: DoneFilter = readDoneFilter(ctx.prefs, filterEnv);
+  /** In progress narrowed to the tickets that need you. */
+  let onlyNeeds = false;
   let doneAll = false;
   let active: string | null = null;
   let dragging: WorkItem | null = null;
@@ -138,36 +148,42 @@ export function initBoard(ctx: BoardContext) {
     const list = el('ul', 'bd-list');
     list.setAttribute('aria-labelledby', title.id);
     let slot: HTMLElement | null = null;
-    if (c.id === 'backlog') {
+    let filter: HTMLElement | null = null;
+    if (c.id === 'todo') {
       slot = el('div', 'bd-slot');
       section.append(head, slot, list);
+    } else if (c.id === 'done') {
+      filter = el('div', 'bd-filter');
+      filter.setAttribute('role', 'radiogroup');
+      filter.setAttribute('aria-label', 'Show done tickets');
+      section.append(head, filter, list);
     } else section.append(head, list);
-    if (c.id === 'closed') {
-      const fold = button('icon-btn bd-fold');
-      fold.innerHTML = '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>';
-      fold.setAttribute('aria-label', 'Collapse Closed');
-      fold.addEventListener('click', () => setClosed(false));
-      head.appendChild(fold);
-      const rail = button('bd-rail');
-      rail.setAttribute('aria-label', 'Show closed items');
-      rail.addEventListener('click', () => setClosed(true));
-      section.appendChild(rail);
+    if (c.id === 'progress') {
+      const needs = button('bd-needs-filter hidden');
+      needs.addEventListener('click', () => setOnlyNeeds(false));
+      head.appendChild(needs);
     }
     wireDrop(section, c.id);
     els.columns.appendChild(section);
-    cols.set(c.id, { section, list, count, slot, built: '' });
+    cols.set(c.id, { section, list, count, slot, filter, built: '' });
   }
 
-  function setClosed(open: boolean): void {
-    closedOpen = open;
-    try {
-      ctx.prefs?.setItem(CLOSED_KEY, open ? '1' : '0');
-    } catch {
-      /* a convenience */
-    }
+  function setDoneFilter(next: DoneFilter): void {
+    doneFilter = next;
+    doneAll = false;
+    saveDoneFilter(ctx.prefs, store.envId(), next);
     render();
-    if (open) (cols.get('closed')?.list.querySelector<HTMLElement>('.bd-card') ?? cols.get('closed')?.section.querySelector<HTMLElement>('.bd-fold'))?.focus();
-    else cols.get('closed')?.section.querySelector<HTMLElement>('.bd-rail')?.focus();
+    cols.get('done')?.filter?.querySelector<HTMLElement>(`[data-filter="${next}"]`)?.focus();
+  }
+
+  function setOnlyNeeds(on: boolean): void {
+    onlyNeeds = on;
+    render();
+  }
+
+  /** True while the environment's daemon predates protocol 2: the board is read-only. */
+  function readOnly(): boolean {
+    return (store.state()?.daemon.protocol ?? 2) < 2;
   }
 
   /* ---------- Data helpers ---------- */
@@ -196,9 +212,6 @@ export function initBoard(ctx: BoardContext) {
       switch (action) {
         case 'assign':
           await ctx.daemon('item.assign', { itemId: item.id, agent: agent ?? null });
-          break;
-        case 'unassign':
-          await ctx.daemon('item.assign', { itemId: item.id, agent: null });
           break;
         case 'stop':
           if (item.sessionId) await ctx.daemon('session.interrupt', { sessionId: item.sessionId });
@@ -233,12 +246,12 @@ export function initBoard(ctx: BoardContext) {
     return assignable(item, agents(), item.sessionId ? (store.session(item.sessionId)?.agent ?? null) : null);
   }
 
-  /** The "…" menu entries for an item: Open, then what its status allows. */
+  /** The "…" menu entries for a ticket: Open, then what its status and steps allow. */
   function menuEntries(item: WorkItem): MenuEntry[] {
     const entries: MenuEntry[] = [{ label: 'Open', hint: '↵', action: 'open', run: () => ctx.openItem(item.id) }];
+    if (readOnly()) return entries;
     let grouped = false;
-    for (const action of CARD_ACTIONS[item.status]) {
-      if (action === 'unassign' && !canUnassign(item)) continue;
+    for (const action of cardActions(item)) {
       if (action === 'assign') {
         for (const agent of choicesFor(item)) {
           entries.push({
@@ -256,10 +269,9 @@ export function initBoard(ctx: BoardContext) {
       const destructive = action === 'cancel' || action === 'delete';
       entries.push({
         label: ACTION_LABEL[action],
-        hint: action === 'unassign' ? 'to Backlog' : undefined,
         action,
         danger: destructive,
-        confirm: armsFirst(action, item.status) ? `Confirm: ${action === 'delete' ? 'delete' : 'cancel'} W-${item.number}` : undefined,
+        confirm: armsFirst(action, item) ? `Confirm: ${action === 'delete' ? 'delete' : 'cancel'} W-${item.number}` : undefined,
         group: destructive ? !entries.some((e) => e.danger) : !grouped,
         run: () => {
           void run(item, action);
@@ -281,27 +293,6 @@ export function initBoard(ctx: BoardContext) {
     openMenu(anchor, menuEntries(item), { label: `Actions for W-${item.number}` });
   }
 
-  /** Pick an agent for a Backlog item dropped on Ready (or assign straight away when only one can take it). */
-  function assignPicked(item: WorkItem, position: ItemPosition | null, at: DOMRect | null): void {
-    const choices = choicesFor(item);
-    const finish = async (agent: string): Promise<void> => {
-      if ((await run(item, 'assign', agent)) && position) await move(item.id, position);
-    };
-    if (!choices.length) {
-      ctx.say(`No agent in this environment can take W-${item.number}.`);
-      return;
-    }
-    if (choices.length === 1) {
-      void finish(choices[0] as string);
-      return;
-    }
-    openMenu(
-      null,
-      choices.map((agent) => ({ label: agent, action: `assign:${agent}`, run: () => finish(agent) })),
-      { label: `Assign W-${item.number} to`, title: `Assign W-${item.number} to`, at: at ?? undefined, align: 'start' },
-    );
-  }
-
   async function move(itemId: string, position: ItemPosition): Promise<void> {
     store.moveLocal(itemId, position);
     try {
@@ -320,59 +311,60 @@ export function initBoard(ctx: BoardContext) {
     return c;
   }
 
+  /** The card's stage line: the queue position in Todo, where the work is In progress, why it ended in Done. */
   function signal(item: WorkItem, all: WorkItem[]): HTMLElement | null {
-    switch (item.status) {
-      case 'needs-input': {
-        const mine = item.pendingAsk?.routedTo === 'user';
-        const s = el('div', `bd-signal sig-ask${mine ? ' mine' : ''}`);
-        s.append(el('span', 'bd-signal-dot'), el('span', 'bd-signal-text', mine ? 'Needs your input' : 'Asked the orchestrator'));
-        return s;
-      }
-      case 'running': {
-        const s = el('div', 'bd-signal sig-running');
+    if (item.status === 'todo') {
+      const s = el('div', 'bd-signal sig-queued');
+      s.appendChild(el('span', 'bd-signal-text', queueLine(item, all)));
+      return s;
+    }
+    if (item.status === 'in-progress') {
+      const line = stageLine(item, all);
+      if (line.tone === 'busy' && isRunning(item) && item.openAsks === 0) {
+        const s = el('div', 'bd-signal bd-stage sig-running');
         const since = startedAt(item);
         const clock = el('span', 'bd-elapsed', formatElapsed(now() - since));
         clock.dataset.since = String(since);
         s.append(el('span', 'bd-signal-dot'), clock, el('span', 'bd-tool', latestTool(item)));
+        s.title = line.text;
         return s;
       }
-      case 'queued': {
-        const s = el('div', 'bd-signal sig-queued');
-        s.appendChild(el('span', 'bd-signal-text', queueLine(item, all)));
-        return s;
-      }
-      case 'failed':
-      case 'cancelled': {
-        const reason = item.status === 'failed' ? item.lastError : item.cancelReason;
-        const s = el('div', `bd-signal sig-${item.status}`);
-        // A non-breaking hyphen keeps "W-11" on one line.
-        s.appendChild(el('span', 'bd-signal-text', `${item.status === 'failed' ? 'Failed' : 'Cancelled'}${reason ? `: ${reason.replace(/\bW-(?=\d)/g, 'W\u2011')}` : ''}`));
-        if (reason) s.title = reason;
-        return s;
-      }
-      default:
-        return null;
+      const s = el('div', `bd-signal bd-stage ${line.tone === 'ask' ? 'sig-ask mine' : line.tone === 'wait' && item.openAsks > 0 ? 'sig-ask' : `sig-${line.tone}`}`);
+      if (line.tone === 'ask' || item.openAsks > 0) s.appendChild(el('span', 'bd-signal-dot'));
+      s.appendChild(el('span', 'bd-signal-text', line.text));
+      return s;
     }
+    if (item.outcome === 'failed' || item.outcome === 'cancelled') {
+      const reason = item.outcome === 'failed' ? item.lastError : item.cancelReason;
+      const s = el('div', `bd-signal sig-${item.outcome}`);
+      // A non-breaking hyphen keeps "W-11" on one line.
+      s.appendChild(el('span', 'bd-signal-text', `${item.outcome === 'failed' ? 'Failed' : 'Cancelled'}${reason ? `: ${reason.replace(/\bW-(?=\d)/g, 'W\u2011')}` : ''}`));
+      if (reason) s.title = reason;
+      return s;
+    }
+    return null;
   }
 
   function card(item: WorkItem, all: WorkItem[]): HTMLLIElement {
-    const li = el('li', `bd-card status-${item.status}${item.status === 'needs-input' && item.pendingAsk?.routedTo === 'user' ? ' needs-you' : ''}`);
+    const li = el('li', `bd-card status-${item.status}${item.outcome ? ` outcome-${item.outcome}` : ''}${item.userAsks > 0 ? ' needs-you' : ''}`);
     li.dataset.item = item.id;
     li.tabIndex = -1;
-    li.draggable = canDrag(item.status);
+    li.draggable = canDrag(item.status) && !readOnly();
     const agent = item.agent ?? 'Unassigned';
-    li.setAttribute('aria-label', `W-${item.number} ${item.title}, ${item.status.replace('-', ' ')}, ${agent}`);
+    const place = item.status === 'done' ? `done, ${item.outcome ?? ''}` : item.status === 'in-progress' ? 'in progress' : 'todo';
+    li.setAttribute('aria-label', `W-${item.number} ${item.title}, ${place}${item.userAsks > 0 ? `, ${item.userAsks} waiting on you` : ''}, ${agent}`);
 
     const top = el('div', 'bd-card-top');
     const id = el('span', 'bd-id', `W-${item.number}`);
     top.appendChild(id);
-    if (item.createdBy === 'orchestrator') {
+    if (item.createdBy === 'orchestrator' || item.createdBy === 'pipeline') {
       const mark = el('span', 'bd-by');
       mark.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3 20 12 12 21 4 12Z" /></svg>';
-      mark.title = 'Created by the orchestrator';
+      mark.title = item.createdBy === 'pipeline' ? 'Created by Puck' : 'Created by the orchestrator';
       top.appendChild(mark);
     }
-    if (item.source) top.appendChild(chip('issue', `#${item.source.number}`, `${item.source.repo}#${item.source.number}`));
+    const src = sourceIssue(item);
+    if (src) top.appendChild(chip('issue', `#${src.number}`, `${src.repo}#${src.number}`));
     top.appendChild(el('span', 'spacer'));
     const more = button('bd-more');
     more.tabIndex = -1;
@@ -399,10 +391,13 @@ export function initBoard(ctx: BoardContext) {
     if (multiRepo() && item.repo) meta.appendChild(chip('repo', item.repo, 'Repository'));
     if (item.attempts > 1 && item.status !== 'done') meta.appendChild(chip('attempts', `Attempt ${item.attempts}`));
     const diff = diffText(item);
-    if (diff && (item.status === 'review' || item.status === 'done')) meta.appendChild(chip('diff', diff, `${item.result?.diffStat.files ?? 0} files changed`));
-    if (item.pr) {
-      const { url, number, checks } = item.pr;
-      const state = item.pr.state === 'merged' ? 'merged' : item.pr.state === 'closed' ? 'closed' : item.pr.draft ? 'draft' : 'open';
+    if (diff && (item.stage === 'merge' || item.status === 'done')) meta.appendChild(chip('diff', diff, `${item.result?.diffStat.files ?? 0} files changed`));
+    const pull = deliveryPull(item);
+    const outcome = item.status === 'done' ? outcomeChip(item, pull?.number ?? null) : null;
+    if (outcome) meta.appendChild(chip(`outcome ${outcome.tone}`, outcome.text, outcome.tone === 'merged' ? 'Merged on GitHub' : undefined));
+    if (pull) {
+      const { url, number, checks } = pull;
+      const state = pull.state === 'merged' ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open';
       const pr = button(`bd-chip pr ${state}`, `#${number}`);
       pr.tabIndex = -1;
       pr.title = `Open pull request #${number} on GitHub (${state}${checks ? `, checks ${checks.state}` : ''})`;
@@ -414,6 +409,12 @@ export function initBoard(ctx: BoardContext) {
       });
       meta.appendChild(pr);
     }
+    if (item.userAsks > 0) {
+      const badge = el('span', 'bd-needs', String(item.userAsks));
+      badge.title = `${item.userAsks} waiting on you`;
+      badge.setAttribute('aria-hidden', 'true');
+      meta.appendChild(badge);
+    }
     li.appendChild(meta);
 
     li.addEventListener('click', () => ctx.openItem(item.id));
@@ -424,7 +425,7 @@ export function initBoard(ctx: BoardContext) {
       li.classList.add('dragging');
       ev.dataTransfer?.setData('text/plain', `W-${item.number}`);
       if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
-      for (const [id, parts] of cols) parts.section.dataset.drop = dropAction(item.status, id, item.sessionId) ? 'ok' : 'no';
+      for (const [id, parts] of cols) parts.section.dataset.drop = dropAction(item.status, id) ? 'ok' : 'no';
       els.columns.classList.add('dragging');
       closePopup();
     });
@@ -435,7 +436,7 @@ export function initBoard(ctx: BoardContext) {
   /* ---------- Keyboard ---------- */
 
   function visibleCards(): HTMLElement[][] {
-    return COLUMNS.filter((c) => c.id !== 'closed' || closedOpen).map((c) => [...(cols.get(c.id)?.list.querySelectorAll<HTMLElement>('.bd-card') ?? [])]);
+    return COLUMNS.map((c) => [...(cols.get(c.id)?.list.querySelectorAll<HTMLElement>('.bd-card') ?? [])]);
   }
 
   function setActive(itemId: string): void {
@@ -447,15 +448,10 @@ export function initBoard(ctx: BoardContext) {
     }
   }
 
-  /** True when the card is shown: not in Closed while that is a rail. */
-  function shown(node: HTMLElement): boolean {
-    return closedOpen || !cols.get('closed')?.list.contains(node);
-  }
-
-  /** Focus a card; false when there is none or it is hidden in the folded Closed column. */
+  /** Focus a card; false when there is none (a Done card behind the filter has none). */
   function focusCard(itemId: string): boolean {
     const node = els.columns.querySelector<HTMLElement>(`.bd-card[data-item="${CSS.escape(itemId)}"]`);
-    if (!node || !shown(node)) return false;
+    if (!node) return false;
     setActive(itemId);
     node.focus();
     node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -474,8 +470,7 @@ export function initBoard(ctx: BoardContext) {
     };
     if ((ev.key === 'ArrowUp' || ev.key === 'ArrowDown') && ev.altKey) {
       ev.preventDefault();
-      const column = columnOf(item.status);
-      if (column !== 'backlog' && column !== 'ready') return;
+      if (columnOf(item.status) !== 'todo' || readOnly()) return;
       const siblings = grid[col] ?? [];
       const neighbour = siblings[ev.key === 'ArrowUp' ? row - 1 : row + 1]?.dataset.item;
       if (!neighbour) return;
@@ -546,7 +541,7 @@ export function initBoard(ctx: BoardContext) {
 
   function wireDrop(section: HTMLElement, column: ColumnId): void {
     section.addEventListener('dragover', (ev) => {
-      if (!dragging || !dropAction(dragging.status, column, dragging.sessionId)) return;
+      if (!dragging || !dropAction(dragging.status, column)) return;
       ev.preventDefault();
       if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
       const parts = cols.get(column);
@@ -568,23 +563,15 @@ export function initBoard(ctx: BoardContext) {
       const item = dragging;
       const parts = cols.get(column);
       if (!item || !parts) return;
-      const action = dropAction(item.status, column, item.sessionId);
+      const action = dropAction(item.status, column);
       const before = dropBefore(parts.list, ev.clientY);
       const cards = [...parts.list.querySelectorAll<HTMLElement>('.bd-card:not(.dragging)')];
       const after = before ? cards[cards.indexOf(before) - 1] : cards[cards.length - 1];
       const position: ItemPosition | null = before?.dataset.item ? { before: before.dataset.item } : after?.dataset.item ? { after: after.dataset.item } : null;
-      const at = line?.getBoundingClientRect() ?? null;
       endDrag();
-      if (action === 'reorder') {
-        if (position) {
-          focusAfter = item.id;
-          void move(item.id, position);
-        }
-      } else if (action === 'assign') assignPicked(item, position, at);
-      else if (action === 'unassign') {
-        void (async () => {
-          if ((await run(item, 'unassign')) && position) await move(item.id, position);
-        })();
+      if (action === 'reorder' && position) {
+        focusAfter = item.id;
+        void move(item.id, position);
       }
     });
   }
@@ -594,25 +581,30 @@ export function initBoard(ctx: BoardContext) {
   function key(column: ColumnId, items: WorkItem[], all: WorkItem[]): string {
     return JSON.stringify([
       multiRepo(),
-      column === 'done' ? doneAll : null,
+      readOnly(),
+      column === 'done' ? [doneAll, doneFilter] : null,
+      column === 'progress' ? onlyNeeds : null,
       all.length === 0,
       items.map((i) => [
         i.id,
         i.number,
         i.title,
         i.status,
+        i.outcome,
+        i.stage,
         i.agent,
         i.repo,
         i.createdBy,
-        i.source?.number,
+        i.references,
         i.attempts,
         i.sessionId,
-        i.pendingAsk?.routedTo,
+        i.openAsks,
+        i.userAsks,
         i.lastError,
         i.cancelReason,
         i.result?.diffStat,
-        i.pr,
-        column === 'ready' ? queueLine(i, all) : null,
+        i.workflow,
+        column === 'todo' || column === 'progress' ? queueLine(i, all) : null,
         column === 'progress' ? startedAt(i) : null,
       ]),
     ]);
@@ -649,7 +641,7 @@ export function initBoard(ctx: BoardContext) {
     if (parts.built === k) {
       if (column === 'progress') {
         for (const item of items) {
-          if (item.status !== 'running') continue;
+          if (!isRunning(item)) continue;
           const tool = parts.list.querySelector<HTMLElement>(`.bd-card[data-item="${CSS.escape(item.id)}"] .bd-tool`);
           if (tool) tool.textContent = latestTool(item);
         }
@@ -660,8 +652,10 @@ export function initBoard(ctx: BoardContext) {
     parts.built = k;
     clearList(parts.list);
     if (!items.length) {
-      if (column === 'backlog' && !all.length) parts.list.appendChild(emptyCta());
-      else parts.list.appendChild(el('li', 'bd-hint', COLUMNS.find((c) => c.id === column)?.hint ?? ''));
+      const hidden = column === 'done' ? doneEmptyText(doneFilter, doneCounts(all)) : null;
+      if (column === 'todo' && !all.length) parts.list.appendChild(emptyCta());
+      else if (column === 'progress' && onlyNeeds) parts.list.appendChild(el('li', 'bd-hint', 'Nothing is waiting on you.'));
+      else parts.list.appendChild(el('li', 'bd-hint', hidden ?? COLUMNS.find((c) => c.id === column)?.hint ?? ''));
     } else {
       const shown = column === 'done' && !doneAll ? items.slice(0, DONE_LIMIT) : items;
       for (const item of shown) parts.list.appendChild(card(item, all));
@@ -679,24 +673,49 @@ export function initBoard(ctx: BoardContext) {
     parts.list.scrollTop = scroll;
   }
 
-  function renderClosedRail(items: WorkItem[]): void {
-    const parts = cols.get('closed');
-    if (!parts) return;
-    parts.section.classList.toggle('collapsed', !closedOpen);
-    const rail = parts.section.querySelector<HTMLElement>('.bd-rail');
-    if (!rail) return;
-    const failed = items.filter((i) => i.status === 'failed').length;
-    const cancelled = items.length - failed;
-    const railKey = `${failed}/${cancelled}`;
-    if (rail.dataset.key === railKey) return;
-    rail.dataset.key = railKey;
-    rail.textContent = '';
-    const open = el('span', 'bd-rail-open');
-    open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>';
-    rail.append(open, el('span', 'bd-rail-title', 'Closed'), el('span', 'bd-rail-count', String(items.length)));
-    if (failed) rail.appendChild(el('span', 'bd-rail-failed', String(failed)));
-    rail.title = `Closed: ${failed} failed, ${cancelled} cancelled. Show them.`;
-    rail.setAttribute('aria-label', `Show closed items: ${failed} failed, ${cancelled} cancelled`);
+  /** The Done column's filter: each choice with its count; Failed in red whenever there are failures. */
+  function renderDoneFilter(all: WorkItem[]): void {
+    const parts = cols.get('done');
+    const host = parts?.filter;
+    if (!parts || !host) return;
+    const counts = doneCounts(all);
+    const filterKey = JSON.stringify([doneFilter, counts]);
+    parts.section.classList.toggle('has-failed', counts.failed > 0);
+    if (host.dataset.key === filterKey) return;
+    host.dataset.key = filterKey;
+    host.textContent = '';
+    for (const f of DONE_FILTERS) {
+      const on = f.id === doneFilter;
+      const b = button(`bd-filter-btn${on ? ' on' : ''}${f.id === 'failed' && counts.failed > 0 ? ' failed' : ''}`);
+      b.dataset.filter = f.id;
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(on));
+      b.tabIndex = on ? 0 : -1;
+      b.append(el('span', 'bd-filter-label', f.label), el('span', 'bd-filter-count', String(counts[f.id])));
+      b.setAttribute('aria-label', `${f.label}: ${counts[f.id]}`);
+      b.addEventListener('click', () => setDoneFilter(f.id));
+      b.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+        ev.preventDefault();
+        const at = DONE_FILTERS.findIndex((x) => x.id === doneFilter);
+        const next = DONE_FILTERS[(at + (ev.key === 'ArrowRight' ? 1 : DONE_FILTERS.length - 1)) % DONE_FILTERS.length];
+        if (next) setDoneFilter(next.id);
+      });
+      host.appendChild(b);
+    }
+    const failedBadge = parts.section.querySelector<HTMLElement>('.bd-col-failed');
+    const badge = failedBadge ?? el('span', 'bd-col-failed');
+    badge.textContent = counts.failed ? String(counts.failed) : '';
+    badge.title = `${counts.failed} failed`;
+    badge.classList.toggle('hidden', !counts.failed);
+    if (!failedBadge) parts.section.querySelector('.bd-col-head')?.insertBefore(badge, parts.count.nextSibling);
+  }
+
+  function renderNeedsFilter(all: WorkItem[]): void {
+    const b = cols.get('progress')?.section.querySelector<HTMLButtonElement>('.bd-needs-filter');
+    if (!b) return;
+    b.classList.toggle('hidden', !onlyNeeds);
+    b.textContent = onlyNeeds ? `Need you: ${all.filter((i) => i.userAsks > 0).length} · show all` : '';
   }
 
   function renderHeader(): void {
@@ -763,14 +782,23 @@ export function initBoard(ctx: BoardContext) {
       }
       return;
     }
+    if (store.envId() !== filterEnv) {
+      filterEnv = store.envId();
+      doneFilter = readDoneFilter(ctx.prefs, filterEnv);
+    }
     const all = store.items();
     const focused = document.activeElement instanceof HTMLElement && els.columns.contains(document.activeElement) ? document.activeElement : null;
     const focusedCard = focused?.closest<HTMLElement>('.bd-card')?.dataset.item ?? null;
-    for (const c of COLUMNS) fill(c.id, columnItems(all, c.id, startedAt), all);
-    renderClosedRail(columnItems(all, 'closed'));
+    for (const c of COLUMNS) {
+      let items = columnItems(all, c.id, startedAt, doneFilter);
+      if (c.id === 'progress' && onlyNeeds) items = items.filter((i) => i.userAsks > 0);
+      fill(c.id, items, all);
+    }
+    renderDoneFilter(all);
+    renderNeedsFilter(all);
     const selected = ctx.selected();
     for (const node of els.columns.querySelectorAll<HTMLElement>('.bd-card')) node.classList.toggle('selected', node.dataset.item === selected);
-    // The tab stop stays on a card that can be seen: never one folded away in Closed.
+    // The tab stop stays on a card that can be seen.
     const cards = visibleCards().flat();
     const keep = active && cards.some((n) => n.dataset.item === active) ? active : (cards[0]?.dataset.item ?? null);
     if (keep) setActive(keep);
@@ -786,17 +814,17 @@ export function initBoard(ctx: BoardContext) {
 
   function closeCreate(): void {
     creating = null;
-    const slot = cols.get('backlog')?.slot;
+    const slot = cols.get('todo')?.slot;
     if (slot) slot.textContent = '';
   }
 
   function create(): void {
-    if (!store.hasSnapshot()) return;
+    if (!store.hasSnapshot() || readOnly()) return;
     if (creating) {
       creating.focus();
       return;
     }
-    const slot = cols.get('backlog')?.slot;
+    const slot = cols.get('todo')?.slot;
     if (!slot) return;
     const box = el('div', 'bd-new');
     const input = el('input', 'bd-new-input');
@@ -847,7 +875,7 @@ export function initBoard(ctx: BoardContext) {
   }
 
   function importIssue(anchor: HTMLElement = els.importBtn): void {
-    if (!store.hasSnapshot()) return;
+    if (!store.hasSnapshot() || readOnly()) return;
     if (popupAnchor() === anchor) {
       closePopup();
       return;
@@ -969,10 +997,15 @@ export function initBoard(ctx: BoardContext) {
       closeCreate();
       active = null;
       doneAll = false;
+      onlyNeeds = false;
       render();
     },
+    /** In progress narrowed to the tickets that need you (the Chat view's "+N waiting"). */
+    showNeedsYou(): void {
+      setOnlyNeeds(true);
+    },
     /** True while something runs (the ticker keeps going). */
-    busy: (): boolean => store.items().some((i) => i.status === 'running'),
+    busy: (): boolean => store.items().some(isRunning),
   };
 }
 

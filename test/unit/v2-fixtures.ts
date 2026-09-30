@@ -2,7 +2,8 @@
 
 import { vi } from 'vitest';
 import type { DaemonEventPayload, InstanceEvent, InstanceInfo, PuckBridge, RunnerEvent } from '../../src/harness/bridge';
-import type { DaemonEvent, SessionSummary, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
+import type { DaemonEvent, ItemStatus, ItemStatusV1, SessionSummary, Snapshot, WorkItem, WorkItemV1 } from '../../src/harness/daemon-protocol';
+import { upgradeV1Item } from '../../src/harness/workflow';
 
 export const ENV = 'env_01J8Z3X0000000000000000000';
 export const ENV2 = 'env_01J8Z3X0000000000000000001';
@@ -46,40 +47,60 @@ export function session(over: Partial<SessionSummary> = {}): SessionSummary {
   };
 }
 
-export function item(over: Partial<WorkItem> = {}): WorkItem {
+/**
+ * A ticket for the renderer's tests. `status` may name protocol 1's place
+ * (`backlog`, `queued`, `running`, `needs-input`, `review`, `done`,
+ * `failed`, `cancelled`), with `pr`, `source` and `pendingAsk` as protocol
+ * 1 had them: the ticket is built with the app's own mapping
+ * (`upgradeV1Item`), so each place is the ticket the three-state model
+ * gives. Any protocol-2 field in `over` then wins.
+ */
+export type ItemOver = Partial<Omit<WorkItem, 'status'>> &
+  Partial<Pick<WorkItemV1, 'pr' | 'source' | 'pendingAsk'>> & { status?: ItemStatusV1 | ItemStatus };
+
+export function item(over: ItemOver = {}): WorkItem {
   const number = over.number ?? 1;
-  return {
+  const { status, pr, source, pendingAsk, ...v2 } = over;
+  const place: ItemStatusV1 = status === 'todo' ? (over.agent ? 'queued' : 'backlog') : status === 'in-progress' ? 'running' : (status ?? 'backlog');
+  const started = place !== 'backlog' && !(place === 'queued' && !over.sessionId) && place !== 'cancelled';
+  const v1: WorkItemV1 = {
     id: `itm_${number}`,
     number,
     title: `Item ${number}`,
     body: '',
-    status: 'backlog',
-    agent: null,
+    status: place,
+    agent: over.agent !== undefined ? over.agent : place === 'backlog' ? null : 'implementer',
     repo: null,
     createdBy: 'user',
     createdAt: 1_000 + number,
     updatedAt: 1_000 + number,
     attempts: 0,
-    sessionId: null,
+    sessionId: over.sessionId !== undefined ? over.sessionId : started ? `ses_w${number}` : null,
     branch: null,
     worktree: null,
     base: null,
     result: null,
-    pr: null,
-    source: null,
+    pr: pr ?? null,
+    source: source ?? null,
     lastError: null,
     cancelReason: null,
     acceptNote: null,
-    pendingAsk: null,
-    ...over,
+    pendingAsk: pendingAsk ?? null,
   };
+  for (const key of ['title', 'body', 'repo', 'createdBy', 'createdAt', 'updatedAt', 'attempts', 'branch', 'worktree', 'base', 'lastError', 'cancelReason', 'acceptNote'] as const) {
+    if (key in over) (v1 as unknown as Record<string, unknown>)[key] = over[key];
+  }
+  if (over.result) v1.result = over.result;
+  if (v1.createdBy === ('pipeline' as string)) v1.createdBy = 'user';
+  const up = upgradeV1Item(v1);
+  return { ...up, ...v2, createdBy: over.createdBy ?? up.createdBy, status: up.status };
 }
 
 export function snap(over: Partial<Snapshot> = {}): Snapshot {
   return {
     envId: ENV,
     name: 'example',
-    daemon: { version: '0.0.1', build: 'test', protocol: 1 },
+    daemon: { version: '0.0.1', build: 'test', protocol: 2 },
     head: 10,
     instance: { status: 'ready', pin: { kind: 'tag', name: 'v1.0.0', sha: 'a1b2c3d4e5f6' }, sha: 'a1b2c3d4e5f6' },
     github: { state: 'ok' },
@@ -90,6 +111,7 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
     capacity: { agents: { implementer: { running: 0, max: 2 } }, workers: { running: 0, max: 4 }, paused: false },
     inflight: [],
     asks: [],
+    decisions: [],
     ...over,
   };
 }

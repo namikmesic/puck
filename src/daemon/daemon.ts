@@ -4,17 +4,23 @@
  * else starts here.
  *
  * Boot: migrate the state format (a failure leaves the daemon `failed`,
- * answering only the handshake, snapshots and logs) → open the socket so
- * the app can watch → ingest the inbox → provision → reconcile what a
- * restart interrupted (an unfinished turn becomes interrupted; a transcript
- * that already finished is left idle and is not resumed; running work items
- * go back to queued without counting an attempt) → make sure the orchestrator
- * session exists → resume those turns → ready → start the scheduler,
- * the orchestrator's wake loop, and the GitHub poll.
+ * answering only the handshake, snapshots and logs) → open the delivery
+ * journal, repair a torn tail, and roll items.json and delivery/tables.json
+ * forward from it (a damaged journal fails the boot the same way) →
+ * journal the legacy workflows once after the format-2 migration → open
+ * the socket so the app can watch → ingest the inbox → provision →
+ * reconcile what a restart interrupted (an unfinished turn becomes
+ * interrupted; a transcript that already finished is left idle and is not
+ * resumed; running implement steps go back to queued without counting an
+ * attempt, and any journaled input their session lacks is queued again) →
+ * make sure the orchestrator session exists → resume those turns → ready →
+ * start the scheduler, the orchestrator's wake loop, and the GitHub poll.
  *
- * Orchestration lives in its own modules: items.ts (the backlog; the state
- * machine is `src/harness/item-transitions.ts`), scheduler.ts, work.ts
- * (dispatch, worktrees, results, worker questions), publish.ts,
+ * Orchestration lives in its own modules: items.ts (the backlog; the ticket
+ * table is `src/harness/item-transitions.ts`), workflow.ts (steps, rounds
+ * and journal transactions; the step table is `src/harness/workflow.ts`),
+ * delivery/journal.ts (the write-ahead log), scheduler.ts, work.ts
+ * (dispatch, worktrees, results, worker questions, merges), publish.ts,
  * orchestrator.ts (notices and wake), tools.ts (the orchestrator's
  * in-process tools) and github-sync.ts (issues, pull requests, CI and
  * reviews on GitHub). This class wires them to the turn loop and to the
@@ -28,13 +34,22 @@ import {
   PROVISION_STAGES,
   UPGRADE_EXIT,
   COMMAND_LIMITS,
+  PAGE_LIMITS,
   type DaemonEvent,
   type InstanceState,
   type Op,
+  type OpArgs,
+  type OpResult,
   type Pin,
   type ProvisionStage,
   type Snapshot,
+  type WorkItem,
 } from '../harness/daemon-protocol';
+import { latestAttempts, latestRound, roundSteps, StepStateError } from '../harness/workflow';
+import { asLedgerEvents, rollForward } from './delivery/derive';
+import { JournalDamagedError, JournalError, Ledger, openJournal, type Journal, type Transaction } from './delivery/journal';
+import { deliveryStore, type TablesFile } from './store/delivery';
+import type { ItemRecord, ItemsFile } from './store/items';
 import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
 import { harnessDescriptors } from '../harness/providers';
 import { Credentials } from './credentials';
@@ -56,13 +71,14 @@ import { GRANT_SYNC_TIMEOUT_MS, grantSyncConfigured, syncGrantPolicies } from '.
 import { Git } from './git';
 import { GitHubApi } from './github-api';
 import { GithubSync } from './github-sync';
-import { Backlog, itemLabel, ItemStateError, publicItem } from './items';
+import { Backlog, itemLabel, ItemStateError } from './items';
 import { tailLog, type Logger } from './log';
 import { dispatch, OpError, type Handlers } from './ops';
 import { Orchestrator } from './orchestrator';
 import { orchestratorPreamble } from './prompts';
+import { projectSnapshot } from './protocol-v1';
 import { Publisher } from './publish';
-import { capacityOf, runningCounts, Scheduler, type SchedulerView } from './scheduler';
+import { capacityOf, runningCounts, Scheduler, type SchedulerStep, type SchedulerView } from './scheduler';
 import { githubStore } from './store/github';
 import { itemsStore } from './store/items';
 import type { SessionRecord } from './store/sessions';
@@ -70,7 +86,8 @@ import { orchestratorTools } from './tools';
 import { Work, WorkError } from './work';
 import { PUCK_GID, PUCK_UID, type DaemonPaths } from './paths';
 import { provision, provisionFingerprint, ProvisionError } from './provision';
-import { DaemonServer } from './server';
+import { DaemonServer, SnapshotParts, type OpContext } from './server';
+import { bootstrapLegacy, publicItem, Workflow } from './workflow';
 import { flushJsonWrites, reportWriteErrors } from './store/jsonfile';
 import { instanceStore, type InstanceRecord } from './store/instance';
 import { migrateState } from './store/meta';
@@ -120,6 +137,15 @@ export class Daemon {
   private events!: EventLog;
   private server!: DaemonServer;
   private backlog!: Backlog;
+  private workflow!: Workflow;
+  private journal: Journal | null = null;
+  private itemsFile!: JsonStore<ItemsFile>;
+  private tablesFile!: JsonStore<TablesFile>;
+  /** Journaled worker inputs of implement steps not done, read once at boot. */
+  private bootInputs = new Map<string, { at: number; sessionId: string; author: 'user' | 'orchestrator' | 'system'; text: string }[]>();
+  private journalError: string | null = null;
+  private formatBoundary = 0;
+  private readonly parts: SnapshotParts;
   private work!: Work;
   private scheduler!: Scheduler;
   private orchestrator!: Orchestrator;
@@ -145,6 +171,7 @@ export class Daemon {
     this.now = opts.now ?? Date.now;
     this.shutdownGraceMs = opts.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
     this.grantSyncTimeoutMs = opts.grantSyncTimeoutMs ?? GRANT_SYNC_TIMEOUT_MS;
+    this.parts = new SnapshotParts({ now: this.now });
   }
 
   /* ---------- Boot ---------- */
@@ -156,8 +183,9 @@ export class Daemon {
     fs.chmodSync(paths.run, 0o755);
     reportWriteErrors((file, err) => log.error('store.write', err, { file }));
 
-    const migrated = migrateState(paths.state, { daemonVersion: this.opts.identity.daemonVersion, now: this.now() });
     this.events = new EventLog(paths.events, { now: this.now, log });
+    const migrated = migrateState(paths.state, { daemonVersion: this.opts.identity.daemonVersion, now: this.now(), eventHead: this.events.head() });
+    if (migrated.ok) this.formatBoundary = migrated.meta.formatBoundary ?? 0;
     this.credentials = new Credentials({
       paths,
       log,
@@ -168,7 +196,10 @@ export class Daemon {
     if (migrated.ok) {
       this.instance = instanceStore(paths.state);
       this.transcripts = new TranscriptBook(paths.transcripts, this.now);
-      this.backlog = new Backlog({ store: itemsStore(paths.state), emit: (ev) => this.emit(ev), now: this.now });
+      this.itemsFile = itemsStore(paths.state);
+      this.tablesFile = deliveryStore(paths.state);
+      this.backlog = new Backlog({ store: this.itemsFile, now: this.now });
+      this.openLedger();
       const asPuck = this.opts.privileged ? { uid: PUCK_UID, gid: PUCK_GID } : {};
       const git = (this.git = new Git({ paths, run: this.run, asPuck }));
       const test = testAdapters !== null;
@@ -220,6 +251,7 @@ export class Daemon {
       });
       this.work = new Work({
         backlog: this.backlog,
+        workflow: this.workflow,
         turns: this.turns,
         git,
         publisher,
@@ -249,18 +281,24 @@ export class Daemon {
           this.orchestrator.push(kind, text, itemId);
         },
         canRun: () => this.running(),
+        mergeParents: (item, sha) => {
+          const repo = this.definition?.repos.find((r) => r.dir === item.repo);
+          if (!repo) return Promise.resolve([]);
+          return git.serial(repo.dir, () => git.commitParents(repo.dir, repo.github, sha));
+        },
         log,
         now: this.now,
       });
       this.scheduler = new Scheduler({
         view: () => this.schedulerView(),
         canRun: () => this.running() && !this.reprovisioning,
-        dispatch: (itemId) => this.work.dispatch(itemId),
+        start: (stepId) => this.work.dispatch(stepId),
         log,
       });
       this.tools = orchestratorTools({
         work: this.work,
         backlog: this.backlog,
+        workflow: { workflow: (itemId) => this.workflow.workflow(itemId) },
         definition: () => this.definition,
         instance: () => {
           const record = this.instance.get();
@@ -282,12 +320,22 @@ export class Daemon {
         version: this.opts.identity.daemonVersion,
         build: this.opts.identity.build,
       }),
-      dispatch: (op, args) => this.dispatch(op as Op, args),
+      dispatch: (op, args, ctx) => this.dispatch(op as Op, args, ctx),
+      snapshotV1: () => projectSnapshot(this.snapshot()),
+      projection: () => ({
+        item: (itemId) => {
+          const item = this.backlog?.get(itemId);
+          return item ? this.pub(item) : null;
+        },
+        capacity: () => capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false),
+        formatBoundary: this.formatBoundary,
+      }),
     });
     await this.server.listen();
     log.info('daemon.listening', { version: this.opts.identity.daemonVersion, protocol: PROTOCOL_VERSION });
 
     if (!migrated.ok) return this.fail(migrated.error);
+    if (this.journalError) return this.fail(this.journalError);
     this.setState({ status: 'provisioning', detail: 'reading the inbox' });
     this.credentials.ingestInbox((update) => this.applyInstance(update));
     this.emitGithubAuth(true);
@@ -310,6 +358,8 @@ export class Daemon {
 
     const interrupted = this.turns.reconcile();
     const requeued = this.work.reconcile();
+    const requeuedInputs = this.work.requeueInputs(this.bootInputs);
+    this.bootInputs = new Map();
     this.ensureOrchestrator(def.value);
     const resumed = this.turns.resumeInterrupted();
     this.restartNotice(resumed, requeued);
@@ -319,7 +369,60 @@ export class Daemon {
     this.scheduler.start();
     this.orchestrator.schedule();
     this.github.start();
-    log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length, requeued: requeued.length });
+    log.info('daemon.ready', { envId: record.envId, interrupted: interrupted.length, requeued: requeued.length, requeuedInputs });
+  }
+
+  /**
+   * Open the delivery journal and bring both checkpoints up to it: repair
+   * a torn tail, roll items.json and delivery/tables.json forward, journal
+   * the legacy workflows once after the format-2 migration, and keep the
+   * inputs of implement steps that are not done for the boot's re-queue.
+   * A damaged journal leaves the daemon failed.
+   */
+  private openLedger(): void {
+    const { paths, log } = this.opts;
+    let transactions: Transaction[];
+    try {
+      const opened = openJournal(path.join(paths.state, 'delivery', 'journal.ndjson'), { log });
+      this.journal = opened.journal;
+      transactions = opened.transactions;
+    } catch (err) {
+      if (!(err instanceof JournalDamagedError)) throw err;
+      this.journalError = err.message;
+      log.error('journal.damaged', undefined, { line: err.line });
+      return;
+    }
+    const applied = rollForward(this.itemsFile.get(), this.tablesFile.get(), transactions);
+    if (applied.items) this.itemsFile.commit();
+    if (applied.tables) this.tablesFile.commit();
+    if (applied.items || applied.tables) log.info('journal.rolled-forward', { items: applied.items, tables: applied.tables });
+    const ledger = new Ledger({
+      journal: this.journal,
+      items: this.itemsFile,
+      tables: this.tablesFile,
+      emit: (ev) => this.emit(ev),
+      publicItem: (item) => publicItem(item, this.tablesFile.get().workflows[item.id] ?? null),
+      log,
+    });
+    this.workflow = new Workflow({ ledger, items: this.itemsFile, tables: this.tablesFile, now: this.now });
+    const bootstrapped = bootstrapLegacy(this.workflow, this.backlog.list(), this.itemsFile.get().nextNumber);
+    if (bootstrapped || !transactions.length) log.info('journal.bootstrap', { tickets: bootstrapped });
+    const active = new Set<string>();
+    for (const wf of Object.values(this.tablesFile.get().workflows)) {
+      for (const step of latestAttempts(wf.steps)) if (step.kind === 'implement' && step.state !== 'done') active.add(step.id);
+    }
+    for (const tx of transactions) {
+      for (const ev of asLedgerEvents(tx)) {
+        if (ev.kind !== 'step.input' || !active.has(ev.stepId)) continue;
+        const list = this.bootInputs.get(ev.stepId) ?? [];
+        list.push({ at: tx.at, sessionId: ev.sessionId, author: ev.author, text: ev.text });
+        this.bootInputs.set(ev.stepId, list);
+      }
+    }
+  }
+
+  private pub(item: ItemRecord): WorkItem {
+    return publicItem(item, this.workflow?.workflow(item.id) ?? null);
   }
 
   /** Tell the orchestrator what a restart interrupted and how it resumes. */
@@ -560,9 +663,25 @@ export class Daemon {
 
   private schedulerView(): SchedulerView | null {
     const def = this.definition;
-    if (!def || !this.backlog) return null;
+    if (!def || !this.backlog || !this.workflow) return null;
+    const steps: SchedulerStep[] = [];
+    this.backlog.list().forEach((item, order) => {
+      for (const step of latestAttempts(this.workflow.steps(item.id))) {
+        if (step.state === 'done' || (step.kind !== 'implement' && step.kind !== 'checks' && step.kind !== 'review')) continue;
+        const verification = step.kind !== 'implement';
+        steps.push({
+          id: step.id,
+          itemId: item.id,
+          kind: step.kind,
+          state: step.state,
+          agent: step.agent,
+          tier: verification ? 0 : item.status === 'in-progress' ? 1 : 2,
+          order: verification ? (step.queuedAt ?? 0) : order,
+        });
+      }
+    });
     return {
-      items: this.backlog.list(),
+      steps,
       assignments: Object.fromEntries(def.agents.map((a) => [a.agent, a.maxParallel])),
       maxWorkers: def.limits.maxWorkers,
     };
@@ -583,7 +702,7 @@ export class Daemon {
 
   /* ---------- Commands ---------- */
 
-  private dispatch(op: Op, args: unknown): Promise<unknown> {
+  private dispatch(op: Op, args: unknown, ctx: OpContext = { protocol: PROTOCOL_VERSION }): Promise<unknown> {
     if (this.state.status === 'failed' && !FAILED_OPS.has(op)) {
       return Promise.reject(new OpError('not-ready', `The environment failed: ${this.state.error ?? 'unknown error'}`));
     }
@@ -593,9 +712,9 @@ export class Daemon {
     if (READY_OPS.has(op) && !this.running()) {
       return Promise.reject(new OpError('not-ready', 'The environment is still starting.'));
     }
-    return dispatch(this.handlers, op, args).catch((err: unknown) => {
-      if (err instanceof TurnsError || err instanceof WorkError) throw new OpError(err.code, err.message);
-      if (err instanceof ItemStateError) throw new OpError('invalid-state', err.message);
+    return dispatch(this.handlers, op, args, ctx).catch((err: unknown) => {
+      if (err instanceof TurnsError || err instanceof WorkError || err instanceof JournalError) throw new OpError(err.code, err.message);
+      if (err instanceof ItemStateError || err instanceof StepStateError) throw new OpError('invalid-state', err.message);
       throw err;
     });
   }
@@ -607,7 +726,8 @@ export class Daemon {
   }
 
   private readonly handlers: Handlers = {
-    'snapshot.get': () => this.snapshot(),
+    'snapshot.get': () => this.parts.freeze(this.snapshot()),
+    'snapshot.part': ({ cursor }) => this.parts.next(cursor),
     'session.history': ({ sessionId, before, limit }) => {
       if (!this.turns?.get(sessionId)) throw new OpError('not-found', `No session ${sessionId}.`);
       // Held text-deltas get their seq first, so the page holds exactly the events up to head.
@@ -635,9 +755,9 @@ export class Daemon {
       if (!this.turns?.answer(sessionId, askId, answers)) throw new OpError('not-found', 'That question is no longer open.');
       return {};
     },
-    'item.create': ({ title, body, agent, repo, position }) => publicItem(this.items.create({ title, body, agent, repo, position }, 'user')),
+    'item.create': ({ title, body, agent, repo, position, links }) => this.pub(this.items.create({ title, body, agent, repo, position, links }, 'user')),
     'item.update': ({ itemId, title, body, repo }) =>
-      publicItem(
+      this.pub(
         this.items.update(
           itemId,
           { ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(repo !== undefined ? { repo } : {}) },
@@ -645,14 +765,18 @@ export class Daemon {
         ),
       ),
     'item.move': ({ itemId, position }) => ({ order: this.items.move(itemId, position) }),
-    'item.assign': ({ itemId, agent }) => publicItem(this.items.assign(itemId, agent, 'user')),
-    'item.cancel': ({ itemId }) => publicItem(this.items.cancel(itemId, 'user')),
-    'item.retry': ({ itemId }) => publicItem(this.items.retry(itemId)),
-    'item.accept': ({ itemId }) => publicItem(this.items.accept(itemId)),
+    'item.assign': ({ itemId, agent }) => this.pub(this.items.assign(itemId, agent, 'user')),
+    'item.cancel': ({ itemId }) => this.pub(this.items.cancel(itemId, 'user')),
+    'item.retry': ({ itemId }) => this.pub(this.items.retry(itemId, 'user')),
+    'item.accept': ({ itemId, reason }) => this.pub(this.items.accept(itemId, undefined, 'user', reason)),
+    'item.link': ({ itemId, ref }) => this.pub(this.items.link(itemId, ref)),
+    'item.unlink': ({ itemId, referenceId }) => this.pub(this.items.unlink(itemId, referenceId)),
+    'item.workflow': ({ itemId, round }) => this.itemWorkflow(itemId, round),
+    'item.records': (args) => this.itemRecords(args),
     'item.publish': ({ itemId }) => this.items.publish(itemId, {}, 'user'),
     'issue.import': async ({ repo, number, agent, position }) => {
       if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
-      return publicItem(await this.github.importIssue(repo, number, { agent, position }, 'user'));
+      return this.pub(await this.github.importIssue(repo, number, { agent, position }, 'user'));
     },
     'issue.search': async ({ query, repo, state }) => {
       if (!this.work || !this.definition) throw new OpError('not-ready', 'The environment is still starting.');
@@ -720,13 +844,63 @@ export class Daemon {
       github: this.credentials.githubAuth(),
       sessions: sessions.map((s) => this.turns.summary(s)),
       orchestratorSessionId: this.turns?.orchestrator()?.id ?? null,
-      items: this.backlog ? this.backlog.list().map(publicItem) : [],
+      items: this.backlog && this.workflow ? this.backlog.list().map((i) => this.pub(i)) : [],
       order: this.backlog ? this.backlog.order() : [],
       capacity: capacityOf(this.schedulerView(), this.scheduler?.isPaused() ?? false),
       inflight: this.turns ? this.turns.inflight() : [],
       asks: this.turns ? this.turns.openAsks() : [],
+      decisions: [],
       repos: this.definition ? this.definition.repos.map((r) => ({ github: r.github, dir: r.dir })) : [],
     };
+  }
+
+  /** One round of a ticket's workflow (the newest by default) with the latest attempt of each step. */
+  private itemWorkflow(itemId: string, round?: number): OpResult<'item.workflow'> {
+    const item = this.items.item(itemId);
+    const wf = this.workflow.workflow(item.id);
+    const empty = { reviews: [], decisions: [], findingsTotal: 0 };
+    if (!wf || !wf.rounds.length) return { roundsTotal: 0, round: null, steps: [], stepsCursor: null, ...empty };
+    const info = round === undefined ? latestRound(wf.rounds) : wf.rounds.find((r) => r.round === round);
+    if (!info) throw new OpError('not-found', `${itemLabel(item)} has no round ${round ?? ''}.`);
+    const steps = roundSteps(wf.steps, info.round);
+    const shown = steps.slice(0, PAGE_LIMITS.workflowSteps);
+    return {
+      roundsTotal: wf.rounds.length,
+      round: info,
+      steps: shown,
+      stepsCursor: steps.length > shown.length ? String(shown.length) : null,
+      ...empty,
+    };
+  }
+
+  /**
+   * A ticket's growing collections, paged at a stable boundary: records are
+   * append-only in journal order, so the cursor (the next record's
+   * position) never shows one twice. Pages stay below 512 KiB and hold at
+   * least one record. Reviews, findings, decisions, trails and audits
+   * arrive with later phases and are empty.
+   */
+  private itemRecords(args: OpArgs<'item.records'>): OpResult<'item.records'> {
+    const item = this.items.item(args.itemId);
+    const wf = this.workflow.workflow(item.id);
+    let all: unknown[] = [];
+    if (wf && args.kind === 'rounds') all = wf.rounds;
+    if (wf && args.kind === 'steps') {
+      all = args.round === undefined ? wf.steps : wf.steps.filter((s) => s.round === args.round);
+    }
+    const start = args.cursor === undefined ? 0 : Number.parseInt(args.cursor, 10);
+    if (!Number.isInteger(start) || start < 0) throw new OpError('invalid-args', 'cursor is not a cursor this op returned.');
+    const limit = args.limit ?? PAGE_LIMITS.recordsLimit;
+    const records: unknown[] = [];
+    let bytes = 0;
+    let at = start;
+    for (; at < all.length && records.length < limit; at++) {
+      const size = Buffer.byteLength(JSON.stringify(all[at]), 'utf8') + 1;
+      if (records.length && bytes + size > PAGE_LIMITS.pageBytes - 1024) break;
+      records.push(all[at]);
+      bytes += size;
+    }
+    return { records, nextCursor: at < all.length ? String(at) : null };
   }
 
   /* ---------- Upgrade and shutdown ---------- */
@@ -858,6 +1032,7 @@ export class Daemon {
   private async persist(): Promise<void> {
     this.events?.flush();
     this.instance?.save();
+    this.tablesFile?.save();
     await this.transcripts?.flush();
     await flushJsonWrites();
   }
