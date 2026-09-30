@@ -345,6 +345,22 @@ describe('header fields', () => {
     await refused(mutated('LICENSE', (h) => (h[8] = 0x41)), 'bad-header', 'name field has bytes after its terminator');
   });
 
+  it('reads the owner names like every text field and requires NUL device numbers, whatever the checksum says', async () => {
+    // Each mutation carries a corrected checksum: only the field itself is what refuses the header.
+    await refused(mutated('LICENSE', (h) => h.write('root\0x', 265, 'latin1')), 'bad-header', 'uname field has bytes after its terminator');
+    await refused(mutated('LICENSE', (h) => (h[296] = 0xff)), 'bad-header', 'uname field has bytes after its terminator');
+    await refused(mutated('LICENSE', (h) => h.write('root\0x', 297, 'latin1')), 'bad-header', 'gname field has bytes after its terminator');
+    await refused(mutated('LICENSE', (h) => (h[328] = 0xff)), 'bad-header', 'gname field has bytes after its terminator');
+    await refused(mutated('LICENSE', (h) => (h[329] = 0xff)), 'bad-header', 'has device numbers');
+    await refused(mutated('LICENSE', (h) => h.write('0000001\0', 329, 'latin1')), 'bad-header', 'has device numbers');
+    await refused(mutated('LICENSE', (h) => (h[337] = 0xff)), 'bad-header', 'has device numbers');
+    await refused(mutated('LICENSE', (h) => h.write('0000001\0', 337, 'latin1')), 'bad-header', 'has device numbers');
+    await refused(mutated('bin/', (h) => (h[344] = 0x01)), 'bad-header', 'has device numbers');
+    // Owner names that fill their field, and the packager's own, are fine.
+    expectLayout((await unpack(mutated('LICENSE', (h) => h.write('x'.repeat(32), 265, 'latin1')))).dir);
+    expectLayout((await unpack(mutated('LICENSE', (h) => h.write('wheel', 297, 'latin1')))).dir);
+  });
+
   it('requires NUL padding after a body', async () => {
     const raw = Buffer.from(tar(entries()));
     const { body, size } = locate(raw, 'LICENSE');

@@ -17,8 +17,9 @@
  *
  * The deflate stream is inflated as a stream and read block by block.
  * Every header must be ustar (magic `ustar\0`, version `00`) with a
- * verified checksum, octal fields (no base-256), an empty prefix and link
- * name, and a type flag of a regular file or a directory: links, devices,
+ * verified checksum, octal fields (no base-256), an empty prefix, link
+ * name and device numbers, owner names terminated like every text field,
+ * and a type flag of a regular file or a directory: links, devices,
  * FIFOs, PAX and GNU extension entries are refused. A name must be exactly
  * one of the layout's; absolute, traversing or otherwise unsafe paths are
  * refused before that lookup. Modes must equal the layout's, so setuid,
@@ -186,6 +187,10 @@ function readHeader(block: Buffer, seen: Set<string>): Entry {
   if (refused) throw fail('unexpected-entry', `Entry ${JSON.stringify(name)} is ${refused}; a package holds regular files and bin/ only.`);
   if (type !== '0' && type !== '\0' && type !== '5') throw fail('unexpected-entry', `Entry ${JSON.stringify(name)} has type flag ${JSON.stringify(type)}.`);
   if (!allZero(block.subarray(157, 257))) throw header(`Entry ${JSON.stringify(name)} has a link name.`);
+  // The owner names are read like every text field; the device numbers are NUL, as the packager writes them.
+  text(block, 265, 32, 'uname');
+  text(block, 297, 32, 'gname');
+  if (!allZero(block.subarray(329, 345))) throw header(`Entry ${JSON.stringify(name)} has device numbers; a package's headers carry none.`);
   if (!allZero(block.subarray(345, 500))) throw header(`Entry ${JSON.stringify(name)} uses the prefix field; package names are short.`);
   if (!allZero(block.subarray(500, BLOCK))) throw header(`Entry ${JSON.stringify(name)} has bytes in the header's padding.`);
   const mode = octal(block, 100, 8, 'mode');
