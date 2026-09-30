@@ -1,0 +1,2 @@
+# Signed bytes: a checkout must not rewrite line endings, or the signatures break.
+* -text

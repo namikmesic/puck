@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,6 +114,225 @@ describe('toolchain pin', () => {
   it('routes package and make through the artifact-checking wrapper', () => {
     expect(pkg.scripts.package).toBe('node scripts/forge.mjs package');
     expect(pkg.scripts.make).toBe('node scripts/forge.mjs make');
+  });
+});
+
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | null = null;
+  const push = () => {
+    if (current) words.push(current);
+    current = '';
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (quote === '"' && ch === '\\') current += command[++i] ?? '';
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\') {
+      const next = command[++i];
+      if (next === undefined || next === '\n') continue;
+      current += next;
+      continue;
+    }
+    if (ch === '#' && current === '') break;
+    if (/\s/.test(ch)) {
+      push();
+      continue;
+    }
+    current += ch;
+  }
+  push();
+  return words;
+}
+
+function splitOutsideQuotes(input: string, separator: (index: number, source: string) => number): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    const size = separator(i, input);
+    if (size > 0) {
+      parts.push(input.slice(start, i));
+      i += size - 1;
+      start = i + 1;
+    }
+  }
+  parts.push(input.slice(start));
+  return parts;
+}
+
+function shellPipelines(script: string): string[][][] {
+  const statements = splitOutsideQuotes(script, (i, source) => {
+    const two = source.slice(i, i + 2);
+    if (two === '&&' || two === '||') return 2;
+    if (source[i] === ';' || source[i] === '\n') return 1;
+    return 0;
+  });
+  const pipelines: string[][][] = [];
+  for (const statement of statements) {
+    const pipe = splitOutsideQuotes(statement, (i, source) => (source[i] === '|' && source[i + 1] !== '|' ? 1 : 0))
+      .map((segment) => shellWords(segment))
+      .filter((argv) => argv.length > 0);
+    if (pipe.length) pipelines.push(pipe);
+  }
+  return pipelines;
+}
+
+function optionValue(argv: string[], name: string): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === name) return argv[i + 1];
+    if (token.startsWith(`${name}=`)) return token.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+function invokes(argv: string[], script: string): boolean {
+  return argv.some((token) => token === script || token.endsWith(`/${script}`));
+}
+
+function npmScript(argv: string[]): string | undefined {
+  const run = argv.indexOf('run');
+  if (run < 0 || !argv.slice(0, run).includes('npm')) return undefined;
+  let i = run + 1;
+  if (argv[i] === '--') i++;
+  for (; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === '--') return undefined;
+    if (!token.startsWith('-')) return token;
+  }
+  return undefined;
+}
+
+/** Every --mode the command passes to `entry`, in either spelling. */
+function commandModes(command: string, entry: string): string[] {
+  const argv = shellWords(command);
+  if (!invokes(argv, entry)) return [];
+  return argv.flatMap((token, i) => (token === '--mode' ? [argv[i + 1]] : token.startsWith('--mode=') ? [token.slice('--mode='.length)] : []));
+}
+
+function dockerfileInstructions(source: string): { name: string; args: string }[] {
+  const instructions: { name: string; args: string }[] = [];
+  let pending = '';
+  let continued = false;
+  for (const raw of source.split(/\r?\n/)) {
+    if (!continued && /^\s*(#|$)/.test(raw)) continue;
+    const escape = raw.endsWith('\\');
+    pending += escape ? raw.slice(0, -1) : raw;
+    if (escape) {
+      continued = true;
+      continue;
+    }
+    continued = false;
+    const text = pending.trim();
+    pending = '';
+    const match = /^([A-Za-z]+)\s*([\s\S]*)$/.exec(text);
+    if (match) instructions.push({ name: match[1].toUpperCase(), args: match[2].trim() });
+  }
+  return instructions;
+}
+
+function isProductionPackaging(argv: string[]): boolean {
+  const script = npmScript(argv);
+  if (script === 'package:runner:release') return true;
+  const packagesRunner = script === 'package:runner' || script === 'build:runner' || invokes(argv, 'package-runner.mjs') || invokes(argv, 'build-runner.mjs');
+  return packagesRunner && optionValue(argv, '--mode') === 'production';
+}
+
+function isReleaseSigning(argv: string[]): boolean {
+  const script = npmScript(argv);
+  if (script === 'runner-release') return argv.slice(argv.indexOf(script) + 1).includes('sign');
+  return invokes(argv, 'runner-release.mjs') && argv.includes('sign');
+}
+
+function mentions(value: unknown, needle: string): boolean {
+  if (typeof value === 'string') return value.includes(needle);
+  if (Array.isArray(value)) return value.some((item) => mentions(item, needle));
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value).some(([key, item]) => key.includes(needle) || mentions(item, needle));
+  }
+  return false;
+}
+
+function isRunnerVersionProbe(argv: string[]): boolean {
+  return argv.includes('version') && argv.includes('--json') && argv.some((token) => token.includes('puck-runner'));
+}
+
+function assertsDevelopmentTrust(argv: string[]): boolean {
+  return argv.some((arg) => arg.includes('trustMode') && arg.includes('development') && !arg.includes('production'));
+}
+
+describe('runner trust mode and release signing', () => {
+  const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+  const dockerfile = read('src/server/Dockerfile');
+  const workflow = parseYaml(read('.github/workflows/ci.yml')) as { jobs?: Record<string, { steps?: { name?: string; run?: unknown }[] }> };
+  const jobs = Object.values(workflow.jobs ?? {});
+  const steps = jobs.flatMap((job) => job.steps ?? []);
+
+  it('builds and packages the runner in exactly one explicit trust mode', () => {
+    expect(commandModes(pkg.scripts['build:runner'], 'build-runner.mjs')).toEqual(['development']);
+    expect(commandModes(pkg.scripts['package:runner'], 'package-runner.mjs')).toEqual(['development']);
+    expect(commandModes(pkg.scripts['package:runner:release'], 'package-runner.mjs')).toEqual(['production']);
+  });
+
+  it('packages the development server image in development mode', () => {
+    const runs = dockerfileInstructions(dockerfile)
+      .filter((instruction) => instruction.name === 'RUN')
+      .map((instruction) => shellWords(instruction.args))
+      .filter((argv) => invokes(argv, 'package-runner.mjs'));
+    expect(runs).toHaveLength(1);
+    expect(optionValue(runs[0], '--mode')).toBe('development');
+  });
+
+  it('never packages production runners or signs in CI, and checks the packaged runner reports development trust', () => {
+    const commands = steps.flatMap((step) => (typeof step.run === 'string' ? shellPipelines(step.run).flat() : []));
+    expect(commands.filter(isProductionPackaging)).toEqual([]);
+    expect(commands.filter(isReleaseSigning)).toEqual([]);
+    expect(mentions(workflow, 'PUCK_RUNNER_RELEASE_PRIVATE_KEY')).toBe(false);
+
+    const tarball = steps.filter((step) => typeof step.name === 'string' && step.name.includes('macOS') && step.name.toLowerCase().includes('tarball'));
+    expect(tarball).toHaveLength(1);
+    const script = tarball[0].run;
+    if (typeof script !== 'string') throw new Error('expected the macOS runner tarball step to have a run script');
+    const pipelines = shellPipelines(script);
+    expect(pipelines.flat().filter((argv) => npmScript(argv) === 'package:runner')).toHaveLength(1);
+    expect(pipelines.some((pipe) => pipe.some(isRunnerVersionProbe) && pipe.some(assertsDevelopmentTrust))).toBe(true);
+  });
+
+  it('keeps private keys out of the repository', () => {
+    const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+    const privateKey = /-----BEGIN [A-Z ]*PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END [A-Z ]*PRIVATE KEY-----/;
+    const offenders = tracked.filter((file) => {
+      try {
+        return privateKey.test(readFileSync(join(root, file), 'latin1'));
+      } catch {
+        return false;
+      }
+    });
+    expect(offenders).toEqual([]);
   });
 });
 

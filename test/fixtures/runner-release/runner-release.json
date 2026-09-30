@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "product": "puck-runner",
+  "publisher": "namikmesic/puck",
+  "version": "0.1.0",
+  "sourceCommit": "6efad7f4fcd7c360d3b37b56a4888d4a3934dccb",
+  "runnerProtocol": 1,
+  "signingKeyId": "8263124c00f05bc5c5812c02a31f917d99c8d5759a92443b02b479c26fa28930",
+  "sha256sumsSha256": "0e80afd2492c5695fc824bbf3a6c4dedfe58efc364a297dea70aff818001ff2e",
+  "assets": [
+    {
+      "os": "linux",
+      "arch": "x64",
+      "file": "puck-runner-linux-x64-0.1.0.tar.gz",
+      "sha256": "ef26e641a330200ce6a64a25b666dbc060eacc427057a8b3c69cb3cf5ab9c875",
+      "size": 170
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "file": "puck-runner-linux-arm64-0.1.0.tar.gz",
+      "sha256": "aec87833248fc460ff111eeaca26a0441bfef8c7be109e925d15d600fec5d34c",
+      "size": 172
+    },
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "file": "puck-runner-macos-arm64-0.1.0.tar.gz",
+      "sha256": "4a09a407d59146373f833f011318f539e415d156dbfd2c8c3197b411f6c609c4",
+      "size": 172
+    }
+  ]
+}

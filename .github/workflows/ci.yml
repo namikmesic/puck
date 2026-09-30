@@ -41,6 +41,7 @@ jobs:
           tar xzf "$GITHUB_WORKSPACE/out/puck-runner/$VERSION/puck-runner-macos-arm64-$VERSION.tar.gz"
           ./config.sh --help
           ./bin/node --version
+          ./bin/node bin/puck-runner.cjs version --json | grep -F '"trustMode":"development"'
 
   daemon-docker:
     # The daemon's Docker suite needs a Docker engine; macOS runners have none.

@@ -24,21 +24,24 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src/channel src/channel
 COPY src/harness src/harness
+COPY src/runner-release src/runner-release
 
 FROM deps AS build
 COPY scripts/build-server.mjs scripts/
 COPY src/server src/server
 RUN node scripts/build-server.mjs
 
-# The runner packages, built only for the development image. Nothing here
-# runs a target binary, so any build host architecture packages all three. The cache mount keeps the downloaded Node
-# archives across rebuilds; the script checks their sha256 before every use.
+# The runner packages, built only for the development image, in the
+# development trust mode (unsigned, checksum-checked downloads from this
+# server). Nothing here runs a target binary, so any build host architecture
+# packages all three. The cache mount keeps the downloaded Node archives
+# across rebuilds; the script checks their sha256 before every use.
 FROM deps AS runner
 COPY LICENSE ./
-COPY scripts/build-runner.mjs scripts/package-runner.mjs scripts/
+COPY scripts/build-runner.mjs scripts/package-runner.mjs scripts/runner-release.mjs scripts/ts-resolve.mjs scripts/
 COPY src/puck-runner src/puck-runner
 RUN --mount=type=cache,target=/src/.cache/runner-node \
-    node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/package-runner.mjs --out /src/runner-downloads
+    node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/package-runner.mjs --mode development --out /src/runner-downloads
 
 FROM node:22.23.3-bookworm-slim AS server-false
 ENV NODE_ENV=production \

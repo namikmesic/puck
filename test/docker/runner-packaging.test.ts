@@ -19,7 +19,7 @@ const BASE = 'debian:bookworm-slim';
 const tarball = (target: string) => path.join(OUT, VERSION, `puck-runner-${target}-${VERSION}.tar.gz`);
 
 beforeAll(() => {
-  execFileSync(process.execPath, ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', path.join(ROOT, 'scripts', 'package-runner.mjs'), '--out', OUT], {
+  execFileSync(process.execPath, ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON', path.join(ROOT, 'scripts', 'package-runner.mjs'), '--mode', 'development', '--out', OUT], {
     cwd: ROOT,
     stdio: 'inherit',
   });
@@ -33,6 +33,7 @@ async function runInLinux(platform: string, target: string): Promise<{ code: num
     'test ! -e /usr/bin/node && test ! -e /usr/local/bin/node',
     './config.sh --help',
     'echo "arch=$(./bin/node -p process.arch) version=$(./bin/node bin/puck-runner.cjs version) node=$(./bin/node --version)"',
+    './bin/node bin/puck-runner.cjs version --json',
   ].join('\n');
   const id = (await must(['create', '--platform', platform, BASE, 'sh', '-c', script], { timeoutMs: 300_000 })).trim();
   try {
@@ -68,6 +69,7 @@ describe('Docker scenario: runner tarballs', () => {
       expect(r.code, r.out).toBe(0);
       expect(r.out).toContain('Usage: ./config.sh --url <server> --token <registration token>');
       expect(r.out).toContain(`arch=${arch} version=${VERSION} node=v22.`);
+      expect(r.out).toContain(`{"version":"${VERSION}","trustMode":"development","runnerProtocol":`);
     });
   }
 
