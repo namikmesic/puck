@@ -9,6 +9,13 @@
  * assertion (EdDSA, `iss = sub = runnerId`, audience this endpoint, at most
  * five minutes, single-use `jti`) and exchanging it at `POST /v1/runners/token`
  * for a one-hour runner access token (`PRA_`), which opens its socket.
+ * An assertion may carry a signed `ver` (`MAJOR.MINOR.PATCH`, with an
+ * optional pre-release suffix; anything else is rejected). The token route
+ * compares `PUCK_RUNNER_MIN_VERSION` against that claim when it is present,
+ * and against the version stored for the runner when it is absent. The
+ * stored version is written at registration and when an accepted relay
+ * hello or status frame is recorded. A removal assertion is accepted
+ * without a version comparison, including after the floor has risen.
  *
  * Removal takes a removal token (`PRR_`, one hour) or the runner's own
  * signed assertion. It revokes the key and either keeps the runner's

@@ -5,8 +5,9 @@
  * assertion (EdDSA; iss = sub = runnerId; audience the server's own URL
  * plus the endpoint path; at most five minutes; a fresh `jti` every time),
  * which the server exchanges for a one-hour runner access token or accepts
- * for `config.sh remove`. The same key signs each channel handshake
- * (src/channel/e2e.ts).
+ * for `config.sh remove`. A token assertion may also carry `ver`, the
+ * running release, so an updated runner can reconnect. The same key signs
+ * each channel handshake (src/channel/e2e.ts).
  */
 
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign, type KeyObject } from 'node:crypto';
@@ -51,7 +52,6 @@ export function loadRunnerKey(paths: RunnerPaths): RunnerKey {
 
 const b64url = (v: string | Buffer): string => Buffer.from(v).toString('base64url');
 
-/** Token assertions may carry the running version so an updated runner can reconnect. */
 export function signAssertion(runnerId: string, key: KeyObject, audience: string, nowMs: number, version?: string): string {
   const iat = Math.floor(nowMs / 1000);
   const head = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' }));
