@@ -25,11 +25,11 @@ import { newId } from '../harness/ulid';
 import { deliveryPull } from '../harness/references';
 import { createStep, latestAttempts, latestRound, legacyIds, mapLegacy, moveStep, readyState, roundSteps, stageOf, summarize, type StepTrigger } from '../harness/workflow';
 import { applyItemEvent, applyTableEvent, emptyDelta, PIPELINE, type ItemsDelta, type JournalActor, type LedgerEvent, type TicketChange } from './delivery/derive';
-import { Ledger, openJournal, type Journal, type JournalIO, type LedgerDeps, type Transaction } from './delivery/journal';
+import { CheckpointAheadError, Ledger, openJournal, type Journal, type JournalIO, type LedgerDeps, type Transaction } from './delivery/journal';
 import { rollForward } from './delivery/derive';
 import type { Logger } from './log';
 import { emptyTables, mergeKey, type TablesFile, type WorkflowRecord } from './store/delivery';
-import type { ItemRecord, ItemsFile } from './store/items';
+import { emptyItems, type ItemRecord, type ItemsFile } from './store/items';
 import type { JsonStore } from './store/store';
 
 function itemIdOf(ev: LedgerEvent): string | null {
@@ -400,6 +400,13 @@ export interface DeliveryBoot {
  * tail; a damaged one throws JournalDamagedError), roll items.json and
  * delivery/tables.json forward over every transaction they do not hold,
  * commit both, and build the write path over them.
+ *
+ * A checkpoint that holds records past the journal's end (the journal was
+ * restored from an older backup) is stale: nothing would roll it forward,
+ * and later transactions would be skipped until the sequence caught up.
+ * tables.json is rebuilt from the journal. items.json is rebuilt the same
+ * way once the journal holds the bootstrap marker (every ticket then has
+ * its ticket.created); without it the boot fails with CheckpointAheadError.
  */
 export function bootDelivery(opts: {
   file: string;
@@ -412,9 +419,27 @@ export function bootDelivery(opts: {
   hooks?: LedgerDeps['hooks'];
 }): DeliveryBoot {
   const opened = openJournal(opts.file, { io: opts.io, log: opts.log });
+  const head = opened.journal.head();
+  const tablesSeq = opts.tables.get().journalSeq;
+  const rebuildTables = tablesSeq > head;
+  if (rebuildTables) {
+    opts.log.warn('journal.checkpoint-ahead', { file: 'delivery/tables.json', journalSeq: tablesSeq, head, rebuilt: true });
+    opts.tables.set(emptyTables());
+  }
+  const itemsSeq = opts.items.get().journalSeq;
+  const rebuildItems = itemsSeq > head;
+  if (rebuildItems) {
+    const marked = opened.transactions.some((tx) => tx.events.some((ev) => (ev as { kind?: unknown }).kind === 'journal.bootstrap'));
+    opts.log.warn('journal.checkpoint-ahead', { file: 'items.json', journalSeq: itemsSeq, head, rebuilt: marked });
+    if (!marked) {
+      opened.journal.close();
+      throw new CheckpointAheadError(itemsSeq, head);
+    }
+    opts.items.set(emptyItems());
+  }
   const rolled = rollForward(opts.items.get(), opts.tables.get(), opened.transactions);
-  if (rolled.items) opts.items.commit();
-  if (rolled.tables) opts.tables.commit();
+  if (rolled.items || rebuildItems) opts.items.commit();
+  if (rolled.tables || rebuildTables) opts.tables.commit();
   if (rolled.items || rolled.tables) opts.log.info('journal.rolled-forward', rolled);
   const ledger = new Ledger({
     journal: opened.journal,
@@ -502,7 +527,7 @@ export function bootstrapLegacy(wf: Workflow, items: readonly ItemRecord[], next
   });
   // The marker counts every ticket the bootstrap journaled, across a crash and its resumption.
   const tx = wf.begin('journal.bootstrap');
-  tx.push({ kind: 'journal.bootstrap', format: 2, tickets: items.length });
+  tx.push({ kind: 'journal.bootstrap', format: 2, tickets: items.length, nextNumber });
   wf.commit(tx);
   return journaled;
 }

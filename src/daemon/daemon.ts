@@ -47,7 +47,7 @@ import {
 } from '../harness/daemon-protocol';
 import { latestAttempts, latestRound, roundSteps, StepStateError } from '../harness/workflow';
 import { asLedgerEvents } from './delivery/derive';
-import { JournalDamagedError, JournalError, type Journal } from './delivery/journal';
+import { CheckpointAheadError, JournalDamagedError, JournalError, type Journal } from './delivery/journal';
 import { deliveryStore, type TablesFile } from './store/delivery';
 import type { ItemRecord, ItemsFile } from './store/items';
 import { sameTokenPermissions, tokenPoliciesFrom } from '../harness/github-permissions';
@@ -392,6 +392,11 @@ export class Daemon {
         now: this.now,
       });
     } catch (err) {
+      if (err instanceof CheckpointAheadError) {
+        this.journalError = err.message;
+        log.error('journal.checkpoint-ahead', undefined, { journalSeq: err.journalSeq, head: err.head });
+        return;
+      }
       if (!(err instanceof JournalDamagedError)) throw err;
       this.journalError = err.message;
       log.error('journal.damaged', undefined, { line: err.line });

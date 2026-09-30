@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addSnapshotPart,
+  PAGE_LIMITS,
   snapshotFromHead,
   WIRE_LIMITS,
   type DaemonEvent,
@@ -22,7 +23,9 @@ import { EventLog } from '../../src/daemon/eventlog';
 import type { HarnessAdapter } from '../../src/daemon/harness/types';
 import { createLogger, nullLogger } from '../../src/daemon/log';
 import { writeJsonAtomicSync } from '../../src/daemon/store/jsonfile';
-import { DaemonServer, SnapshotParts } from '../../src/daemon/server';
+import { DaemonServer, SnapshotParts, snapshotParts } from '../../src/daemon/server';
+import { recordEvent, type TurnEntry } from '../../src/harness/transcript';
+import { recordLive } from '../../src/renderer/instance-store';
 import { V1_EVENT_KINDS } from '../../src/daemon/protocol-v1';
 import { defined, exampleDefinition, fakeRunner, tempRoot } from './daemon-fakes';
 
@@ -1055,6 +1058,77 @@ describe('snapshot parts', () => {
     for (const part of parts) expect(bytes(part)).toBeLessThan(512 * 1024);
     expect(parts.filter((p) => p.collection === 'inflight').length).toBeGreaterThan(1);
     expect(assembled).toEqual(snapshot);
+  });
+
+  it('keeps the text a snapshot froze when a coalesced delta arrives before its part is read', () => {
+    const store = new SnapshotParts({ now: () => 1 });
+    const turn: TurnEntry = { kind: 'turn', turnId: 'trn_1', ts: 1, events: [] };
+    recordEvent(turn, { kind: 'text-delta', text: 'a' }, 1);
+    // What Turns.inflight hands the snapshot: a copy of the array, the same event objects.
+    const snapshot = base();
+    snapshot.inflight = [{ sessionId: 'ses_1', turnId: 'trn_1', startedAt: 1, events: [...turn.events] }];
+    const head = store.freeze(snapshot);
+    // After the head: the next delta coalesces into the same event object.
+    recordEvent(turn, { kind: 'text-delta', text: 'b' }, 2);
+    expect(turn.events).toEqual([expect.objectContaining({ kind: 'text-delta', text: 'ab' })]);
+    const part = store.next(defined(head.partsCursor));
+    expect(part).toMatchObject({ collection: 'inflight', records: [{ turnId: 'trn_1', events: [{ kind: 'text-delta', text: 'a' }] }] });
+    // The client applies the snapshot, then the event after its head, and ends with the live text.
+    const assembled = snapshotFromHead(head);
+    addSnapshotPart(assembled, part);
+    const live = defined(assembled.inflight[0]).events;
+    recordLive(live, { kind: 'text-delta', text: 'b' });
+    expect(live).toEqual([expect.objectContaining({ kind: 'text-delta', text: 'ab' })]);
+  });
+
+  it('cuts one coalesced message larger than a part into bounded deltas that join back exactly', () => {
+    const turn: TurnEntry = { kind: 'turn', turnId: 'trn_big', ts: 1, events: [] };
+    recordEvent(turn, { kind: 'tool-start', toolId: 't1', tool: 'Read', summary: 'a.ts', input: '{}' }, 1);
+    // Multibyte, astral (surrogate pairs), and characters JSON escapes, across every cut.
+    const unit = 'plain ascii, é ñ, 日本語, 😀🚀, "quoted" \\ back\\slash, tab\t, nul\u0001;';
+    let expected = '';
+    for (let n = 0; n < 300; n++) {
+      const text = `${n}:${unit.repeat(Math.ceil(4000 / unit.length)).slice(0, 4000 - String(n).length - 1)}`;
+      expected += text;
+      recordEvent(turn, { kind: 'text-delta', text }, 2 + n);
+    }
+    recordEvent(turn, { kind: 'tool-end', toolId: 't1', ok: true, output: 'done' }, 400);
+    expect(turn.events).toHaveLength(3);
+    expect(bytes(turn.events[1])).toBeGreaterThan(1024 * 1024);
+    const snapshot = base();
+    snapshot.inflight = [{ sessionId: 'ses_1', turnId: 'trn_big', startedAt: 1, events: [...turn.events] }];
+    const { parts, assembled } = page(snapshot);
+    expect(parts.filter((p) => p.collection === 'inflight').length).toBeGreaterThan(2);
+    // Every part, framed as its response, is below the part limit and the frame guard.
+    for (const part of parts) {
+      const frame = bytes({ t: 'res', id: 'c999999', ok: true, result: part });
+      expect(frame).toBeLessThan(PAGE_LIMITS.pageBytes);
+      expect(frame).toBeLessThan(WIRE_LIMITS.maxFrameBytes);
+    }
+    const events = defined(assembled.inflight[0]).events;
+    expect(assembled.inflight).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'tool-start', toolId: 't1' });
+    expect(events.at(-1)).toMatchObject({ kind: 'tool-end', toolId: 't1' });
+    const deltas = events.slice(1, -1);
+    expect(deltas.every((e) => e.kind === 'text-delta')).toBe(true);
+    const joined = deltas.map((e) => (e.kind === 'text-delta' ? e.text : '')).join('');
+    expect(joined).toBe(expected);
+    for (const e of deltas) {
+      if (e.kind !== 'text-delta') continue;
+      // No cut lands inside a surrogate pair.
+      expect(/[\uD800-\uDBFF]$/.test(e.text) || /^[\uDC00-\uDFFF]/.test(e.text)).toBe(false);
+    }
+    // Applied as live events, the pieces coalesce back into the one message.
+    const live: typeof events = [];
+    for (const e of events) recordLive(live, e);
+    expect(live.map((e) => e.kind)).toEqual(['tool-start', 'text-delta', 'tool-end']);
+    expect(live[1]).toMatchObject({ text: expected });
+  });
+
+  it('refuses rather than cuts an event that is not text and does not fit a part', () => {
+    const snapshot = base();
+    snapshot.inflight = [{ sessionId: 'ses_1', turnId: 'trn_x', startedAt: 1, events: [{ kind: 'error', message: 'x'.repeat(600 * 1024) }] }];
+    expect(() => snapshotParts(snapshot)).toThrow(/An in-flight error event of \d+ bytes does not fit a snapshot part\./);
   });
 
   it('forgets a frozen copy 120 s after its last request', () => {

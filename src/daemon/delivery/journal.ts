@@ -129,6 +129,23 @@ export class JournalDamagedError extends Error {
   }
 }
 
+/**
+ * items.json is ahead of the journal (a journal restored from an older
+ * backup) and the journal cannot rebuild it: it holds no bootstrap marker,
+ * so not every ticket has its ticket.created. The boot fails.
+ */
+export class CheckpointAheadError extends Error {
+  constructor(
+    readonly journalSeq: number,
+    readonly head: number,
+  ) {
+    super(
+      `items.json holds journal records up to ${journalSeq} but the delivery journal ends at ${head}, and the journal cannot rebuild it; restore items.json and delivery/journal.ndjson from the same backup.`,
+    );
+    this.name = 'CheckpointAheadError';
+  }
+}
+
 export const JOURNAL_FAILING = 'The delivery journal is failing; see the environment log.';
 export const JOURNAL_NOT_RECORDED = 'The delivery journal could not record the change.';
 

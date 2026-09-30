@@ -75,7 +75,8 @@ export type LedgerEvent =
       attachment: { path: string; bytes: number; sha256: string } | null;
     }
   | ({ kind: 'merge.observed' } & MergeObserved)
-  | { kind: 'journal.bootstrap'; format: 2; tickets: number };
+  /** `nextNumber`: the numbering's high-water mark, so an empty legacy backlog keeps it through a rebuild. */
+  | { kind: 'journal.bootstrap'; format: 2; tickets: number; nextNumber?: number };
 
 export type LedgerKind = LedgerEvent['kind'];
 
@@ -170,6 +171,9 @@ export function applyItemEvent(file: ItemsFile, ev: LedgerEvent, at: number, del
       delta.order = true;
       return;
     }
+    case 'journal.bootstrap':
+      if (typeof ev.nextNumber === 'number') file.nextNumber = Math.max(file.nextNumber, ev.nextNumber);
+      return;
     default:
       return;
   }

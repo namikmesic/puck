@@ -81,27 +81,87 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-/** An in-flight turn too large for a part continues in the next records under the same turnId. */
-function splitInflight(turn: InflightTurn, budget: number): InflightTurn[] {
-  if (jsonBytes(turn) <= budget) return [turn];
-  const out: InflightTurn[] = [];
-  let events: InflightTurn['events'] = [];
-  let bytes = jsonBytes({ ...turn, events: [] });
-  for (const event of turn.events) {
-    const size = jsonBytes(event) + 1;
-    if (events.length && bytes + size > budget) {
-      out.push({ ...turn, events });
-      events = [];
-      bytes = jsonBytes({ ...turn, events: [] });
+/**
+ * A record as a part keeps it: parsed back from its own serialization, so
+ * no part holds a live object (a coalesced text delta grows in place after
+ * the snapshot's head), with its serialized size.
+ */
+function frozenRecord(record: unknown): { value: unknown; bytes: number } {
+  const text = JSON.stringify(record);
+  return { value: JSON.parse(text) as unknown, bytes: Buffer.byteLength(text, 'utf8') };
+}
+
+/** Serialized bytes of one character inside a JSON string (escapes counted). */
+function jsonCharBytes(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0;
+  if (code >= 0x20 && code < 0x7f) return ch === '"' || ch === '\\' ? 2 : 1;
+  return Buffer.byteLength(JSON.stringify(ch), 'utf8') - 2;
+}
+
+/**
+ * A text delta cut into consecutive deltas whose text serializes within
+ * `maxTextBytes` each. Cuts fall between code points, never inside a
+ * surrogate pair, so the pieces joined in order are the original text.
+ */
+function splitText(event: InflightTurn['events'][number] & { kind: 'text-delta' }, maxTextBytes: number): InflightTurn['events'] {
+  const out: InflightTurn['events'] = [];
+  let chunk = '';
+  let bytes = 0;
+  for (const ch of event.text) {
+    const size = jsonCharBytes(ch);
+    if (chunk && bytes + size > maxTextBytes) {
+      out.push({ ...event, text: chunk });
+      chunk = '';
+      bytes = 0;
     }
-    events.push(event);
+    chunk += ch;
     bytes += size;
   }
-  out.push({ ...turn, events });
+  if (chunk || !out.length) out.push({ ...event, text: chunk });
   return out;
 }
 
-/** A snapshot's growing collections cut into parts of whole records, each below `pageBytes` serialized. */
+/**
+ * An in-flight turn cut into records that each fit `budget` with the turn's
+ * own fields: a turn too large for one record continues in the next records
+ * under the same turnId, and a text delta too large for any record is cut
+ * into consecutive deltas. Any other event is bounded by its adapter (tool
+ * input and output are capped at a few KB); one that still does not fit is
+ * an error rather than a silent cut.
+ */
+function splitInflight(turn: InflightTurn, budget: number): InflightTurn[] {
+  if (jsonBytes(turn) <= budget) return [turn];
+  const envelope = jsonBytes({ ...turn, events: [] });
+  const room = budget - envelope - 1;
+  const events: InflightTurn['events'] = [];
+  for (const event of turn.events) {
+    const size = jsonBytes(event);
+    if (size <= room) events.push(event);
+    else if (event.kind === 'text-delta') events.push(...splitText(event, room - jsonBytes({ ...event, text: '' })));
+    else throw new Error(`An in-flight ${event.kind} event of ${size} bytes does not fit a snapshot part.`);
+  }
+  const out: InflightTurn[] = [];
+  let batch: InflightTurn['events'] = [];
+  let bytes = envelope;
+  for (const event of events) {
+    const size = jsonBytes(event) + 1;
+    if (batch.length && bytes + size > budget) {
+      out.push({ ...turn, events: batch });
+      batch = [];
+      bytes = envelope;
+    }
+    batch.push(event);
+    bytes += size;
+  }
+  out.push({ ...turn, events: batch });
+  return out;
+}
+
+/**
+ * A snapshot's growing collections cut into parts of whole records, each
+ * below `pageBytes` serialized. Every record is a copy taken now, and every
+ * record, the first of a part included, fits the part's budget.
+ */
 export function snapshotParts(snapshot: Snapshot, pageBytes: number = PAGE_LIMITS.pageBytes): Omit<SnapshotPart, 'partsCursor'>[] {
   const budget = pageBytes - PART_ENVELOPE_BYTES;
   const parts: Omit<SnapshotPart, 'partsCursor'>[] = [];
@@ -111,13 +171,15 @@ export function snapshotParts(snapshot: Snapshot, pageBytes: number = PAGE_LIMIT
     let records: unknown[] = [];
     let bytes = 0;
     for (const record of all) {
-      const size = jsonBytes(record) + 1;
+      const frozen = frozenRecord(record);
+      const size = frozen.bytes + 1;
+      if (size > budget) throw new Error(`A record in ${collection} of ${frozen.bytes} bytes does not fit a snapshot part.`);
       if (records.length && bytes + size > budget) {
         parts.push({ collection, records });
         records = [];
         bytes = 0;
       }
-      records.push(record);
+      records.push(frozen.value);
       bytes += size;
     }
     if (records.length) parts.push({ collection, records });

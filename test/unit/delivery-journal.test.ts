@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  CheckpointAheadError,
   encodeTransaction,
   JOURNAL_LIMITS,
   JournalDamagedError,
@@ -13,7 +14,7 @@ import {
   type JournalIO,
 } from '../../src/daemon/delivery/journal';
 import { PIPELINE } from '../../src/daemon/delivery/derive';
-import type { Logger } from '../../src/daemon/log';
+import { nullLogger, type Logger } from '../../src/daemon/log';
 import { migrateState } from '../../src/daemon/store/meta';
 import { bootstrapLegacy, openFirstRound, queueImplement, ticketStatus } from '../../src/daemon/workflow';
 import type { TicketTrigger } from '../../src/harness/item-transitions';
@@ -437,7 +438,7 @@ describe('the format-2 bootstrap', () => {
     const txs = journalEvents(d);
     expect(txs.map((t) => t.op)).toEqual([...Object.keys(LEGACY).map(() => 'journal.bootstrap'), 'journal.bootstrap']);
     const events = txs.flatMap((t) => t.events);
-    expect(events.filter((e) => e.kind === 'journal.bootstrap')).toEqual([{ kind: 'journal.bootstrap', format: 2, tickets: journaled }]);
+    expect(events.filter((e) => e.kind === 'journal.bootstrap')).toEqual([{ kind: 'journal.bootstrap', format: 2, tickets: journaled, nextNumber: journaled + 1 }]);
     const steps = events.filter((e) => e.kind === 'step.changed').map((e) => (e as unknown as { step: { kind: string; legacy?: true } }).step);
     expect(new Set(steps.map((s) => s.kind))).toEqual(new Set(['implement', 'merge']));
     expect(steps.every((s) => s.legacy === true)).toBe(true);
@@ -597,5 +598,99 @@ describe('closedAt is when the ticket last entered done', () => {
     } finally {
       rebuilt.journal.close();
     }
+  });
+});
+
+describe('a checkpoint ahead of the journal', () => {
+  const warns: Array<[string, unknown]> = [];
+  const log: Logger = { ...nullLogger, warn: (message: string, fields?: unknown) => void warns.push([message, fields]) };
+  const file = (d: string) => path.join(d, 'delivery', 'journal.ndjson');
+
+  function create(stack: Stack, title: string): void {
+    const tx = stack.workflow.begin('item.create');
+    stack.backlog.create(tx, { title, body: '', agent: null, repo: null, createdBy: 'user' });
+    stack.workflow.commit(tx);
+  }
+
+  beforeEach(() => warns.splice(0));
+
+  it('rebuilds both checkpoints from a journal restored from a backup, and later transactions apply', () => {
+    const d = path.join(dir, 's');
+    writeLegacyState(d);
+    migrateState(d, { daemonVersion: 'new', now: 5, eventHead: 7 });
+    const first = deliveryStack(d, { now: () => 5 });
+    bootstrapLegacy(first.workflow, first.backlog.list(), first.items.get().nextNumber);
+    create(first, 'Before the backup');
+    first.journal.close();
+    const backup = fs.readFileSync(file(d));
+    const atBackup = deliveryStack(d, { now: () => 5 });
+    const expected = { titles: atBackup.backlog.list().map((i) => i.title), nextNumber: atBackup.items.get().nextNumber, tables: JSON.stringify({ ...atBackup.tables.get(), journalSeq: 0 }) };
+    create(atBackup, 'After the backup 1');
+    create(atBackup, 'After the backup 2');
+    // tables.json is saved asynchronously; commit it so both checkpoints are on disk past the backup.
+    atBackup.tables.commit();
+    atBackup.journal.close();
+    // The journal comes back from the backup; both checkpoints still hold the two later transactions.
+    fs.writeFileSync(file(d), backup);
+    const restored = deliveryStack(d, { now: () => 5, log });
+    const head = restored.journal.head();
+    expect(restored.items.get().journalSeq).toBe(head);
+    expect(restored.tables.get().journalSeq).toBe(head);
+    expect(restored.backlog.list().map((i) => i.title)).toEqual(expected.titles);
+    expect(restored.items.get().nextNumber).toBe(expected.nextNumber);
+    expect(JSON.stringify({ ...restored.tables.get(), journalSeq: 0 })).toBe(expected.tables);
+    expect(warns).toEqual([
+      ['journal.checkpoint-ahead', { file: 'delivery/tables.json', journalSeq: head + 2, head, rebuilt: true }],
+      ['journal.checkpoint-ahead', { file: 'items.json', journalSeq: head + 2, head, rebuilt: true }],
+    ]);
+    // The next transaction takes j = head + 1 and lands in both checkpoints.
+    create(restored, 'After the restore');
+    expect(restored.backlog.list().map((i) => i.title)).toEqual([...expected.titles, 'After the restore']);
+    restored.journal.close();
+    const again = deliveryStack(d, { now: () => 5 });
+    expect(again.backlog.list().map((i) => i.title)).toEqual([...expected.titles, 'After the restore']);
+    expect(again.items.get().journalSeq).toBe(head + 1);
+    again.journal.close();
+  });
+
+  it('fails the boot, naming both sequences, when the journal cannot rebuild items.json', () => {
+    const d = path.join(dir, 's');
+    const s = deliveryStack(d, { now: () => 5 });
+    create(s, 'A');
+    create(s, 'B');
+    s.tables.commit();
+    s.journal.close();
+    // The journal is gone: no bootstrap marker, so not every ticket has its ticket.created.
+    fs.rmSync(file(d));
+    expect(() => deliveryStack(d, { now: () => 5, log })).toThrow(new CheckpointAheadError(2, 0));
+    expect(new CheckpointAheadError(2, 0).message).toBe(
+      'items.json holds journal records up to 2 but the delivery journal ends at 0, and the journal cannot rebuild it; restore items.json and delivery/journal.ndjson from the same backup.',
+    );
+    expect(warns).toEqual([
+      ['journal.checkpoint-ahead', { file: 'delivery/tables.json', journalSeq: 2, head: 0, rebuilt: true }],
+      ['journal.checkpoint-ahead', { file: 'items.json', journalSeq: 2, head: 0, rebuilt: false }],
+    ]);
+  });
+});
+
+describe('the numbering through the bootstrap', () => {
+  it('keeps an empty legacy backlog’s next number through the bootstrap and a rebuild from the journal', () => {
+    const d = path.join(dir, 'empty');
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'meta.json'), JSON.stringify({ formatVersion: 1, daemonVersion: 'old', createdAt: 1 }));
+    fs.writeFileSync(path.join(d, 'items.json'), JSON.stringify({ nextNumber: 42, order: [], items: {} }));
+    expect(migrateState(d, { daemonVersion: 'new', now: 5, eventHead: 0 })).toMatchObject({ ok: true, to: 2 });
+    const s = deliveryStack(d, { now: () => 5 });
+    expect(bootstrapLegacy(s.workflow, s.backlog.list(), s.items.get().nextNumber)).toBe(0);
+    s.journal.close();
+    // Both checkpoints gone: everything comes back from the journal, the numbering included.
+    fs.rmSync(path.join(d, 'items.json'));
+    fs.rmSync(path.join(d, 'delivery', 'tables.json'), { force: true });
+    const rebuilt = deliveryStack(d, { now: () => 5 });
+    expect(rebuilt.items.get().nextNumber).toBe(42);
+    const tx = rebuilt.workflow.begin('item.create');
+    expect(rebuilt.backlog.create(tx, { title: 'Next', body: '', agent: null, repo: null, createdBy: 'user' }).number).toBe(42);
+    rebuilt.workflow.commit(tx);
+    rebuilt.journal.close();
   });
 });

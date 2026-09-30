@@ -9,7 +9,7 @@ import type { Journal, JournalIO, Ledger } from '../../src/daemon/delivery/journ
 import type { TicketChange } from '../../src/daemon/delivery/derive';
 import { actor, PIPELINE } from '../../src/daemon/delivery/derive';
 import { Backlog } from '../../src/daemon/items';
-import { nullLogger } from '../../src/daemon/log';
+import { nullLogger, type Logger } from '../../src/daemon/log';
 import { deliveryStore, type TablesFile } from '../../src/daemon/store/delivery';
 import { itemsStore, type ItemRecord, type ItemsFile } from '../../src/daemon/store/items';
 import type { JsonStore } from '../../src/daemon/store/store';
@@ -101,7 +101,10 @@ export interface Stack {
 }
 
 /** Items, tables, the journal and the ledger over a state directory, as the daemon boots them (rolled forward). */
-export function deliveryStack(dir: string, opts: { now?: () => number; io?: JournalIO; emit?(ev: DaemonEvent): void; hooks?: ConstructorParameters<typeof Ledger>[0]['hooks'] } = {}): Stack {
+export function deliveryStack(
+  dir: string,
+  opts: { now?: () => number; io?: JournalIO; emit?(ev: DaemonEvent): void; hooks?: ConstructorParameters<typeof Ledger>[0]['hooks']; log?: Logger } = {},
+): Stack {
   const now = opts.now ?? Date.now;
   const items = itemsStore(dir);
   const tables = deliveryStore(dir);
@@ -114,7 +117,7 @@ export function deliveryStack(dir: string, opts: { now?: () => number; io?: Jour
       events.push(ev);
       opts.emit?.(ev);
     },
-    log: nullLogger,
+    log: opts.log ?? nullLogger,
     now,
     io: opts.io,
     hooks: opts.hooks,
