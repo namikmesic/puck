@@ -4,8 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartSpec } from '../../src/harness/bridge';
-import type { DaemonEvent, ItemStatus, Pin, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
+import type { DaemonEvent, Pin, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
 import type { PinSpec } from '../../src/harness/definitions/types';
+import { deliveryPull } from '../../src/harness/references';
 import { readRunner, type ServerRunner } from '../../src/harness/server-api';
 import type { TranscriptEntry } from '../../src/harness/transcript';
 import { createConfigRepo } from '../../src/main/config-repo';
@@ -17,7 +18,7 @@ import { openLocalChannel } from '../../src/main/runners/local';
 import { fakeConfigRepo } from '../unit/config-repo-fakes';
 import { AGENT, ENV, exampleFiles, patchYaml, type Files } from '../unit/definitions-fixtures';
 import { call, type SignedIn } from '../unit/server-fakes';
-import { copyIn, exec, FAKE_GITHUB, IMAGE, must, TEST_BUNDLE } from './helpers';
+import { copyIn, exec, FAKE_GITHUB, finished, IMAGE, implementing, must, TEST_BUNDLE } from './helpers';
 import { liveServer, removeEnvironments, runnerDir, RunnerProcess, sh, tokenFor, waitFor, type LiveServer } from './runner-helpers';
 
 // The golden scenario, steps 1-6, with the scripted fake harness in place
@@ -144,12 +145,12 @@ const work = (commands: string, subject: string, sleepMs: number): string =>
 
 /** The most items running (or waiting on a question) at once, from the recorded item events. */
 function peakRunning(seen: { ev: DaemonEvent }[]): number {
-  const status = new Map<string, ItemStatus>();
+  const busy = new Map<string, boolean>();
   let peak = 0;
   for (const { ev } of seen) {
     if (ev.kind !== 'item.upsert') continue;
-    status.set(ev.item.id, ev.item.status);
-    peak = Math.max(peak, [...status.values()].filter((s) => s === 'running' || s === 'needs-input').length);
+    busy.set(ev.item.id, implementing(ev.item));
+    peak = Math.max(peak, [...busy.values()].filter(Boolean).length);
   }
   return peak;
 }
@@ -216,7 +217,7 @@ describe('golden scenario (fake harness)', () => {
     expect(owner.stdout.trim()).toBe('puck 600');
   });
 
-  it('3. the orchestrator creates two items for implementer; both run at once and reach review with diff stats', async () => {
+  it('3. the orchestrator creates two items for implementer; both run at once and finish with diff stats', async () => {
     const orchestrator = (await snapshot(client)).orchestratorSessionId as string;
     const sent = await client.cmd('chat.send', {
       sessionId: orchestrator,
@@ -237,7 +238,7 @@ describe('golden scenario (fake harness)', () => {
     });
     await waitFor('the orchestrator turn', async () => seen.some((e) => e.ev.kind === 'turn.end' && e.ev.turnId === sent.turnId), 60_000);
 
-    const done = await until(client, 'both items in review', (s) => s.items.length === 2 && s.items.every((i) => i.status === 'review'));
+    const done = await until(client, 'both items finished', (s) => s.items.length === 2 && s.items.every(finished));
     expect(peakRunning(seen)).toBe(2);
     const byNumber = (n: number): WorkItem => done.items.find((i) => i.number === n) as WorkItem;
     expect(byNumber(1).branch).toBe('puck/W-1-add-a-usage-section-to-the-readme');
@@ -261,33 +262,33 @@ describe('golden scenario (fake harness)', () => {
     expect(created?.body).toMatchObject({ head: 'puck/W-1-add-a-usage-section-to-the-readme', base: 'main', draft: true });
     expect(created?.auth).toMatch(/^Bearer ghs_/);
     const after = (await snapshot(client)).items.find((i) => i.number === 1) as WorkItem;
-    expect(after.pr).toMatchObject({ number: 1, draft: true });
+    expect(deliveryPull(after)).toMatchObject({ number: 1, draft: true });
   });
 
-  it('5. an item that finishes while Puck is closed is in review on reopen, with the notice and the reaction', async () => {
+  it('5. an item that finishes while Puck is closed is finished on reopen, with the notice and the reaction', async () => {
     const item = await client.cmd('item.create', {
       title: 'Add a changelog',
       body: work(`printf '# Changelog\\n' > CHANGELOG.md && git add CHANGELOG.md`, 'Add a changelog', 4000),
       agent: 'implementer',
     });
-    await until(client, 'the item running', (s) => s.items.find((i) => i.id === item.id)?.status === 'running', 60_000);
+    await until(client, 'the item running', (s) => implementing(s.items.find((i) => i.id === item.id)), 60_000);
 
     // Quit: the app's connection goes; the environment keeps working.
     client.stop();
     const at = cursor.seq as number;
-    // With no client attached, read the daemon's own backlog store until the item reached review.
-    await waitFor('the item to reach review on its own', async () => {
-      const r = await exec(`puck-${envId}`, ['node', '-p', `require('/puck/state/items.json').items['${item.id}'].status`]);
-      return r.stdout.trim() === 'review';
+    // With no client attached, read the daemon's own backlog store until the item finished.
+    await waitFor('the item to finish on its own', async () => {
+      const r = await exec(`puck-${envId}`, ['node', '-p', `(({ status, stage }) => status + ' ' + stage)(require('/puck/state/items.json').items['${item.id}'])`]);
+      return r.stdout.trim() === 'in-progress merge';
     }, 60_000);
 
     // Reopen: everything that happened meanwhile replays from the cursor.
     const replayed: { seq: number; ev: DaemonEvent }[] = [];
     client = attach(cursor, replayed);
-    const snap = await until(client, 'the item in review', (s) => s.items.find((i) => i.id === item.id)?.status === 'review');
+    const snap = await until(client, 'the item finished', (s) => finished(s.items.find((i) => i.id === item.id)));
     expect(replayed.length).toBeGreaterThan(0);
     expect(replayed.every((e) => e.seq > at)).toBe(true);
-    expect(replayed.some((e) => e.ev.kind === 'item.upsert' && e.ev.item.id === item.id && e.ev.item.status === 'review')).toBe(true);
+    expect(replayed.some((e) => e.ev.kind === 'item.upsert' && e.ev.item.id === item.id && finished(e.ev.item))).toBe(true);
 
     // The orchestrator's transcript holds the review notice, and it woke on that notice and answered it.
     const reacted = (entries: TranscriptEntry[]): boolean => {
@@ -310,7 +311,7 @@ describe('golden scenario (fake harness)', () => {
       body: work(`printf 'MIT\\n' > LICENSE && git add LICENSE`, 'Add a license', 6000),
       agent: 'implementer',
     });
-    await until(client, 'the item running', (s) => s.items.find((i) => i.id === running.id)?.status === 'running', 60_000);
+    await until(client, 'the item running', (s) => implementing(s.items.find((i) => i.id === running.id)), 60_000);
 
     config.tag('v1.1.0', V2, release(3));
     let current: Pin = pin;
@@ -339,9 +340,9 @@ describe('golden scenario (fake harness)', () => {
 
     const snap = await until(client, 'the new capacity', (s) => s.capacity.agents.implementer?.max === 3, 30_000);
     expect(snap.instance.pin).toEqual({ kind: 'tag', name: 'v1.1.0', sha: V2 });
-    expect(snap.items.find((i) => i.id === running.id)?.status).toBe('running');
-    const finished = await until(client, 'the running item in review', (s) => s.items.find((i) => i.id === running.id)?.status === 'review');
-    const item = finished.items.find((i) => i.id === running.id) as WorkItem;
+    expect(implementing(snap.items.find((i) => i.id === running.id))).toBe(true);
+    const settled = await until(client, 'the running item finished', (s) => finished(s.items.find((i) => i.id === running.id)));
+    const item = settled.items.find((i) => i.id === running.id) as WorkItem;
     expect(item.attempts).toBe(1);
     expect(item.result?.commits.map((c) => c.subject)).toEqual(['Add a license']);
     // Applied in place: no session was interrupted and the environment never reprovisioned.

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { DaemonEvent, Snapshot, WorkItem } from '../../src/harness/daemon-protocol';
+import { deliveryPull, sourceIssue } from '../../src/harness/references';
 import type { Notice } from '../../src/harness/transcript';
-import { copyIn, definition, exec, must, startEnv, turnEvents, untilSnapshot, waitReady, type Env } from './helpers';
+import { copyIn, definition, exec, finished, must, startEnv, turnEvents, untilSnapshot, waitReady, type Env } from './helpers';
 
 // The GitHub workflow against a fake GitHub API inside the container. A
 // labelled issue becomes a queued item; its worker commits; publishing puts
@@ -54,7 +55,9 @@ http.createServer((req, res) => {
     if (p === '/__test/merge') {
       const pr = s.pulls.find((x) => x.number === body.number);
       if (!pr) return send(404, { message: 'Not Found' });
+      // A rebase merge: GitHub reports the branch head as the merge commit.
       pr.merged = true; pr.merged_at = now(); pr.state = 'closed';
+      pr.merge_commit_sha = pr.head.sha; pr.merged_by = { login: 'octocat', type: 'User' }; pr.commits = 1;
       return send(200, {});
     }
     const r = /^\\/repos\\/octo\\/app(\\/.*)?$/.exec(p);
@@ -184,19 +187,19 @@ describe('Docker scenario: the GitHub workflow', () => {
     await client.cmd('github.put', { grants: [grant] });
     await client.cmd('github.nudge', { repo: 'octo/app', kind: 'issue' });
 
-    // A labelled issue becomes a queued item, assigned by its agent label.
-    const queued = await client.untilEvent('item.upsert', (ev) => ev.item.source?.number === 5 && ev.item.status === 'queued');
+    // A labelled issue becomes a ticket in Todo, assigned by its agent label.
+    const queued = await client.untilEvent('item.upsert', (ev) => sourceIssue(ev.item)?.number === 5 && ev.item.status === 'todo');
     expect(queued.ev).toMatchObject({
       item: {
         title: 'Fix the typo in the README',
         agent: 'implementer',
         repo: 'app',
-        source: { kind: 'github-issue', repo: 'octo/app', number: 5, url: 'https://github.com/octo/app/issues/5' },
+        references: [{ role: 'source', kind: 'github-issue', repo: 'octo/app', number: 5, url: 'https://github.com/octo/app/issues/5' }],
       },
     });
     const itemId = (queued.ev as Extract<DaemonEvent, { kind: 'item.upsert' }>).item.id;
 
-    const reviewed = (await untilSnapshot(client, (s) => s.items.find((i) => i.id === itemId)?.status === 'review', 90_000)).items.find(
+    const reviewed = (await untilSnapshot(client, (s) => finished(s.items.find((i) => i.id === itemId)), 90_000)).items.find(
       (i) => i.id === itemId,
     ) as WorkItem;
     expect(reviewed.result?.commits).toHaveLength(1);
@@ -213,11 +216,11 @@ describe('Docker scenario: the GitHub workflow', () => {
     await client.cmd('github.nudge', { repo: 'octo/app', kind: 'issue', number: 5 });
     for (let i = 0; i < 40; i++) {
       state = await fakeState();
-      if ((state.comments['5'] ?? []).some((c) => c.body.includes('— review — PR #1'))) break;
+      if ((state.comments['5'] ?? []).some((c) => c.body.includes('— in progress, finished — PR #1'))) break;
       await new Promise((r) => setTimeout(r, 250));
     }
     expect(state.comments['5']).toHaveLength(1);
-    expect(state.comments['5'][0].body).toMatch(/^Puck · W-1 · implementer · environment example — review — PR #1\n\n<!-- puck:status env=env_\w+ item=itm_\w+ -->$/);
+    expect(state.comments['5'][0].body).toMatch(/^Puck · W-1 · implementer · environment example — in progress, finished — PR #1\n\n<!-- puck:status env=env_\w+ item=itm_\w+ -->$/);
 
     // A failing check produces a pr.checks notice, with the failed job's log kept for ci_read.
     await control('/__test/checks', {
@@ -234,12 +237,12 @@ describe('Docker scenario: the GitHub workflow', () => {
     const checks = await untilNotice((n) => n.kind === 'pr.checks');
     expect(checks.text).toBe('W-1 PR #1: 1 check failed (test). Read them with ci_read.');
     const afterChecks = (await client.cmd<Snapshot>('snapshot.get')).items.find((i) => i.id === itemId) as WorkItem;
-    expect(afterChecks.pr?.checks).toEqual({
+    expect(deliveryPull(afterChecks)?.checks).toEqual({
       sha: head,
       state: 'failure',
       failing: [{ name: 'test', url: 'https://github.com/octo/app/runs/7', summary: '2 tests failed' }],
     });
-    expect(afterChecks.status).toBe('review'); // CI never moves an item
+    expect(finished(afterChecks)).toBe(true); // CI never moves an item
 
     // A collaborator with write access is a pr.review notice. A read-only collaborator, and a commenter without access, reach no agent.
     await control('/__test/reviews', {
@@ -335,14 +338,20 @@ describe('Docker scenario: the GitHub workflow', () => {
     expect(state.pulls[0].body).not.toContain('Refs octo/app#5');
 
     // Merging the pull request moves the item to done and edits the one status comment.
+    const mergedHead = (await fakeState()).pulls[0].head.sha;
     await control('/__test/merge', { number: 1 });
     await client.cmd('github.nudge', { repo: 'octo/app', kind: 'pull', number: 1 });
     const mergedNotice = await untilNotice((n) => n.kind === 'pr.merged');
     const doneItem = (await untilSnapshot(client, (s) => s.items.find((i) => i.id === itemId)?.status === 'done', 30_000)).items.find(
       (i) => i.id === itemId,
     ) as WorkItem;
-    expect(doneItem.status).toBe('done');
-    expect(doneItem.pr?.state).toBe('merged');
+    expect(doneItem).toMatchObject({ status: 'done', outcome: 'merged', stage: null });
+    expect(deliveryPull(doneItem)?.state).toBe('merged');
+    // The daemon journaled the merge it read, once, with the pull request's own facts.
+    const merges = client.events().flatMap((f) => (f.ev.kind === 'merge.observed' ? [f.ev] : []));
+    expect(merges).toEqual([
+      expect.objectContaining({ itemId, repo: 'octo/app', prNumber: 1, prHeadSha: mergedHead, prCommits: 1, mergeCommitSha: mergedHead, mergedBy: 'octocat', initiatedBy: 'external' }),
+    ]);
     expect(mergedNotice.text).toContain('so the item is done');
     for (let i = 0; i < 40; i++) {
       state = await fakeState();

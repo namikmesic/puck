@@ -11,7 +11,17 @@ import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } fr
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { DaemonEvent, DaemonFrame, Snapshot } from '../../src/harness/daemon-protocol';
+import {
+  addSnapshotPart,
+  PROTOCOL_VERSION,
+  snapshotFromHead,
+  type DaemonEvent,
+  type DaemonFrame,
+  type Snapshot,
+  type SnapshotHead,
+  type SnapshotPart,
+  type WorkItem,
+} from '../../src/harness/daemon-protocol';
 import { newId } from '../../src/harness/ulid';
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -168,8 +178,19 @@ export async function startEnv(
 
 type EventFrame = Extract<DaemonFrame, { t: 'event' }>;
 
-/** A protocol client over `docker exec -i <container> node /opt/puck/puckd.js attach`. */
-export function attachClient(container: string) {
+/** A ticket that finished and waits on the user to accept or merge: protocol 1's `review`. */
+export const finished = (item: WorkItem | undefined): boolean => item?.status === 'in-progress' && item.stage === 'merge';
+
+/** A ticket whose implement step runs or waits on a question, holding its agent's slot: protocol 1's `running` and `needs-input`. */
+export const implementing = (item: WorkItem | undefined): boolean =>
+  item?.status === 'in-progress' && !!item.workflow?.steps.some((s) => s.kind === 'implement' && (s.state === 'running' || s.state === 'needs-input'));
+
+/**
+ * A protocol client over `docker exec -i <container> node /opt/puck/puckd.js attach`.
+ * It speaks the app's protocol unless told otherwise; protocol 1 is an app that predates it.
+ */
+export function attachClient(container: string, opts: { protocol?: number } = {}) {
+  const protocol = opts.protocol ?? PROTOCOL_VERSION;
   const child: ChildProcessWithoutNullStreams = spawn('docker', ['exec', '-i', container, 'node', '/opt/puck/puckd.js', 'attach'], {
     stdio: 'pipe',
   });
@@ -204,16 +225,28 @@ export function attachClient(container: string) {
     }
   }
   let n = 0;
-  async function cmd<R = unknown>(op: string, args: unknown = {}): Promise<R> {
+  async function one<R>(op: string, args: unknown): Promise<R> {
     const id = `c${++n}`;
     send({ t: 'cmd', id, op, args });
     const res = await until((f): f is Extract<DaemonFrame, { t: 'res' }> => f.t === 'res' && f.id === id);
     if (!res.ok) throw new Error(`${op} failed: ${res.error.code}: ${res.error.message}`);
     return res.result as R;
   }
+  /** Protocol 2's snapshot is the head and then its parts; either way the caller gets the whole one. */
+  async function cmd<R = unknown>(op: string, args: unknown = {}): Promise<R> {
+    if (op !== 'snapshot.get' || protocol < 2) return one<R>(op, args);
+    const head = await one<SnapshotHead>('snapshot.get', args);
+    const snap = snapshotFromHead(head);
+    for (let cursor = head.partsCursor; cursor; ) {
+      const part = await one<SnapshotPart>('snapshot.part', { cursor });
+      addSnapshotPart(snap, part);
+      cursor = part.partsCursor;
+    }
+    return snap as R;
+  }
   const events = (): EventFrame[] => frames.filter((f): f is EventFrame => f.t === 'event');
   const hello = async (since: number | null) => {
-    send({ t: 'hello', protocol: 1, client: { app: 'docker-suite', build: 'test' }, since });
+    send({ t: 'hello', protocol, client: { app: 'docker-suite', build: 'test' }, since });
     return until((f): f is Extract<DaemonFrame, { t: 'welcome' }> => f.t === 'welcome');
   };
   const untilEvent = <K extends DaemonEvent['kind']>(kind: K, pred: (ev: Extract<DaemonEvent, { kind: K }>) => boolean = () => true) =>

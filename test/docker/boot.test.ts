@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Snapshot } from '../../src/harness/daemon-protocol';
+import { PROTOCOL_VERSION, type Snapshot } from '../../src/harness/daemon-protocol';
 import { exec, startEnv, waitReady, type Env } from './helpers';
 
 // Scenario 1: boot. Provisioning reaches ready; the puck user owns its HOME
@@ -81,7 +81,7 @@ describe('Docker scenario 1: boot', () => {
   it('reports its identity with `version`', async () => {
     const r = await exec(env.container, ['node', '/opt/puck/puckd.js', 'version']);
     const v = JSON.parse(r.stdout) as { daemonVersion: string; protocolVersion: number; build: string };
-    expect(v.protocolVersion).toBe(1);
+    expect(v.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(v.build).toMatch(/^[0-9a-f]{64}$/);
     expect(v.daemonVersion.endsWith(`+${v.build.slice(0, 12)}`)).toBe(true);
   });
