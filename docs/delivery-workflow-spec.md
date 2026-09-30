@@ -15,19 +15,7 @@ How to read this spec:
 
 ## 1. The evidence
 
-The design reads the rebuild spec and the current code on `main`, and is designed against what exists rather than what the rebuild spec planned; each mechanism was checked against the code before it was made normative.
-
-```
-git log --oneline -1                                  # a94543d
-wc -l src/daemon/*.ts src/daemon/store/*.ts src/daemon/harness/*.ts \
-      src/renderer/board*.ts src/renderer/work-detail.ts ...     # 12,731 lines in the reading set
-grep -n "fsync\|appendFileSync" src/daemon/eventlog.ts src/daemon/store/jsonfile.ts
-grep -rn "protocolSupported\|PROTOCOL_VERSION" src    # server.ts:107-110, daemon-client.ts:198, daemon-link.ts:123
-git help config | grep -A14 "Protected configuration"  # command-line -c is protected: safe.directory is honored there
-git help config | grep -A6 "gc.pruneExpire"            # default grace period 2.weeks.ago
-```
-
-Files read in full: `src/harness/item-transitions.ts`, `src/harness/daemon-protocol.ts`, `src/daemon/{work,items,scheduler}.ts`, `src/daemon/store/{items,meta,jsonfile,store}.ts`, `src/renderer/board-model.ts`, `src/main/home-starter.ts`, `docs/examples/config-repo/**`. Read in part: `src/daemon/{daemon,eventlog,git,publish,credentials,provision,paths,orchestrator,tools,turns,server,github-sync,github-api}.ts`, `src/daemon/harness/{spawn,claude,codex}.ts`, `src/daemon/store/sessions.ts`, `src/renderer/{board,view-switch,ask-card}.ts`, `src/main/instances/daemon-client.ts`, `src/puck-runner/daemon-link.ts`, `CHANGELOG.md`.
+The design is built against the current code on `main` rather than against what the rebuild spec planned.
 
 Facts that shaped the design (each is cited again where it is used):
 
@@ -54,19 +42,21 @@ Facts that shaped the design (each is cited again where it is used):
 | The starter home imports each example file by path and rewrites three commented lines of the example environment; its test asserts file parity. | `src/main/home-starter.ts:12-34, 63-73`, `test/unit/home-starter.test.ts` |
 | The Board tab already shows a count of items waiting on the user; the Closed column already folds into a rail with failed and cancelled counts. | `src/renderer/view-switch.ts:58-59`, `src/renderer/board.ts:145-155, 682-700` |
 | Version 0.1.0 is unreleased. | `CHANGELOG.md` ("0.1.0 - unreleased") |
+| Command-line `-c` configuration is protected, so a `safe.directory` given there is honored. | git-config(1), "Protected configuration" |
+| git prunes unreferenced objects only after `gc.pruneExpire`, two weeks by default. | git-config(1), `gc.pruneExpire` |
 
-Further facts the design rests on, and how they were checked:
+Further facts the design rests on:
 
-```
-grep -n "settingSources" -A10 node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts   # "When omitted, all sources are loaded … Pass [] …"
-strings node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex | grep project_doc   # project_doc_max_bytes = 32768
-grep -n "freshnessOf\|parseContainerFile\|account" src/main/providers/{claude,codex}-oauth.ts   # expiresAt; lastRefresh; account_id
-sed -n 198,218p src/renderer/instance-store.ts            # drain applies only cursor + 1, resync on a gap
-sed -n 262,290p src/main/instances/daemon-client.ts       # resync via snapshot.get; unknown kinds advance the cursor
-sed -n 128,146p src/daemon/ops.ts                         # item bodies up to 64 KiB
-sed -n 133,152p src/daemon/publish.ts; sed -n 181,193p src/daemon/git.ts   # lease from the recorded sha; recorded after the push
-sed -n 944,956p src/daemon/github-sync.ts                 # prState saved before the merged transition is acted on
-```
+| Fact | Where |
+| --- | --- |
+| With `settingSources` omitted, the Claude Agent SDK loads every settings source; `[]` loads none. | `@anthropic-ai/claude-agent-sdk`, `sdk.d.ts` (`settingSources`) |
+| Codex reads at most 32 KiB of project docs (`project_doc_max_bytes = 32768`). | the Codex CLI's defaults |
+| The Claude and Codex credential readers take `expiresAt`, `lastRefresh` and `account_id` from the container's file. | `src/main/providers/{claude,codex}-oauth.ts` (`freshnessOf`, `parseContainerFile`) |
+| The renderer's store applies only `cursor + 1` and asks for a resync on a gap. | `src/renderer/instance-store.ts:198-218` |
+| The app's client resynchronizes through `snapshot.get`, and a kind it does not know still advances its cursor. | `src/main/instances/daemon-client.ts:262-290` |
+| Item bodies are up to 64 KiB. | `src/daemon/ops.ts:128-146` |
+| Publishing leases the push from the recorded sha, which is recorded after the push. | `src/daemon/publish.ts:133-152`, `src/daemon/git.ts:181-193` |
+| The pull poll saves `prState` before the merged transition is acted on. | `src/daemon/github-sync.ts:944-956` |
 
 Other facts (the reviewer role's seams in the definitions library, cost reporting per harness, event-log retention, publish drafts, the lenient daemon reader, the rebuild spec's no-automatic-merge rule) are cited in place.
 
