@@ -60,6 +60,7 @@ import { harnessDescriptorById } from '../harness/providers';
 import { validateSettings } from '../harness/options';
 import { newId } from '../harness/ulid';
 import type { DaemonAgent } from '../harness/env-definition';
+import { JournalError } from './delivery/journal';
 import type { HarnessAdapter, AdapterRequest, AdapterContext } from './harness/types';
 import type { Logger } from './log';
 import type { JsonStore } from './store/store';
@@ -771,15 +772,31 @@ export class Turns {
     return ask ? { sessionId: ask.sessionId, questions: ask.questions, routedTo: ask.routedTo, ...(ask.note ? { note: ask.note } : {}) } : null;
   }
 
+  /**
+   * Close a question. An answer is recorded first (`onAskClosed` journals
+   * it): if the journal refuses, the question stays open, nothing is
+   * recorded or emitted, the worker keeps waiting, and the refusal is
+   * thrown. A cancellation (the turn is ending) always closes.
+   */
   private closeAsk(askId: string, answers: Record<string, string> | null, by: AskCloser): void {
     const ask = this.asks.get(askId);
     if (!ask) return;
+    const session = this.get(ask.sessionId);
+    let recorded = false;
+    if (by !== 'cancelled' && session && this.deps.onAskClosed) {
+      try {
+        this.deps.onAskClosed(session, askId, by);
+      } catch (err) {
+        if (err instanceof JournalError) throw err;
+        this.deps.log.error('ask.closed-failed', err, { sessionId: ask.sessionId });
+      }
+      recorded = true;
+    }
     this.asks.delete(askId);
     const entry = this.deps.transcripts.turn(ask.sessionId, ask.turnId);
     if (entry && recordAskAnswer(entry, askId, answers)) this.deps.transcripts.saveSoon(ask.sessionId);
     this.emitSafe({ kind: 'ask.closed', sessionId: ask.sessionId, askId, answers, by });
-    const session = this.get(ask.sessionId);
-    if (session && this.deps.onAskClosed) {
+    if (!recorded && session && this.deps.onAskClosed) {
       try {
         this.deps.onAskClosed(session, askId, by);
       } catch (err) {

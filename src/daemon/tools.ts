@@ -17,6 +17,7 @@ import type * as Z from 'zod';
 import type { ItemOutcome, ItemPosition, ItemStatus, Pin, WorkItem, WorkflowSummary } from '../harness/daemon-protocol';
 import type { DaemonDefinition } from '../harness/env-definition';
 import { deliveryPull, referenceLabel, sourceIssue } from '../harness/references';
+import { JOURNAL_FAILING, JournalError } from './delivery/journal';
 import type { GithubSync } from './github-sync';
 import type { OrchestratorTool } from './harness/types';
 import { type Backlog, itemLabel } from './items';
@@ -36,7 +37,27 @@ export interface ToolDeps {
   /** Running (slot-holding) items per agent. */
   running(): Record<string, number>;
   github: Pick<GithubSync, 'importIssue' | 'searchIssues' | 'ciRead' | 'ciRerun' | 'prRead'>;
+  /** True once the delivery journal cannot record (6.6): every tool but the read tools is refused. */
+  journalFailing(): boolean;
 }
+
+/**
+ * The tools that only read. They stay available while the delivery journal
+ * is failing; every other tool changes something (tickets, questions and
+ * their routing, pull requests, CI runs) and is refused before it runs,
+ * with the same error the socket gives. A new tool is refused too until it
+ * is listed here.
+ */
+export const READ_TOOLS: ReadonlySet<string> = new Set([
+  'backlog_list',
+  'backlog_get',
+  'work_read',
+  'issues_search',
+  'pr_read',
+  'ci_read',
+  'agents_list',
+  'environment_info',
+]);
 
 type Args = Record<string, unknown>;
 
@@ -124,6 +145,25 @@ function full(deps: ToolDeps, item: ItemRecord): Record<string, unknown> {
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 export function orchestratorTools(deps: ToolDeps): OrchestratorTool[] {
+  return fenced(deps, toolList(deps));
+}
+
+/** Every tool that changes state checks the journal first, before its handler has any effect. */
+function fenced(deps: ToolDeps, tools: OrchestratorTool[]): OrchestratorTool[] {
+  return tools.map((tool) =>
+    READ_TOOLS.has(tool.name)
+      ? tool
+      : {
+          ...tool,
+          run: (args: Args) => {
+            if (deps.journalFailing()) throw new JournalError('not-ready', JOURNAL_FAILING);
+            return tool.run(args);
+          },
+        },
+  );
+}
+
+function toolList(deps: ToolDeps): OrchestratorTool[] {
   const { work } = deps;
   return [
     {

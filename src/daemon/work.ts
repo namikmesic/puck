@@ -239,8 +239,13 @@ export class Work {
   }
 
   private begin(op: string): Tx {
-    if (this.deps.workflow.failing()) throw new JournalError('not-ready', 'The delivery journal is failing; see the environment log.');
+    this.journalOpen();
     return this.deps.workflow.begin(op);
+  }
+
+  /** A failing journal (6.6) refuses a change before any of its effects, the ones outside the journal included. */
+  private journalOpen(): void {
+    if (this.deps.workflow.failing()) throw new JournalError('not-ready', 'The delivery journal is failing; see the environment log.');
   }
 
   /** Commit a transaction; a refused transition surfaces as `invalid-state`. */
@@ -966,6 +971,7 @@ export class Work {
   }
 
   answerWorker(ref: string, answers: Record<string, string>): void {
+    this.journalOpen();
     const item = this.item(ref);
     const ask = this.oldestQuestion(item);
     if (!ask || !item.sessionId) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
@@ -975,21 +981,23 @@ export class Work {
   }
 
   escalate(ref: string, note: string): void {
+    this.journalOpen();
     const item = this.item(ref);
     const ask = this.oldestQuestion(item, 'orchestrator') ?? this.oldestQuestion(item);
     if (!ask) throw new WorkError('invalid-state', `${itemLabel(item)} has no open question.`);
-    this.deps.turns.annotateAsk(ask.askId, note);
+    // The route is journaled first; the note and the live route follow only once it is recorded.
     this.routeToUser(item, ask.askId);
+    this.deps.turns.annotateAsk(ask.askId, note);
     this.deps.log.info('item.escalated', { itemId: item.id });
   }
 
   private routeToUser(item: ItemRecord, askId: string): void {
     const ask = item.asks.find((a) => a.askId === askId);
     if (!ask || ask.routedTo === 'user') return;
-    this.deps.turns.routeAsk(askId, 'user');
     const tx = this.begin('ask.routed');
     ticketPatch(tx, item, askFields(item.asks.map((a) => (a.askId === askId ? { ...a, routedTo: 'user' as const } : a))));
     this.commit(tx);
+    this.deps.turns.routeAsk(askId, 'user');
   }
 
   /**

@@ -1070,6 +1070,68 @@ describe('a failing delivery journal', () => {
   });
 });
 
+describe('the orchestrator’s tools on a failing delivery journal', () => {
+  it('answer_worker and escalate_to_user change nothing: the question stays open, routed and unanswered, and the worker keeps waiting', async () => {
+    let fail = false;
+    journalIO = {
+      ...nodeJournalIO,
+      write(fd, buf, offset, length) {
+        if (fail) throw new Error('EIO');
+        return nodeJournalIO.write(fd, buf, offset, length);
+      },
+      truncate(fd, size) {
+        if (fail) throw new Error('EIO on truncate');
+        nodeJournalIO.truncate(fd, size);
+      },
+    };
+    await daemon.shutdown();
+    root.cleanup();
+    root = tempRoot('pd-work-');
+    deliver();
+    let answered: unknown = 'waiting';
+    workerSteps = [
+      async (req, ctx) => {
+        ctx.reportSession(`worker-${req.sessionId}`);
+        answered = await ctx.askUser([{ question: 'Which DB?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: '' }] }]);
+        end(ctx);
+      },
+    ];
+    await launch();
+    const c = client(2);
+    await c.cmd('item.create', { title: 'Store', agent: 'implementer' });
+    await vi.waitFor(async () => expect((await c.cmd<Snapshot>('snapshot.get')).asks).toHaveLength(1), { timeout: 3000 });
+    const before = await c.cmd<Snapshot>('snapshot.get');
+    const ask = defined(before.asks[0]);
+    expect(ask).toMatchObject({ routedTo: 'orchestrator' });
+    expect(ask).not.toHaveProperty('note');
+    // The journal fails, and stays failing although writes would work again.
+    fail = true;
+    await expect(c.cmd('item.create', { title: 'Latch' })).rejects.toThrow(JOURNAL_FAILING);
+    fail = false;
+    const seen = c.events().length;
+    const journal = path.join(root.paths.state, 'delivery', 'journal.ndjson');
+    const size = fs.statSync(journal).size;
+    const tools = (daemon as unknown as { tools: Array<{ name: string; run(a: Record<string, unknown>): unknown }> }).tools;
+    const tool = (name: string) => defined(tools.find((t) => t.name === name));
+    expect(() => tool('answer_worker').run({ item: 'W-1', answers: { 'Which DB?': 'Postgres' } })).toThrow(JOURNAL_FAILING);
+    expect(() => tool('escalate_to_user').run({ item: 'W-1', note: 'Your call.' })).toThrow(JOURNAL_FAILING);
+    // Below the tools, an answer that cannot be journaled leaves the question open too.
+    const turns = (daemon as unknown as { turns: { answer(sessionId: string, askId: string, answers: Record<string, string>, by: 'orchestrator'): boolean } }).turns;
+    expect(() => turns.answer(ask.sessionId, ask.askId, { 'Which DB?': 'Postgres' }, 'orchestrator')).toThrow(JOURNAL_FAILING);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(answered).toBe('waiting');
+    const after = await c.cmd<Snapshot>('snapshot.get');
+    expect(after.asks).toEqual([ask]);
+    expect(after.items.find((i) => i.number === 1)?.needsInput).toEqual(before.items.find((i) => i.number === 1)?.needsInput);
+    expect(c.events().slice(seen).some((e) => e.kind === 'ask.closed' || e.kind === 'ask.routed')).toBe(false);
+    const history = await c.cmd<{ entries: TranscriptEntry[] }>('session.history', { sessionId: ask.sessionId });
+    const asked = history.entries.flatMap((e) => (e.kind === 'turn' ? e.events : [])).find((e) => e.kind === 'ask');
+    expect(asked).toBeDefined();
+    expect(asked).not.toHaveProperty('answers');
+    expect(fs.statSync(journal).size).toBe(size);
+  });
+});
+
 describe('input recovery with a repeated request', () => {
   it('queues the second of two identical journaled inputs again when a crash kept it from the session', async () => {
     const c = client(2);

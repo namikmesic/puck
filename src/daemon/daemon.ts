@@ -328,6 +328,7 @@ export class Daemon {
           return view ? runningCounts(view).perAgent : {};
         },
         github: this.github,
+        journalFailing: () => this.journalFailing(),
       });
     }
     this.server = new DaemonServer({
