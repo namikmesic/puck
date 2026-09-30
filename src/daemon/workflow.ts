@@ -229,7 +229,7 @@ export function ticketStatus(
     agent: change.agent !== undefined ? change.agent : item.agent,
     from,
     to,
-    closedAt: to.status === 'done' ? tx.at : null,
+    closedAt: to.status !== 'done' ? null : from.status === 'done' ? item.closedAt : tx.at,
     trigger,
     change,
     by: opts.by,

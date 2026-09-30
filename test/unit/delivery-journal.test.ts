@@ -18,7 +18,7 @@ import { migrateState } from '../../src/daemon/store/meta';
 import { bootstrapLegacy, openFirstRound, queueImplement, ticketStatus } from '../../src/daemon/workflow';
 import type { TicketTrigger } from '../../src/harness/item-transitions';
 import { legacyIds } from '../../src/harness/workflow';
-import { deliveryStack, LEGACY, LEGACY_T, writeLegacyState, type Stack } from './daemon-fakes';
+import { deliveryStack, LEGACY, LEGACY_T, seedTicket, writeLegacyState, type Stack } from './daemon-fakes';
 
 let dir: string;
 let file: string;
@@ -541,6 +541,59 @@ describe('the format-2 bootstrap', () => {
       }
       expect(rebuilt.backlog.get(LEGACY.merged)?.updatedAt).toBe(prior[LEGACY.merged]?.updatedAt);
       expect(rebuilt.tables.get().tickets[LEGACY.merged]?.closedAt).toBe(prior[LEGACY.merged]?.closedAt ?? null);
+    } finally {
+      rebuilt.journal.close();
+    }
+  });
+});
+
+describe('closedAt is when the ticket last entered done', () => {
+  function status(stack: Stack, id: string, trigger: TicketTrigger, started = false): void {
+    const item = stack.backlog.get(id);
+    expect(item, trigger).toBeTruthy();
+    const tx = stack.workflow.begin(`item.${trigger}`);
+    ticketStatus(tx, item as NonNullable<typeof item>, trigger, { by: PIPELINE, started });
+    stack.workflow.commit(tx);
+  }
+
+  it('keeps the close time when a later merge only changes the outcome, stamps it on entry, and clears it on retry', async () => {
+    const d = path.join(dir, 'closed-at');
+    let now = 1_000;
+    const stack = deliveryStack(d, { now: () => now });
+    const accepted = seedTicket(stack, { title: 'Ship' }, 'running');
+    const failed = seedTicket(stack, { title: 'Retry me' }, 'running');
+    expect(stack.backlog.get(accepted.id)?.closedAt).toBeNull();
+
+    now = 2_000;
+    status(stack, accepted.id, 'accept');
+    expect(stack.backlog.get(accepted.id)).toMatchObject({ status: 'done', outcome: 'accepted', closedAt: 2_000, updatedAt: 2_000 });
+    expect(stack.tables.get().tickets[accepted.id]?.closedAt).toBe(2_000);
+
+    now = 3_000;
+    status(stack, accepted.id, 'merged');
+    expect(stack.backlog.get(accepted.id)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: 2_000, updatedAt: 3_000 });
+    expect(stack.tables.get().tickets[accepted.id]?.closedAt).toBe(2_000);
+
+    now = 4_000;
+    status(stack, failed.id, 'fail');
+    expect(stack.backlog.get(failed.id)).toMatchObject({ status: 'done', outcome: 'failed', closedAt: 4_000, updatedAt: 4_000 });
+    expect(stack.tables.get().tickets[failed.id]?.closedAt).toBe(4_000);
+
+    now = 5_000;
+    status(stack, failed.id, 'retry', true);
+    expect(stack.backlog.get(failed.id)).toMatchObject({ status: 'in-progress', outcome: null, closedAt: null, updatedAt: 5_000 });
+    expect(stack.tables.get().tickets[failed.id]?.closedAt).toBeNull();
+    await stack.tables.flush();
+    stack.journal.close();
+
+    fs.rmSync(path.join(d, 'items.json'));
+    fs.rmSync(path.join(d, 'delivery', 'tables.json'));
+    const rebuilt = deliveryStack(d, { now: () => 9_999 });
+    try {
+      expect(rebuilt.backlog.get(accepted.id)).toMatchObject({ status: 'done', outcome: 'merged', closedAt: 2_000, updatedAt: 3_000 });
+      expect(rebuilt.tables.get().tickets[accepted.id]?.closedAt).toBe(2_000);
+      expect(rebuilt.backlog.get(failed.id)).toMatchObject({ status: 'in-progress', outcome: null, closedAt: null, updatedAt: 5_000 });
+      expect(rebuilt.tables.get().tickets[failed.id]?.closedAt).toBeNull();
     } finally {
       rebuilt.journal.close();
     }
