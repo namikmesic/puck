@@ -205,7 +205,7 @@ describe('daemon update', () => {
     byId('status').click();
   });
 
-  it.each(['attached', 'reconnecting'] as const)('replaces an expired update with an error and retry actions while %s', (attach) => {
+  it.each(['attached', 'reconnecting'] as const)('replaces an expired update with an error while %s', (attach) => {
     vi.useFakeTimers();
     const { store, tb, byId, reconnect } = setup([instance({ attach })]);
     store.applySnapshot(snap(), ENV);
@@ -217,20 +217,34 @@ describe('daemon update', () => {
     const banner = byId('banner');
     expect(banner.classList.contains('hidden')).toBe(false);
     expect(banner.textContent).toContain('The daemon update did not complete within two minutes.');
-    const buttons = [...banner.querySelectorAll('button')];
-    buttons.find((b) => b.textContent === 'Reconnect')?.click();
-    expect(reconnect).toHaveBeenCalledOnce();
-    const retry = buttons.find((b) => b.textContent === 'Retry update');
+    const labels = [...banner.querySelectorAll('button')].map((b) => b.textContent);
+    expect(labels).not.toContain('Reconnect');
+    expect(reconnect).not.toHaveBeenCalled();
     if (attach === 'attached') {
-      expect(retry).toBeDefined();
-      retry?.click();
+      expect(labels).toEqual(['Retry update']);
+      (banner.querySelector('button') as HTMLButtonElement).click();
       expect(byId('dialog').classList.contains('hidden')).toBe(false);
       expect(byId('dialog').querySelector('[data-mode="now"]')).not.toBeNull();
-    } else expect(retry).toBeUndefined();
+    } else expect(labels).toEqual([]);
     store.applyWelcome({ version: '0.1.0+new', build: 'new', protocol: 1 }, 12, ENV);
     tb.render();
     expect(banner.classList.contains('hidden')).toBe(true);
     expect(byId('chips').textContent).not.toContain('Daemon update failed');
+  });
+
+  it('keeps Reconnect when an update fails on an unreachable runner', () => {
+    vi.useFakeTimers();
+    const { store, tb, byId, reconnect } = setup([instance({ attach: 'unreachable' })]);
+    store.applySnapshot(snap(), ENV);
+    store.applyEvent(11, { kind: 'daemon.upgrading', mode: 'now' }, ENV);
+    vi.advanceTimersByTime(120_000);
+    tb.render();
+    const banner = byId('banner');
+    expect(banner.textContent).toContain('The daemon update did not complete within two minutes.');
+    const labels = [...banner.querySelectorAll('button')].map((b) => b.textContent);
+    expect(labels).toEqual(['Reconnect']);
+    (banner.querySelector('button') as HTMLButtonElement).click();
+    expect(reconnect).toHaveBeenCalledOnce();
   });
 
   it('offers drain or now for a daemon older than the app carries', async () => {

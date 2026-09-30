@@ -17,8 +17,8 @@
  * - The banner over the content says when the environment cannot be reached
  *   ("Can't reach build-box. Work continues there; Puck keeps trying."),
  *   is incompatible, is not connected, or a daemon update failed. Reconnect
- *   shows when it can help and whenever an update failed; Retry update
- *   shows while the environment is attached.
+ *   shows when the attach view offers it; Retry update shows while the
+ *   environment is attached.
  *
  * Context in, controller out; no DOM lookups.
  */
@@ -328,7 +328,7 @@ export function initTopbar(ctx: TopbarContext) {
       });
       els.banner.appendChild(retry);
     }
-    if (view.retry || upgradeError) {
+    if (view.retry) {
       const again = button('btn-ghost', 'Reconnect');
       again.addEventListener('click', () => ctx.reconnect());
       els.banner.appendChild(again);
