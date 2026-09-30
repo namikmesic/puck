@@ -17,15 +17,14 @@ Use a dedicated user for the runner where you can (`sudo ./svc.sh install puck-r
 ## Install
 
 In Puck, open Settings → Runners → Add runner, pick the platform, and copy the commands it shows.
-They look like this:
+Download, Configure, and Run are separate blocks. Pasting one does not change your shell's directory. If a package or registration value is not safe to paste, the panel shows an error and no commands.
 
-```bash
-mkdir puck-runner && cd puck-runner
-curl -fLo puck-runner-linux-x64-0.1.0.tar.gz https://<server>/runner/0.1.0/puck-runner-linux-x64-0.1.0.tar.gz
-echo "<sha256>  puck-runner-linux-x64-0.1.0.tar.gz" | shasum -a 256 -c
-tar xzf ./puck-runner-linux-x64-0.1.0.tar.gz
-./config.sh --url https://<server> --token PRT_…
-```
+Download is one script. It checks that the tools it needs are present, including `curl`, `tar`, and the checksum tool (`sha256sum` on Linux, `shasum -a 256` on macOS), before downloading, and it stops if `puck-runner` already exists.
+The package is downloaded and extracted in a private staging directory next to that destination. The published SHA-256 is checked before extraction: that detects a damaged download, and it does not authenticate the package.
+The finished directory is renamed to `puck-runner` only after the shipped files and version match. If any step fails, staging is removed and an existing `puck-runner` is left untouched.
+
+Configure and Run each check that `./puck-runner` has this version and an executable `config.sh`, then enter it and run.
+Configure runs `./config.sh --url https://<server> --token PRT_…`.
 
 `config.sh` checks Docker, asks for a name (the host name by default), extra labels, and the most environments this machine may host, generates the runner's key pair, and registers.
 The registration token lasts one hour and may register several runners within that hour.
@@ -33,6 +32,8 @@ Scripted installs can answer everything with flags: `--unattended --name build-b
 `./config.sh --help` lists every option.
 
 ## Run
+
+These commands run inside `puck-runner`. The copied Run block enters that directory after the check above.
 
 ```bash
 ./run.sh                                          # in this terminal, until Ctrl+C

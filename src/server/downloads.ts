@@ -7,12 +7,11 @@
  *   <version>/puck-runner-<os>-<arch>-<version>.tar.gz     os: linux | macos, arch: x64 | arm64
  *
  * and the server publishes them: `GET /v1/runner/releases` lists the latest
- * version's assets with their sha256 (what the Add runner dialog puts in
- * its `shasum -a 256 -c` line) and the minimum version this server accepts;
- * `GET /runner/<version>/<file>` serves a tarball, and `<file>.sha256` its
- * checksum line. Only names matching that pattern are ever served, so no
- * request path reaches outside the directory. Checksums are computed once
- * per file (keyed by size and mtime) and cached.
+ * version's assets with their sha256 and the minimum version this server
+ * accepts; `GET /runner/<version>/<file>` serves a tarball, and
+ * `<file>.sha256` its checksum line. Only names matching that pattern are
+ * ever served, so no request path reaches outside the directory. Checksums
+ * are computed once per file (keyed by size and mtime) and cached.
  */
 
 import { createHash } from 'node:crypto';

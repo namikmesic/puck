@@ -1,8 +1,107 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EnvironmentProviderInfo, PuckBridge, RunnerRegistration, RunnersState } from '../../src/harness/bridge';
 import { assetFor, commandsFor, initRunnersView, runnerMeta, serverAddress, statusWord } from '../../src/renderer/settings/runners';
 import { LOCAL_ID, RID, runnerRow, runnersInfo, runnersState } from './runners-fixtures';
+
+const shellDirs: string[] = [];
+afterEach(() => {
+  for (const dir of shellDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Functions run inside the generated heredoc's real POSIX shell, so failures
+// exercise its errexit, traps, pipelines and filesystem publication.
+const shellStubs = `
+command() {
+  [ "$1" = -v ] && [ "$2" != "$TEST_MISSING_TOOL" ]
+}
+curl() {
+  printf '%s\\n' "$@" > "$TEST_ROOT/curl-args"
+  pwd -P > "$TEST_ROOT/download-cwd"
+  [ "$(stat -c %a . 2>/dev/null || stat -f %Lp .)" = 700 ] || return 1
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --output) shift; printf 'download' > "$1" ;; esac
+    shift
+  done
+  if [ "$TEST_FAILURE" = signal ]; then kill -TERM $$; fi
+  [ "$TEST_FAILURE" != download ]
+}
+mv() {
+  case "$1" in -n) destination=$3 ;; *) destination=$2 ;; esac
+  if [ "$destination" = ./puck-runner ]; then
+    [ "$TEST_FAILURE" != publish ] || return 1
+    if [ "$TEST_FAILURE" = race ]; then
+      mkdir "$TEST_ROOT/puck-runner"
+      printf 'keep' > "$TEST_ROOT/puck-runner/existing"
+    fi
+  else
+    [ "$TEST_FAILURE" != rename ] || return 1
+  fi
+  /bin/mv "$@"
+}
+check_hash() {
+  printf '%s\\n' "$@" > "$TEST_ROOT/hash-args"
+  cat > "$TEST_ROOT/hash-input"
+  [ "$TEST_FAILURE" != checksum ]
+}
+sha256sum() { printf 'sha256sum' > "$TEST_ROOT/hash-tool"; check_hash "$@"; }
+shasum() { printf 'shasum' > "$TEST_ROOT/hash-tool"; check_hash "$@"; }
+tar() {
+  printf '%s\\n' "$@" > "$TEST_ROOT/tar-args"
+  pwd -P > "$TEST_ROOT/extract-cwd"
+  [ -f "$2" ] && [ ! -f "$2.partial" ] || return 1
+  printf 'partial' > config.sh
+  if [ "$TEST_FAILURE" = tar ]; then return 2; fi
+  mkdir bin
+  for file in config.sh run.sh svc.sh bin/node bin/puck-runner.cjs; do
+    [ "$file" != "$TEST_MISSING_FILE" ] || { rm -f "$file"; continue; }
+    printf '%s\\n' '#!/bin/sh' 'pwd -P > "../invoked-cwd"' 'printf "%s\\n" "$@" > "../invoked-args"' > "$file"
+    chmod +x "$file"
+  done
+  if [ "$TEST_MISSING_FILE" != VERSION ]; then printf '%s\\n' "$TEST_VERSION" > VERSION; fi
+  if [ -n "$TEST_NOT_EXECUTABLE" ]; then chmod -x "$TEST_NOT_EXECUTABLE"; fi
+  if [ "$TEST_FAILURE" = destination ]; then mkdir "$TEST_ROOT/puck-runner"; fi
+}
+sudo() { printf '%s\\n' "$@" >> "$TEST_ROOT/sudo-args"; "$@"; }
+`;
+
+function commandSandbox() {
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.runner-commands-test-'));
+  shellDirs.push(dir);
+  const bin = path.join(dir, 'tools');
+  fs.mkdirSync(bin);
+  const stubs = path.join(dir, 'stubs.sh');
+  fs.writeFileSync(stubs, shellStubs);
+  // Inject the functions into the heredoc shell without changing its body.
+  fs.writeFileSync(path.join(bin, 'sh'), '#!/bin/sh\n{ /bin/cat "$TEST_STUBS"; /bin/cat; } | /bin/sh "$@"\n', { mode: 0o755 });
+  return {
+    dir,
+    read: (name: string): string => fs.readFileSync(path.join(dir, name), 'utf8').trimEnd(),
+    exists: (name: string): boolean => fs.existsSync(path.join(dir, name)),
+    staging: (): string[] => fs.readdirSync(dir).filter((name) => name.startsWith('.puck-runner.')),
+    execute: (block: string[], over: Record<string, string> = {}) => spawnSync('/bin/sh', [], {
+      cwd: dir,
+      input: `. "$TEST_STUBS"\n${block.join('\n')}\n`,
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        TEST_ROOT: dir,
+        TEST_STUBS: stubs,
+        TEST_FAILURE: '',
+        TEST_VERSION: '0.1.0',
+        TEST_MISSING_TOOL: '',
+        TEST_MISSING_FILE: '',
+        TEST_NOT_EXECUTABLE: '',
+        ...over,
+      },
+    }),
+  };
+}
 
 const settle = async (): Promise<void> => {
   for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
@@ -150,19 +249,201 @@ describe('runner rows', () => {
   });
 });
 
-describe('Add runner', () => {
-  it('builds GitHub-style download, checksum, configure and run commands', () => {
-    const reg = registration();
-    const linux = commandsFor(reg.assets[0], reg);
-    expect(linux.download).toEqual([
-      'mkdir puck-runner && cd puck-runner',
-      'curl -fLo puck-runner-linux-x64-0.1.0.tar.gz https://puck.example.com/runner/0.1.0/puck-runner-linux-x64-0.1.0.tar.gz',
-      `echo "${'a'.repeat(64)}  puck-runner-linux-x64-0.1.0.tar.gz" | shasum -a 256 -c`,
-      'tar xzf ./puck-runner-linux-x64-0.1.0.tar.gz',
+describe.each([
+  { platform: 'Linux', index: 0, hash: 'sha256sum' },
+  { platform: 'macOS', index: 1, hash: 'shasum' },
+])('$platform copied commands', ({ index, hash }) => {
+  const reg = registration();
+  const asset = reg.assets[index];
+
+  it.each(['https', 'http'])('installs with %s transport, then configures and runs from the completed directory', (scheme) => {
+    const serverUrl = `${scheme}://puck.example.com:8765`;
+    const url = `${serverUrl}/runner/package.tar.gz`;
+    const c = commandsFor({ ...asset, url }, { ...reg, serverUrl });
+    const sandbox = commandSandbox();
+    const result = sandbox.execute([...c.download, 'pwd -P > caller-cwd']);
+    expect(result.status, result.stderr).toBe(0);
+    expect(sandbox.read('caller-cwd')).toBe(sandbox.dir);
+    expect(sandbox.staging()).toEqual([]);
+    expect(sandbox.read('puck-runner/VERSION')).toBe(asset.version);
+    const stage = sandbox.read('download-cwd');
+    expect(path.dirname(stage)).toBe(sandbox.dir);
+    expect(sandbox.read('extract-cwd')).toBe(stage);
+    expect(sandbox.read('hash-tool')).toBe(hash);
+    expect(sandbox.read('hash-input')).toBe(`${asset.sha256}  ./${asset.file}.partial`);
+    expect(sandbox.read('hash-args').split('\n')).toEqual(index === 0 ? ['-c', '--status'] : ['-a', '256', '-c', '--status']);
+    expect(sandbox.read('tar-args').split('\n')).toEqual(['-xzf', `./${asset.file}`]);
+    expect(sandbox.exists(`puck-runner/${asset.file}`)).toBe(true);
+    expect(sandbox.exists(`puck-runner/${asset.file}.partial`)).toBe(false);
+    const transport = scheme === 'https'
+      ? ['--fail', '--location', '--proto', '=https', '--proto-redir', '=https']
+      : ['--fail', '--max-redirs', '0'];
+    expect(sandbox.read('curl-args').split('\n')).toEqual([
+      ...transport, '--globoff', '--connect-timeout', '30', '--max-time', '900', '--output', `./${asset.file}.partial`, '--', url,
     ]);
-    expect(linux.configure).toEqual(['./config.sh --url https://puck.example.com --token PRT_abcdefghijklmnopqrstuvwxyz']);
-    expect(linux.run).toEqual(['./run.sh', 'sudo ./svc.sh install && sudo ./svc.sh start']);
-    expect(commandsFor(reg.assets[1], reg).run[1]).toBe('./svc.sh install && ./svc.sh start');
+    expect(sandbox.execute([...c.configure, 'pwd -P > caller-cwd']).status).toBe(0);
+    expect(sandbox.read('invoked-cwd')).toBe(path.join(sandbox.dir, 'puck-runner'));
+    expect(sandbox.read('invoked-args').split('\n')).toEqual(['--url', serverUrl, '--token', reg.token]);
+    expect(sandbox.read('caller-cwd')).toBe(sandbox.dir);
+    for (const run of c.run) {
+      expect(sandbox.execute([run, 'pwd -P > caller-cwd']).status).toBe(0);
+      expect(sandbox.read('invoked-cwd')).toBe(path.join(sandbox.dir, 'puck-runner'));
+      expect(sandbox.read('caller-cwd')).toBe(sandbox.dir);
+    }
+    expect(sandbox.read('invoked-args')).toBe('start');
+    expect(sandbox.exists('sudo-args')).toBe(index === 0);
+  });
+
+  it.each(['https', 'http'])('treats hostile %s URLs, file names, versions and credentials as literal arguments', (scheme) => {
+    const sandbox = commandSandbox();
+    const serverUrl = `${scheme}://puck.example.com/a 'quote' and $(touch INJECTED)`;
+    const token = `PRT_' "; touch INJECTED; # PUCK_RUNNER_INSTALL`;
+    const file = `package 'quote'; touch INJECTED; #.tar.gz`;
+    const version = `0.1.0 'quote' $(touch INJECTED)`;
+    const url = `${scheme}://puck.example.com/a; printf INJECTED; #`;
+    const c = commandsFor({ ...asset, file, version, url }, { serverUrl, token });
+    const result = sandbox.execute(c.download, { TEST_VERSION: version });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain('INJECTED');
+    expect(sandbox.exists('INJECTED')).toBe(false);
+    expect(sandbox.read('curl-args').split('\n').at(-1)).toBe(url);
+    expect(sandbox.read('hash-input')).toBe(`${asset.sha256}  ./${file}.partial`);
+    const configured = sandbox.execute(c.configure);
+    expect(configured.status, configured.stderr).toBe(0);
+    expect(configured.stdout).not.toContain('INJECTED');
+    expect(sandbox.read('invoked-args').split('\n')).toEqual(['--url', serverUrl, '--token', token]);
+    expect(sandbox.exists('INJECTED')).toBe(false);
+  });
+
+  it.each(['https', 'http'])('cleans staging after %s download, checksum, or partial extraction failures', (scheme) => {
+    const serverUrl = `${scheme}://puck.example.com`;
+    const c = commandsFor({ ...asset, url: `${serverUrl}/package.tar.gz` }, { ...reg, serverUrl });
+    for (const failure of ['download', 'checksum', 'rename', 'tar', 'publish', 'signal']) {
+      const sandbox = commandSandbox();
+      const result = sandbox.execute(c.download, { TEST_FAILURE: failure });
+      expect(result.status, `${failure}: ${result.stderr}`).not.toBe(0);
+      expect(sandbox.exists('tar-args')).toBe(failure === 'tar' || failure === 'publish');
+      expect(sandbox.exists('hash-tool')).toBe(failure !== 'download' && failure !== 'signal');
+      expect(sandbox.exists('puck-runner')).toBe(false);
+      expect(sandbox.staging()).toEqual([]);
+    }
+  });
+
+  it('checks prerequisites before downloading or creating staging', () => {
+    for (const missing of ['curl', hash, 'tar', 'mktemp', 'mv', 'rm', 'cat']) {
+      const sandbox = commandSandbox();
+      const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_MISSING_TOOL: missing });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr.trim()).toBe(`Missing prerequisite: ${missing}`);
+      expect(sandbox.exists('curl-args')).toBe(false);
+      expect(sandbox.exists('puck-runner')).toBe(false);
+      expect(sandbox.staging()).toEqual([]);
+    }
+  });
+
+  it.each(['directory', 'file', 'symlink'])('refuses an existing %s destination before downloading', (kind) => {
+    const sandbox = commandSandbox();
+    const dest = path.join(sandbox.dir, 'puck-runner');
+    if (kind === 'directory') fs.mkdirSync(dest);
+    else if (kind === 'file') fs.writeFileSync(dest, 'keep');
+    else fs.symlinkSync('./absent', dest);
+    const result = sandbox.execute(commandsFor(asset, reg).download);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr.trim()).toBe('puck-runner already exists.');
+    expect(fs.lstatSync(dest).isSymbolicLink()).toBe(kind === 'symlink');
+    if (kind === 'file') expect(sandbox.read('puck-runner')).toBe('keep');
+    expect(sandbox.exists('curl-args')).toBe(false);
+    expect(sandbox.staging()).toEqual([]);
+  });
+
+  it('refuses a destination that appears during extraction and cleans staging', () => {
+    const sandbox = commandSandbox();
+    const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_FAILURE: 'destination' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr.trim()).toBe('puck-runner already exists.');
+    expect(fs.readdirSync(path.join(sandbox.dir, 'puck-runner'))).toEqual([]);
+    expect(sandbox.staging()).toEqual([]);
+  });
+
+  it('preserves a destination that appears during publication and removes nested staging', () => {
+    const sandbox = commandSandbox();
+    const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_FAILURE: 'race' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr.trim()).toBe('puck-runner appeared during publication.');
+    expect(fs.readdirSync(path.join(sandbox.dir, 'puck-runner'))).toEqual(['existing']);
+    expect(sandbox.read('puck-runner/existing')).toBe('keep');
+    expect(sandbox.staging()).toEqual([]);
+  });
+
+  it.each(['config.sh', 'run.sh', 'svc.sh', 'VERSION', 'bin/node', 'bin/puck-runner.cjs'])('never publishes a package missing %s', (missing) => {
+    const sandbox = commandSandbox();
+    const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_MISSING_FILE: missing });
+    expect(result.status).not.toBe(0);
+    expect(sandbox.exists('puck-runner')).toBe(false);
+    expect(sandbox.staging()).toEqual([]);
+  });
+
+  it('never publishes a mismatched version or non-executable configuration', () => {
+    for (const over of [{ TEST_VERSION: 'different' }, { TEST_NOT_EXECUTABLE: 'config.sh' }]) {
+      const sandbox = commandSandbox();
+      expect(sandbox.execute(commandsFor(asset, reg).download, over).status).not.toBe(0);
+      expect(sandbox.exists('puck-runner')).toBe(false);
+      expect(sandbox.staging()).toEqual([]);
+    }
+  });
+
+  it.each(['absent', 'wrong-version', 'non-executable'])('Configure and both Run choices reject an %s installation', (kind) => {
+    const sandbox = commandSandbox();
+    const c = commandsFor(asset, reg);
+    if (kind !== 'absent') {
+      expect(sandbox.execute(c.download).status).toBe(0);
+      if (kind === 'wrong-version') fs.writeFileSync(path.join(sandbox.dir, 'puck-runner/VERSION'), 'different\n');
+      else fs.chmodSync(path.join(sandbox.dir, 'puck-runner/config.sh'), 0o644);
+    }
+    for (const block of [...c.configure, ...c.run]) {
+      const result = sandbox.execute([block]);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr.trim()).toBe('Puck runner installation is incomplete or has a different version.');
+      expect(sandbox.exists('invoked-cwd')).toBe(false);
+    }
+  });
+});
+
+describe('Add runner', () => {
+  it.each(['file', 'url', 'sha256', 'version', 'serverUrl', 'token'])('rejects control characters in %s before producing commands', (field) => {
+    const reg = registration();
+    const asset = reg.assets[0];
+    for (const control of ['\0', '\n', '\r', '\t', '\x1b', '\x7f', '\u0085']) {
+      const value = `unsafe${control}value`;
+      expect(() => commandsFor({ ...asset, [field]: value }, { ...reg, [field]: value })).toThrow('control characters');
+    }
+  });
+
+  it.each(['../package.tar.gz', '/tmp/package.tar.gz', 'sub/package.tar.gz', 'back\\slash.tar.gz', '.', '..', ''])('rejects unsafe archive file name %s', (file) => {
+    const reg = registration();
+    expect(() => commandsFor({ ...reg.assets[0], file }, reg)).toThrow('file name');
+  });
+
+  it.each(['file:///tmp/package', 'ftp://puck.example.com/package', 'http://other.example.com/package', 'http://puck.example.com:9999/package', 'http://puck.example.com:8765\\@other.example.com/package'])('rejects unsupported download transport %s', (url) => {
+    const reg = registration({ serverUrl: 'http://puck.example.com:8765' });
+    expect(() => commandsFor({ ...reg.assets[0], url }, reg)).toThrow('require HTTPS or HTTP');
+  });
+
+  it('rejects a hostile checksum rather than constructing a checksum manifest', () => {
+    const reg = registration();
+    expect(() => commandsFor({ ...reg.assets[0], sha256: `'; touch INJECTED; #` }, reg)).toThrow('SHA-256 checksum');
+  });
+
+  it('shows a clear error with no copyable commands when installation input is rejected', async () => {
+    const { card, bridge } = mount(runnersState(), { runnerRegistrationToken: vi.fn(async () => registration({ token: 'bad\ntoken' })) });
+    btn(card, 'Add runner').click();
+    await settle();
+    const panel = card.querySelector('#rn-add') as HTMLElement;
+    expect(panel.textContent).toContain('control characters');
+    expect(panel.querySelector('.pv-code')).toBeNull();
+    expect(panel.querySelector('#rn-add-status')?.textContent).toBe('');
+    btn(panel, 'Close').click();
+    expect(bridge.runnerRegistrationCancel).toHaveBeenCalledTimes(1);
   });
 
   it('shows the commands for the picked platform with the token expiry, then the runner coming online', async () => {
@@ -173,13 +454,13 @@ describe('Add runner', () => {
     const panel = card.querySelector('#rn-add') as HTMLElement;
     expect(panel.classList.contains('hidden')).toBe(false);
     const codes = [...panel.querySelectorAll('.pv-code')].map((c) => c.textContent);
-    expect(codes[0]).toContain('curl -fLo puck-runner-linux-x64-0.1.0.tar.gz');
-    expect(codes[1]).toBe('$ ./config.sh --url https://puck.example.com --token PRT_abcdefghijklmnopqrstuvwxyz');
+    expect(codes[0]).toBe(`$ ${commandsFor(registration().assets[0], registration()).download[0]}`);
+    expect(codes[1]).toBe(`$ ${commandsFor(registration().assets[0], registration()).configure[0]}`);
     expect(panel.textContent).toContain('expires in 59 min');
     expect(panel.querySelector('#rn-add-status')?.textContent).toBe('◌ Waiting for a runner to register…');
     btn(panel.querySelector('.rn-block') as Element, 'Copy').click();
     await settle();
-    expect((copy.mock.calls[0] as unknown as string[])[0]).toMatch(/^mkdir puck-runner && cd puck-runner\ncurl /);
+    expect(copy).toHaveBeenCalledWith(commandsFor(registration().assets[0], registration()).download[0]);
 
     btn(card.querySelector('#rn-add') as Element, 'macOS ARM64').click();
     expect(card.querySelector('#rn-add-commands')?.textContent).toContain('./svc.sh install && ./svc.sh start');
