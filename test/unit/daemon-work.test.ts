@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addSnapshotPart, snapshotFromHead, type DaemonEvent, type DaemonFrame, type Snapshot, type SnapshotHead, type SnapshotPart, type WorkItem } from '../../src/harness/daemon-protocol';
+import { addSnapshotPart, snapshotFromHead, type DaemonEvent, type DaemonFrame, type Snapshot, type SnapshotHead, type SnapshotPart, type WorkItem, type WorkItemV1 } from '../../src/harness/daemon-protocol';
 import type { TranscriptEntry } from '../../src/harness/transcript';
 import { expectedPackages } from '../../src/harness/provisioning';
 import { harnessDescriptors } from '../../src/harness/providers';
@@ -204,7 +204,8 @@ async function item(c: ReturnType<typeof client>, number: number): Promise<WorkI
   return defined(snap.items.find((i) => i.number === number));
 }
 
-async function until(c: ReturnType<typeof client>, number: number, status: WorkItem['status']): Promise<WorkItem> {
+/** `status` is the client's own: protocol 1's places for the protocol-1 client most suites use. */
+async function until(c: ReturnType<typeof client>, number: number, status: WorkItem['status'] | WorkItemV1['status']): Promise<WorkItem> {
   let found: WorkItem | undefined;
   await vi.waitFor(
     async () => {

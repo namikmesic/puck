@@ -727,7 +727,10 @@ export function initWorkDetail(ctx: WorkDetailContext) {
     if (!step.startedAt) return '';
     const end = step.finishedAt ?? Date.now();
     const s = Math.max(0, Math.round((end - step.startedAt) / 1000));
-    return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86_400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86_400)}d ${Math.floor((s % 86_400) / 3600)}h`;
   }
 
   function stepRow(it: WorkItem, step: Step): HTMLElement {
@@ -863,11 +866,6 @@ export function initWorkDetail(ctx: WorkDetailContext) {
         'This environment has no delivery block: finished work waits for you to accept or merge. Add delivery: to its environment definition in the Puck home to run checks and a review panel.',
       ),
     );
-    if (current?.round) {
-      const line = el('div', 'wd-flow-head');
-      line.appendChild(el('span', 'wd-flow-round', `Round ${current.round.round}${current.round.headSha ? ` · commit ${current.round.headSha.slice(0, 7)}` : ''}`));
-      head.appendChild(line);
-    }
     const next = nextLine(it);
     if (next) head.appendChild(el('p', 'wd-flow-next', next));
     host.appendChild(head);

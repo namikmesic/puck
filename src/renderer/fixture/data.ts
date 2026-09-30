@@ -339,10 +339,10 @@ function orchestratorLog(now: number, openAsk: boolean): TranscriptEntry[] {
     done('t10', 'PR #44 approved by @dana; PR #47 draft with failing e2e.', d0(13)),
     text(
       "Here's where the launch stands:\n\n" +
-        '- **In review:** W-2 (rate limiting, PR #44 approved), W-15 (avatar caching, e2e failing), W-16 (webhook retries).\n' +
-        '- **Running:** W-3 is on its second attempt at the login redirect loop.\n' +
+        '- **Finished, waiting on you to accept or merge:** W-2 (rate limiting, PR #44 approved), W-15 (avatar caching, e2e failing), W-16 (webhook retries).\n' +
+        '- **In progress:** W-3 is on its second attempt at the login redirect loop.\n' +
         '- **Waiting on you:** W-4 asks how to fill null themes.\n' +
-        '- **Ready:** W-6, W-7 and W-8 start as agents free up.\n\n',
+        '- **Todo:** W-6, W-7 and W-8 start as agents free up.\n\n',
       d0(13),
     ),
   ];

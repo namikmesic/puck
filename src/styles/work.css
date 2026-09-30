@@ -1384,17 +1384,6 @@
   color: var(--gray-light);
 }
 
-.wd-flow-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-}
-
-.wd-flow-round {
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
-
 .wd-flow-next {
   margin: 4px 0 0;
   font-size: var(--text-sm);
@@ -1542,10 +1531,18 @@
 }
 
 /* References: the source issue, the delivery pull request and related links. */
+.wd-rounds + .wd-section {
+  margin-top: var(--space-6);
+}
+
 .wd-refs {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.wd-refs .wd-empty {
+  padding: 2px 0 var(--space-2);
 }
 
 .wd-ref {

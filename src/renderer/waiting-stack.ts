@@ -113,10 +113,11 @@ export function initWaitingStack(ctx: WaitingStackContext) {
     chip.title = `Open W-${entry.number}: ${entry.title}`;
     chip.addEventListener('click', () => ctx.openItem(entry.itemId));
     line.appendChild(chip);
-    const first = entry.questions[0]?.question ?? '';
-    const summary = `${entry.agent ?? 'The worker'} asks: ${first}`;
-    if (expanded) line.appendChild(el('span', 'oc-wait-text', summary));
+    const who = `${entry.agent ?? 'The worker'} asks`;
+    // Open, the card below carries the question.
+    if (expanded) line.appendChild(el('span', 'oc-wait-text', `${who}:`));
     else {
+      const summary = `${who}: ${entry.questions[0]?.question ?? ''}`;
       const toggle = button('oc-wait-text', summary);
       toggle.setAttribute('aria-expanded', 'false');
       toggle.addEventListener('click', () => {

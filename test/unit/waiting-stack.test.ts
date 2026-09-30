@@ -84,7 +84,8 @@ describe('the Waiting on you stack', () => {
     const entry = host.querySelector<HTMLElement>('.oc-wait-entry');
     expect(entry?.classList.contains('open')).toBe(true);
     expect(entry?.querySelector('.oc-wait-ticket')?.textContent).toBe('W‑4');
-    expect(entry?.querySelector('.oc-wait-text')?.textContent).toBe('implementer asks: Question 4?');
+    expect(entry?.querySelector('.oc-wait-text')?.textContent).toBe('implementer asks:');
+    expect(entry?.querySelector('.ask-question')?.textContent).toBe('Question 4?');
     (entry?.querySelector('.oc-wait-ticket') as HTMLButtonElement).click();
     expect(openItem).toHaveBeenCalledWith('itm_4');
     const yes = [...host.querySelectorAll<HTMLButtonElement>('.ask-option')].find((b) => b.textContent?.includes('Yes'));
@@ -102,6 +103,7 @@ describe('the Waiting on you stack', () => {
     expect(entries).toHaveLength(WAITING_SHOWN);
     expect([...entries].map((e) => e.querySelector('.oc-wait-ticket')?.textContent)).toEqual(['W‑1', 'W‑2', 'W‑3']);
     expect(host.querySelectorAll('.ask')).toHaveLength(0);
+    expect(entries[0]?.querySelector('.oc-wait-text')?.textContent).toBe('implementer asks: Question 1?');
     expect(host.querySelector('.oc-wait-count')?.textContent).toBe('5');
     const more = host.querySelector<HTMLButtonElement>('.oc-wait-more-btn');
     expect(more?.textContent).toBe('+2 waiting');
