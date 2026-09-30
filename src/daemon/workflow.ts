@@ -492,6 +492,7 @@ export function bootstrapLegacy(wf: Workflow, items: readonly ItemRecord[], next
         change: {},
         by: PIPELINE,
         reason: 'legacy',
+        legacy: true,
       });
       if (mapping?.implement) settleRound(tx, item.id, item.outcome === 'cancelled' ? 'cancelled' : 'settled');
     }

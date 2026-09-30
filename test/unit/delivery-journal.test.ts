@@ -12,9 +12,11 @@ import {
   type JournalEvent,
   type JournalIO,
 } from '../../src/daemon/delivery/journal';
+import { PIPELINE } from '../../src/daemon/delivery/derive';
 import type { Logger } from '../../src/daemon/log';
 import { migrateState } from '../../src/daemon/store/meta';
-import { bootstrapLegacy, openFirstRound, queueImplement } from '../../src/daemon/workflow';
+import { bootstrapLegacy, openFirstRound, queueImplement, ticketStatus } from '../../src/daemon/workflow';
+import type { TicketTrigger } from '../../src/harness/item-transitions';
 import { legacyIds } from '../../src/harness/workflow';
 import { deliveryStack, LEGACY, LEGACY_T, writeLegacyState, type Stack } from './daemon-fakes';
 
@@ -488,6 +490,59 @@ describe('the format-2 bootstrap', () => {
       expect(events.filter((e) => e.kind === 'journal.bootstrap')).toHaveLength(1);
       const stepIds = events.filter((e) => e.kind === 'step.changed').map((e) => (e as unknown as { step: { id: string } }).step.id);
       expect(new Set(stepIds).size).toBe(stepIds.length);
+    }
+  });
+
+  it('keeps each migrated updatedAt through bootstrap and a journal rebuild, and a live status stamps it', () => {
+    const d = path.join(dir, 'updated-at');
+    migrated(d);
+    const migratedItems = (stack: Stack) => JSON.parse(JSON.stringify(stack.items.get().items)) as Record<string, { updatedAt: number; closedAt: number | null }>;
+    const opened = deliveryStack(d, { now: () => 5 });
+    const prior = migratedItems(opened);
+    opened.journal.close();
+    boot(d);
+    const fresh = deliveryStack(d, { now: () => 5 });
+    try {
+      expect(migratedItems(fresh)).toEqual(prior);
+      for (const id of Object.values(LEGACY)) {
+        expect(fresh.tables.get().tickets[id]?.closedAt, id).toBe(prior[id]?.closedAt ?? null);
+      }
+    } finally {
+      fresh.journal.close();
+    }
+
+    fs.rmSync(path.join(d, 'items.json'));
+    fs.rmSync(path.join(d, 'delivery', 'tables.json'));
+    let now = 5;
+    const rebuilt = deliveryStack(d, { now: () => now });
+    try {
+      expect(migratedItems(rebuilt)).toEqual(prior);
+      for (const id of Object.values(LEGACY)) {
+        expect(rebuilt.tables.get().tickets[id]?.closedAt, id).toBe(prior[id]?.closedAt ?? null);
+      }
+      const live: { id: string; trigger: TicketTrigger; started?: boolean; at: number; closed: number | null }[] = [
+        { id: LEGACY.review, trigger: 'accept', at: 9_001, closed: 9_001 },
+        { id: LEGACY.backlog, trigger: 'cancel', at: 9_002, closed: 9_002 },
+        { id: LEGACY.running, trigger: 'fail', at: 9_003, closed: 9_003 },
+        { id: LEGACY.askOrch, trigger: 'merged', at: 9_004, closed: 9_004 },
+        { id: LEGACY.failed, trigger: 'retry', started: true, at: 9_005, closed: null },
+      ];
+      for (const step of live) {
+        now = step.at;
+        const item = rebuilt.backlog.get(step.id);
+        expect(item, step.trigger).toBeTruthy();
+        const tx = rebuilt.workflow.begin(`item.${step.trigger}`);
+        ticketStatus(tx, item as NonNullable<typeof item>, step.trigger, { by: PIPELINE, started: step.started ?? false });
+        rebuilt.workflow.commit(tx);
+        const after = rebuilt.backlog.get(step.id);
+        expect(after?.updatedAt, step.trigger).toBe(step.at);
+        expect(after?.closedAt, step.trigger).toBe(step.closed);
+        expect(rebuilt.tables.get().tickets[step.id]?.closedAt, step.trigger).toBe(step.closed);
+      }
+      expect(rebuilt.backlog.get(LEGACY.merged)?.updatedAt).toBe(prior[LEGACY.merged]?.updatedAt);
+      expect(rebuilt.tables.get().tickets[LEGACY.merged]?.closedAt).toBe(prior[LEGACY.merged]?.closedAt ?? null);
+    } finally {
+      rebuilt.journal.close();
     }
   });
 });

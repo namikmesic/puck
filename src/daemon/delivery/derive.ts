@@ -57,6 +57,7 @@ export type LedgerEvent =
       change: TicketChange;
       by: JournalActor;
       reason: string | null;
+      legacy?: true;
     }
   | { kind: 'ticket.patch'; itemId: string; change: TicketChange; position?: number }
   | { kind: 'ticket.removed'; itemId: string; number: number; title: string; status: ItemStatus; outcome: ItemOutcome | null }
@@ -132,7 +133,7 @@ export function applyItemEvent(file: ItemsFile, ev: LedgerEvent, at: number, del
       rec.status = ev.to.status;
       rec.outcome = ev.to.outcome;
       rec.closedAt = ev.closedAt;
-      rec.updatedAt = at;
+      if (!ev.legacy) rec.updatedAt = at;
       delta.changed.add(ev.itemId);
       return;
     }
