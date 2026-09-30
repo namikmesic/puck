@@ -12,10 +12,13 @@
  * - Chips: "Update available" (the apply dialog, with the changes grouped
  *   by how they apply), a GitHub warning when the environment's GitHub
  *   access is not ok, a reconnecting spinner, "Daemon update" when this
- *   Puck carries a newer daemon, and "Daemon updating" while that runs.
+ *   Puck carries a newer daemon, "Daemon updating" while that runs, and
+ *   "Daemon update failed" when it does not finish.
  * - The banner over the content says when the environment cannot be reached
  *   ("Can't reach build-box. Work continues there; Puck keeps trying."),
- *   is incompatible, or is not connected, with Reconnect where it helps.
+ *   is incompatible, is not connected, or a daemon update failed. Reconnect
+ *   shows when the attach view offers it; Retry update shows while the
+ *   environment is attached.
  *
  * Context in, controller out; no DOM lookups.
  */
@@ -292,7 +295,8 @@ export function initTopbar(ctx: TopbarContext) {
       const text = live.github.state === 'expiring' ? 'GitHub access expiring' : live.github.state === 'revoked' ? 'GitHub access revoked' : 'No GitHub access';
       els.chips.appendChild(chip('github bad', text, 'The runner keeps GitHub tokens coming from the Puck server; check that the runner is online and Puck is installed on the repositories.'));
     }
-    if (live?.upgrading) els.chips.appendChild(chip('upgrading', 'Daemon updating', live.upgrading === 'drain' ? 'Updating once running turns finish' : 'Updating now'));
+    if (live?.upgradeError) els.chips.appendChild(chip('daemon bad', 'Daemon update failed', live.upgradeError));
+    else if (live?.upgrading) els.chips.appendChild(chip('upgrading', 'Daemon updating', live.upgrading === 'drain' ? 'Updating once running turns finish' : 'Updating now'));
     else if (info.daemonUpdate && info.attach === 'attached') {
       const b = button('tb-chip daemon', 'Daemon update');
       b.title = 'This Puck carries a newer environment daemon';
@@ -303,8 +307,10 @@ export function initTopbar(ctx: TopbarContext) {
 
   function renderBanner(): void {
     const view = ctx.attach();
+    const upgradeError = store.state()?.upgradeError;
     els.banner.textContent = '';
     const show =
+      !!upgradeError ||
       view.phase === 'unreachable' ||
       view.phase === 'incompatible' ||
       view.phase === 'detached' ||
@@ -312,8 +318,16 @@ export function initTopbar(ctx: TopbarContext) {
       view.phase === 'snapshot-failed';
     els.banner.classList.toggle('hidden', !show);
     if (!show) return;
-    els.banner.dataset.phase = view.phase;
-    els.banner.appendChild(el('span', 'tb-banner-text', view.text));
+    els.banner.dataset.phase = upgradeError ? 'daemon-update-failed' : view.phase;
+    els.banner.appendChild(el('span', 'tb-banner-text', upgradeError || view.text));
+    if (upgradeError && current()?.attach === 'attached') {
+      const retry = button('btn-ghost', 'Retry update');
+      retry.addEventListener('click', () => {
+        const id = store.envId();
+        if (id) showDaemonDialog(id);
+      });
+      els.banner.appendChild(retry);
+    }
     if (view.retry) {
       const again = button('btn-ghost', 'Reconnect');
       again.addEventListener('click', () => ctx.reconnect());

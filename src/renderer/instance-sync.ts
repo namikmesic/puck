@@ -1,7 +1,7 @@
 /**
  * Keeps the instance store in step with the bridge: the instance list,
- * the pushed instance events, and the daemon events and snapshots of the
- * environment on screen.
+ * the pushed instance events, and the daemon events, welcomes, and
+ * snapshots of the environment on screen.
  *
  * Opening an environment asks main to attach and returns at once; the
  * snapshot is read as soon as the attach is up (right away when main is
@@ -157,6 +157,7 @@ export function initInstanceSync(ctx: InstanceSyncContext) {
   bridge.onDaemonEvent((payload) => {
     if (payload.envId !== store.envId()) return;
     if ('snapshot' in payload) store.applySnapshot(payload.snapshot, payload.envId);
+    else if ('welcome' in payload) store.applyWelcome(payload.welcome.daemon, payload.welcome.head, payload.envId);
     else store.applyEvent(payload.seq, payload.ev, payload.envId);
     notify();
   });

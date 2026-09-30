@@ -7,8 +7,13 @@
  *   is a replay overlap and is skipped. Events that arrive before the first
  *   snapshot, or ahead of a missing seq, wait in a buffer; a gap that the
  *   buffer cannot close asks the owner for a resync (once per cursor).
- * - A snapshot replaces everything and moves the cursor to its head;
- *   buffered events after the head then apply on top.
+ * - A snapshot replaces the projection and moves the cursor to its head;
+ *   buffered events after the head then apply on top. The same daemon
+ *   keeps an in-progress or failed restart, and recovers a drain whose
+ *   original turns are still running; a different version or build clears
+ *   the update. A welcome updates the version and build without replacing
+ *   the projection. The same build recovers that drain the same way; a
+ *   different version or build clears the update.
  * - Kept: items, backlog order, sessions, capacity, instance status, GitHub
  *   state, open questions, and live turn buffers (the recorded dialect of
  *   every turn still running, so a thread opened mid-turn and the board's
@@ -38,6 +43,8 @@ export type StoreChange =
   | { kind: 'instances' }
   | { kind: 'reset'; envId: string | null }
   | { kind: 'snapshot'; envId: string }
+  /** Attach metadata or the daemon update deadline changed. */
+  | { kind: 'daemon'; envId: string }
   /** An optimistic local reorder, before the daemon confirms it. */
   | { kind: 'order'; envId: string }
   | { kind: 'event'; envId: string; seq: number; ev: DaemonEvent };
@@ -50,8 +57,9 @@ export interface EnvDaemonState {
   github: GithubAuth;
   orchestratorSessionId: string | null;
   capacity: Capacity;
-  /** Set by `daemon.upgrading` until the next snapshot. */
+  /** Set by `daemon.upgrading` until a changed build returns or the restart times out. */
   upgrading: 'drain' | 'now' | null;
+  upgradeError: string | null;
   /** The definition's repositories, from the snapshot or the latest `instance.definition`. */
   repos: { github: string; dir: string }[];
 }
@@ -59,9 +67,16 @@ export interface EnvDaemonState {
 export interface InstanceStoreOptions {
   /** The buffer cannot close a gap in seq: fetch a snapshot (the owner calls applySnapshot). */
   requestResync(envId: string): void;
+  /** Restart deadline. An attached drain's original turns do not count; staying disconnected still bounds the wait. Test seam. */
+  upgradeTimeoutMs?: number;
 }
 
 const EMPTY_CAPACITY: Capacity = { agents: {}, workers: { running: 0, max: 0 }, paused: false };
+const UPGRADE_TIMEOUT_MS = 120_000;
+
+function sameDaemon(a: Snapshot['daemon'], b: Snapshot['daemon']): boolean {
+  return a.build === b.build && a.version === b.version;
+}
 
 /** Consecutive text deltas with the same parentId merge, and `thinking` is dropped. */
 export function recordLive(events: HarnessEvent[], event: HarnessEvent): void {
@@ -108,9 +123,73 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
   const inflight = new Map<string, InflightTurn>();
   /** The latest tool summary per session while its turn runs. */
   const lastTool = new Map<string, string>();
+  let upgradeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Keep the phase after a timeout so a same-build snapshot or welcome can recover a still-running drain. */
+  let upgradePhase: 'draining' | 'restarting' | null = null;
+  /** Only the turns running when the upgrade began can delay its restart deadline. */
+  const drainTurns = new Set<string>();
+  /** An old upgrading event replayed through this head belongs to the build we replaced. */
+  let completedUpgradeThrough: number | null = null;
 
   function emit(change: StoreChange): void {
     for (const cb of listeners) cb(change);
+  }
+
+  function cancelUpgradeTimer(): void {
+    if (upgradeTimer) clearTimeout(upgradeTimer);
+    upgradeTimer = null;
+  }
+
+  function finishUpgrade(): void {
+    cancelUpgradeTimer();
+    upgradePhase = null;
+    drainTurns.clear();
+    if (!state) return;
+    state.upgrading = null;
+    state.upgradeError = null;
+  }
+
+  function attachedDrain(): boolean {
+    return !!envId
+      && !!state
+      && state.upgrading === 'drain'
+      && upgradePhase === 'draining'
+      && state.instance.status !== 'stopping'
+      && instances.get(envId)?.attach === 'attached';
+  }
+
+  function completeDrain(): void {
+    if (upgradePhase !== 'draining') return;
+    // Replace a temporary disconnect deadline with a full restart deadline once.
+    cancelUpgradeTimer();
+    upgradePhase = 'restarting';
+    drainTurns.clear();
+  }
+
+  function recoverRunningDrain(): void {
+    if (!state) return;
+    for (const id of drainTurns) if (!inflight.has(id)) drainTurns.delete(id);
+    if (upgradePhase !== 'draining' || drainTurns.size === 0 || state.instance.status === 'stopping') return;
+    cancelUpgradeTimer();
+    state.upgrading = 'drain';
+    state.upgradeError = null;
+  }
+
+  function watchUpgrade(restarting = false): void {
+    if (!state) return;
+    if (drainTurns.size === 0 || (state.instance.status === 'stopping' && state.instance.detail === 'upgrading')) completeDrain();
+    if (!state.upgrading) return;
+    const waiting = upgradePhase === 'draining' && !restarting && state.instance.status !== 'stopping';
+    if (waiting) return;
+    if (upgradeTimer) return;
+    upgradeTimer = setTimeout(() => {
+      upgradeTimer = null;
+      if (!state || !envId || attachedDrain()) return;
+      state.upgrading = null;
+      state.upgradeError = 'The daemon update did not complete within two minutes.';
+      emit({ kind: 'daemon', envId });
+    }, opts.upgradeTimeoutMs ?? UPGRADE_TIMEOUT_MS);
+    upgradeTimer.unref?.();
   }
 
   function clearDaemon(): void {
@@ -123,7 +202,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     lastTool.clear();
   }
 
-  function applyOne(ev: DaemonEvent): void {
+  function applyOne(seq: number, ev: DaemonEvent): void {
     if (!state) return;
     switch (ev.kind) {
       case 'instance.status':
@@ -163,11 +242,13 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         }
         break;
       }
-      case 'turn.end':
+      case 'turn.end': {
         inflight.delete(ev.turnId);
+        drainTurns.delete(ev.turnId);
         lastTool.delete(ev.sessionId);
         for (const [askId, ask] of asks) if (ask.turnId === ev.turnId) asks.delete(askId);
         break;
+      }
       case 'ask.routed': {
         const ask = asks.get(ev.askId);
         if (ask) asks.set(ev.askId, { ...ask, routedTo: ev.to });
@@ -191,12 +272,19 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         state.capacity = { agents: ev.agents, workers: ev.workers, paused: ev.paused };
         break;
       case 'daemon.upgrading':
+        if (completedUpgradeThrough !== null && seq <= completedUpgradeThrough) break;
+        cancelUpgradeTimer();
+        upgradePhase = ev.mode === 'drain' ? 'draining' : 'restarting';
+        drainTurns.clear();
+        if (ev.mode === 'drain') for (const id of inflight.keys()) drainTurns.add(id);
         state.upgrading = ev.mode;
+        state.upgradeError = null;
         break;
       case 'turn.user':
       case 'turn.notice':
         break;
     }
+    watchUpgrade();
   }
 
   function drain(): void {
@@ -206,7 +294,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
       const ev = buffered.get(seq) as DaemonEvent;
       buffered.delete(seq);
       cursor = seq;
-      applyOne(ev);
+      applyOne(seq, ev);
       emit({ kind: 'event', envId, seq, ev });
     }
     for (const seq of [...buffered.keys()]) if (seq <= cursor) buffered.delete(seq);
@@ -234,6 +322,7 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
     },
     upsertInstance(info: InstanceInfo): void {
       instances.set(info.id, info);
+      if (info.id === envId) watchUpgrade(info.attach !== 'attached');
       emit({ kind: 'instances' });
     },
     removeInstance(id: string): void {
@@ -251,6 +340,10 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
 
     /** Switch to another environment (or none): its daemon state starts empty until a snapshot. */
     reset(next: string | null): void {
+      cancelUpgradeTimer();
+      upgradePhase = null;
+      drainTurns.clear();
+      completedUpgradeThrough = null;
       envId = next;
       cursor = null;
       resyncAsked = undefined;
@@ -264,6 +357,13 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
 
     applySnapshot(snapshot: Snapshot, forEnv: string): void {
       if (forEnv !== envId) return;
+      // A snapshot of the old process during drain cannot complete its upgrade.
+      const previous = state;
+      const unchanged = previous && sameDaemon(previous.daemon, snapshot.daemon);
+      if (!unchanged) {
+        finishUpgrade();
+        completedUpgradeThrough = snapshot.head;
+      }
       clearDaemon();
       state = {
         envId: forEnv,
@@ -273,7 +373,8 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
         github: { ...snapshot.github },
         orchestratorSessionId: snapshot.orchestratorSessionId,
         capacity: snapshot.capacity ?? EMPTY_CAPACITY,
-        upgrading: null,
+        upgrading: unchanged ? previous.upgrading : null,
+        upgradeError: unchanged ? previous.upgradeError : null,
         repos: snapshot.repos ?? [],
       };
       for (const item of snapshot.items) items.set(item.id, item);
@@ -292,10 +393,26 @@ export function createInstanceStore(opts: InstanceStoreOptions) {
           }
         }
       }
+      recoverRunningDrain();
       cursor = snapshot.head;
       resyncAsked = undefined;
+      watchUpgrade();
       emit({ kind: 'snapshot', envId: forEnv });
       drain();
+    },
+
+    /** Welcome arrives on every attach, including replays that need no snapshot. */
+    applyWelcome(daemon: Snapshot['daemon'], head: number, forEnv: string): void {
+      if (forEnv !== envId || !state) return;
+      if (!sameDaemon(state.daemon, daemon)) {
+        completedUpgradeThrough = head;
+        finishUpgrade();
+      } else {
+        recoverRunningDrain();
+      }
+      state.daemon = { ...daemon };
+      watchUpgrade();
+      emit({ kind: 'daemon', envId: forEnv });
     },
 
     applyEvent(seq: number, ev: DaemonEvent, forEnv: string): void {

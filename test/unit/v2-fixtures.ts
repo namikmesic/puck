@@ -122,6 +122,7 @@ export function fakeBridge(over: Partial<PuckBridge> = {}) {
     instanceEvent: (e: InstanceEvent) => instanceCb?.(e),
     daemonEvent: (seq: number, ev: DaemonEvent, envId = ENV) => daemonCb?.({ envId, seq, at: Date.now(), ev }),
     daemonSnapshot: (s: Snapshot, envId = ENV) => daemonCb?.({ envId, snapshot: s }),
+    daemonWelcome: (daemon: Snapshot['daemon'], head: number, envId = ENV) => daemonCb?.({ envId, welcome: { daemon, head } }),
     runnerEvent: (e: RunnerEvent) => runnerCb?.(e),
   };
 }

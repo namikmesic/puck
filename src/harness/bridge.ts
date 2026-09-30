@@ -263,10 +263,11 @@ export interface InstanceUpdate {
   changes: Record<UpdateClass, DefinitionChange[]>;
 }
 
-/** Pushed main → renderer for the attached environment: each daemon event in seq order, or a resync snapshot. */
+/** Pushed main → renderer: attach metadata, each daemon event in seq order, or a resync snapshot. */
 export type DaemonEventPayload =
   | { envId: string; seq: number; at: number; ev: DaemonEvent }
-  | { envId: string; snapshot: Snapshot };
+  | { envId: string; snapshot: Snapshot }
+  | { envId: string; welcome: { daemon: Snapshot['daemon']; head: number } };
 
 /** One GitHub App installation the signed-in user can reach. */
 export interface GithubInstallation {
