@@ -19,7 +19,34 @@ describe('msUntilNextDay', () => {
 describe('watchDayRollover', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('fires at each local midnight, on focus, and when the window becomes visible again, until stopped', () => {
+  it('fires once when sleep jumps past midnight, not on same-day ticks, until stopped', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-18T22:00:00'));
+    const onDayTurn = vi.fn();
+    const stop = watchDayRollover(window, onDayTurn);
+
+    vi.advanceTimersByTime(60_000);
+    vi.advanceTimersByTime(60_000);
+    expect(onDayTurn).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date('2026-08-19T08:00:00'));
+    vi.advanceTimersByTime(60_000);
+    expect(onDayTurn).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(60_000);
+    expect(onDayTurn).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event('focus'));
+    expect(onDayTurn).toHaveBeenCalledTimes(2);
+
+    stop();
+    window.dispatchEvent(new Event('focus'));
+    vi.setSystemTime(new Date('2026-08-20T09:00:00'));
+    vi.advanceTimersByTime(60_000);
+    expect(onDayTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it('fires when the timer reaches the next local midnight, then not again that day', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-18T23:59:00'));
     const onDayTurn = vi.fn();
@@ -29,21 +56,12 @@ describe('watchDayRollover', () => {
     expect(onDayTurn).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1_000);
     expect(onDayTurn).toHaveBeenCalledTimes(1);
-
-    window.dispatchEvent(new Event('focus'));
-    expect(onDayTurn).toHaveBeenCalledTimes(2);
-
-    // Waking from sleep with the window frontmost: no focus, only visibilitychange.
-    document.dispatchEvent(new Event('visibilitychange'));
-    expect(onDayTurn).toHaveBeenCalledTimes(3);
-
-    vi.advanceTimersByTime(24 * 3_600_000);
-    expect(onDayTurn).toHaveBeenCalledTimes(4);
+    vi.advanceTimersByTime(60_000);
+    expect(onDayTurn).toHaveBeenCalledTimes(1);
 
     stop();
     window.dispatchEvent(new Event('focus'));
-    document.dispatchEvent(new Event('visibilitychange'));
     vi.advanceTimersByTime(48 * 3_600_000);
-    expect(onDayTurn).toHaveBeenCalledTimes(4);
+    expect(onDayTurn).toHaveBeenCalledTimes(1);
   });
 });
