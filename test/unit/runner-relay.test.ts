@@ -45,12 +45,12 @@ function fakeDocker(state: () => string | null) {
   const calls: { args: string[]; input?: DockerOptions['input'] }[] = [];
   const run = async (args: string[], opts: DockerOptions = {}): Promise<DockerResult> => {
     calls.push({ args, input: opts.input });
-    if (args[0] === 'info') return { code: 0, stdout: DOCKER_INFO, stderr: '' };
+    if (args[0] === 'info') return { code: 0, stdout: DOCKER_INFO, stderr: '', failure: null };
     if (args[0] === 'container' && args[1] === 'inspect') {
       const s = state();
-      return s ? { code: 0, stdout: `${s}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'No such container' };
+      return s ? { code: 0, stdout: `${s}\n`, stderr: '', failure: null } : { code: 1, stdout: '', stderr: 'No such container', failure: 'not-found' };
     }
-    return { code: 0, stdout: '', stderr: '' };
+    return { code: 0, stdout: '', stderr: '', failure: null };
   };
   return { run, calls };
 }

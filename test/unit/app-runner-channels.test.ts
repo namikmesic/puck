@@ -71,12 +71,12 @@ const until = async (what: string, ok: () => boolean, ms = 10_000): Promise<void
 
 function fakeDocker(state: () => string | null) {
   return async (args: string[]): Promise<DockerResult> => {
-    if (args[0] === 'info') return { code: 0, stdout: JSON.stringify({ ServerVersion: '27.3.1', NCPU: 8, MemTotal: 16e9 }), stderr: '' };
+    if (args[0] === 'info') return { code: 0, stdout: JSON.stringify({ ServerVersion: '27.3.1', NCPU: 8, MemTotal: 16e9 }), stderr: '', failure: null };
     if (args[0] === 'container' && args[1] === 'inspect') {
       const s = state();
-      return s ? { code: 0, stdout: `${s}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'No such container' };
+      return s ? { code: 0, stdout: `${s}\n`, stderr: '', failure: null } : { code: 1, stdout: '', stderr: 'No such container', failure: 'not-found' };
     }
-    return { code: 0, stdout: '', stderr: '' };
+    return { code: 0, stdout: '', stderr: '', failure: null };
   };
 }
 

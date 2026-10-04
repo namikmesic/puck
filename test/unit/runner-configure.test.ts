@@ -31,12 +31,12 @@ function docker(opts: { info?: Partial<DockerResult>; containers?: string[] } = 
   const calls: string[] = [];
   const run = async (args: string[]): Promise<DockerResult> => {
     calls.push(args.join(' '));
-    if (args[0] === 'info') return { code: 0, stdout: JSON.stringify({ ServerVersion: '27.3.1', NCPU: 16, MemTotal: 67_000_000_000 }), stderr: '', ...opts.info };
+    if (args[0] === 'info') return { code: 0, stdout: JSON.stringify({ ServerVersion: '27.3.1', NCPU: 16, MemTotal: 67_000_000_000 }), stderr: '', failure: null, ...opts.info };
     if (args[0] === 'ps') {
       const rows = (opts.containers ?? []).map((id) => JSON.stringify({ Names: `puck-${id}`, State: 'running', Image: 'x', Labels: `puck=instance,puck.env=${id},puck.definition=web` }));
-      return { code: 0, stdout: rows.join('\n'), stderr: '' };
+      return { code: 0, stdout: rows.join('\n'), stderr: '', failure: null };
     }
-    return { code: 0, stdout: '', stderr: '' };
+    return { code: 0, stdout: '', stderr: '', failure: null };
   };
   return { run, calls };
 }
@@ -95,7 +95,7 @@ describe('config.sh', { timeout: 20_000 }, () => {
     const session = await signIn(h, 'octo');
     const base = { url: h.base, token: await token(session, 'registration'), unattended: true, replace: false, disableUpdate: false };
     const deps = { paths, io: io(), version: '0.1.0', platform: { os: 'linux' as const, arch: 'x64' as const } };
-    const denied = docker({ info: { code: 1, stdout: '', stderr: 'permission denied while trying to connect to the Docker daemon socket' } });
+    const denied = docker({ info: { code: 1, stdout: '', stderr: 'permission denied while trying to connect to the Docker daemon socket', failure: 'permission' } });
     await expect(configure(base, { ...deps, docker: denied.run })).rejects.toThrow(/usermod -aG docker/);
     expect(isConfigured(paths)).toBe(false);
     await expect(configure({ ...base, token: 'PRT_nottherealtokenatall' }, { ...deps, docker: docker().run })).rejects.toThrow(/unknown, revoked or expired/);
@@ -286,7 +286,7 @@ describe('config.sh remove', { timeout: 20_000 }, () => {
     await registered(session);
     const d = docker({ containers: [ENV] });
     const failing = async (args: string[]): Promise<DockerResult> =>
-      args[0] === 'volume' ? { code: 1, stdout: '', stderr: 'volume is in use' } : d.run(args);
+      args[0] === 'volume' ? { code: 1, stdout: '', stderr: 'volume is in use', failure: 'other' } : d.run(args);
     await expect(
       remove({ token: await token(session, 'removal'), environments: 'delete', unattended: true }, { paths, docker: failing, io: io(), fetch: routed, service: () => { throw new Error('no service'); } }),
     ).rejects.toThrow(/volume is in use/);

@@ -36,7 +36,7 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
   `composerGate` in `src/renderer/instance-progress.ts` reads the app's operation, the attach state, and the daemon's status, in that order.
   Reserve "is Docker running?" for a failed Docker health check on the runner, never for a slow pull or run.
 - **The app never runs `docker`.**
-  Every Docker operation is on a runner (`src/puck-runner/docker/`), argv only, with `TIMEOUTS` in `ops.ts` as the one table.
+  Every Docker operation is on a runner (`src/puck-runner/docker/`), argv only, with `TIMEOUTS` in `timeouts.ts` as the one table.
   Docker CLI discovery (`discovery.ts`) exists because launchd and Finder launches do not inherit the shell PATH: configured path (`PUCK_DOCKER_BIN`), well-known install locations, inherited PATH, login-shell probe, and the not-found error lists what was searched.
 - **Provider packages are pinned** (`PinnedPackage` in `src/harness/providers/index.ts`).
   The daemon's provisioning (`src/harness/provisioning.ts`) checks the installed versions read-only, installs the exact pins only on drift, and verifies the result on every boot; any drift fails provisioning.
