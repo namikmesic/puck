@@ -152,6 +152,20 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
   The pins in `src/harness/provisioning.ts` are what it would install.
 - Ask-answer encoding (keyed by question text, lossy) redesign.
 
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on `namikmesic/puck` (the `github` remote, not `origin`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical labels, unchanged: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root, created lazily by `/domain-modeling`. See `docs/agents/domain.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
