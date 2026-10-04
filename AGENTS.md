@@ -104,17 +104,9 @@ CI runs these plus the definitions schema drift check (`npm run schema`, then `g
 
 ## Terminology
 
-- *Agent definition* = a `kind: Agent` YAML file in the Puck home (harness, model, effort, instructions, options); *environment definition* = a `kind: Environment` file (image, repos, orchestrator, agent assignments with `maxParallel`, policies). The definition library is `src/harness/definitions/`.
-- *Environment* (an instance in code, id `env_<ulid>`) = one container and its two volumes, created from a definition at a pin on a runner.
-  *Runner* = `puck-runner` (`src/puck-runner/`), installed on a machine that hosts environments; the app reaches it through `src/main/runners/`. See `src/puck-runner/README.md`.
-  *Daemon* = `puckd`, the process inside the container that owns all environment state and work.
-- *Orchestrator* = the environment's one long-lived session; *worker* = a session bound to one *work item* (`W-<n>`).
-  A *notice* is a daemon-written message delivered to the orchestrator in its next turn.
-  The Task-tool sub-agents inside a session are "sub-agents", distinct from workers.
-- An agent's `options` = sparse schema-option overrides, compiled into the SDK fragment by the provider's `compileSettings`.
-  The app's Settings modal is UI-level and unrelated.
-- An agent's `effort` compiles to Claude's `effort` / Codex's `model_reasoning_effort`.
-  The `thinking` *event kind* is the UI indicator.
+The glossary is `CONTEXT.md`: one canonical word per concept, with the words to avoid.
+Use its terms in code comments, UI copy, tool descriptions, prompts, and docs.
+Persisted ids, store keys, and protocol names keep their historical spellings (`docs/adr/0001-product-renames-keep-persisted-names.md`).
 
 ## Layout
 
