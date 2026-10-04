@@ -2,11 +2,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { RUNNER_PACKAGE_ENTRIES } from '../../src/harness/runner-releases';
 import { ServerApi } from '../../src/puck-runner/api';
 import { runnerPaths } from '../../src/puck-runner/files';
 import { nullLogger } from '../../src/puck-runner/log';
 import { tarGz } from '../../src/puck-runner/tar';
-import { applyUpdate, compareVersions, findUpdate } from '../../src/puck-runner/update';
+import { applyUpdate, compareVersions, findUpdate, SHIPPED, swapIn } from '../../src/puck-runner/update';
 import { startServer, type Harness } from './server-fakes';
 
 // Self-update against the real server's download routes: the newer tarball
@@ -14,12 +15,13 @@ import { startServer, type Harness } from './server-fakes';
 // smoke-tested, and swapped in with the previous version kept.
 
 let dir: string;
-let h: Harness;
+let h: Harness | undefined;
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'puck-update-'));
 });
 afterEach(async () => {
   await h?.close();
+  h = undefined;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -41,9 +43,10 @@ async function setup(files: Record<string, Buffer>) {
     fs.mkdirSync(path.join(downloads, version), { recursive: true });
     fs.writeFileSync(path.join(downloads, version, name), body);
   }
-  h = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: downloads });
+  const server = await startServer({ PUCK_DEVELOPMENT: 'true', PUCK_RUNNER_DOWNLOADS: downloads });
+  h = server;
   // Asset URLs name the server's public URL; route them to the test server.
-  const fetchImpl = ((url: string | URL, init?: RequestInit) => fetch(String(url).replace('http://puck.test', h.base), init)) as typeof fetch;
+  const fetchImpl = ((url: string | URL, init?: RequestInit) => fetch(String(url).replace('http://puck.test', server.base), init)) as typeof fetch;
   const paths = runnerPaths(path.join(dir, 'runner'));
   fs.mkdirSync(path.join(paths.root, 'bin'), { recursive: true });
   fs.writeFileSync(paths.version, '0.1.0\n');
@@ -108,6 +111,28 @@ describe('runner self-update', () => {
     await expect(applyUpdate(deps, asset)).rejects.toThrow(/does not start/);
     expect(fs.readFileSync(paths.version, 'utf8')).toBe('0.1.0\n');
     expect(fs.readFileSync(paths.bundle, 'utf8')).toBe('// runner 0.1.0\n');
+  });
+
+  it('ships the package layout\'s top level, and swaps every entry of a full package in', () => {
+    expect(SHIPPED).toEqual(['config.sh', 'run.sh', 'svc.sh', 'VERSION', 'README.md', 'LICENSE', 'bin']);
+    for (const e of RUNNER_PACKAGE_ENTRIES) expect(SHIPPED, e.name).toContain(e.name.split('/')[0]);
+    for (const item of SHIPPED) expect(RUNNER_PACKAGE_ENTRIES.map((e) => e.name), item).toContain(item === 'bin' ? 'bin/' : item);
+    const paths = runnerPaths(path.join(dir, 'runner'));
+    const staging = path.join(dir, 'staging');
+    for (const [root, body] of [[paths.root, 'old'], [staging, 'new']]) {
+      fs.mkdirSync(root, { recursive: true });
+      for (const e of RUNNER_PACKAGE_ENTRIES) {
+        if (e.type === 'dir') fs.mkdirSync(path.join(root, e.name));
+        else fs.writeFileSync(path.join(root, e.name), `${body} ${e.name}`);
+      }
+    }
+    fs.writeFileSync(paths.config, '{"keep":"me"}');
+    swapIn(paths, staging);
+    for (const e of RUNNER_PACKAGE_ENTRIES.filter((x) => x.type === 'file')) {
+      expect(fs.readFileSync(path.join(paths.root, e.name), 'utf8')).toBe(`new ${e.name}`);
+      expect(fs.readFileSync(path.join(paths.update, 'previous', e.name), 'utf8')).toBe(`old ${e.name}`);
+    }
+    expect(fs.readFileSync(paths.config, 'utf8')).toBe('{"keep":"me"}');
   });
 
   it('downloads only from the Puck server itself', async () => {

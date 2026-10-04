@@ -4,9 +4,10 @@
  * version is too old). A newer tarball for this platform is downloaded from
  * the server, checked against the sha256 the server published, unpacked
  * into `_update/<version>/`, and smoke-tested by running its own Node
- * runtime. Then the shipped files (bin/, the scripts, VERSION) are swapped
- * in by rename, the previous ones kept under `_update/previous/`, and the
- * runner exits with UPDATE_EXIT; run.sh starts the new version.
+ * runtime. Then the shipped files (`SHIPPED`, the package layout's top
+ * level) are swapped in by rename, the previous ones kept under
+ * `_update/previous/`, and the runner exits with UPDATE_EXIT; run.sh starts
+ * the new version.
  *
  * Restarting the runner never touches environments: containers run under
  * the Docker engine with their own restart policy, and the runner only
@@ -22,7 +23,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ListedRunnerAsset } from '../harness/runner-releases';
+import { RUNNER_PACKAGE_ENTRIES, type ListedRunnerAsset } from '../harness/runner-releases';
 import type { ServerApi } from './api';
 import type { RunnerPaths } from './files';
 import type { Logger } from './log';
@@ -31,8 +32,12 @@ import type { Logger } from './log';
 export const UPDATE_EXIT = 3;
 export const CHECK_EVERY_MS = 6 * 60 * 60_000;
 
-/** What a release ships, and so what an update replaces. Registration files, logs and the cache stay. */
-export const SHIPPED = ['bin', 'config.sh', 'run.sh', 'svc.sh', 'VERSION', 'README.md', 'LICENSE'];
+/**
+ * What a release ships, and so what an update replaces: the top level of the
+ * package layout (RUNNER_PACKAGE_ENTRIES). Registration files, logs and the
+ * cache stay.
+ */
+export const SHIPPED: readonly string[] = [...new Set(RUNNER_PACKAGE_ENTRIES.map((e) => e.name.split('/')[0]))];
 
 export type Exec = (file: string, args: string[], opts?: { timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
