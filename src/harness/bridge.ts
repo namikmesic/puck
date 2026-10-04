@@ -9,9 +9,11 @@
 
 import type { ProviderOption } from './options';
 import type { DefinitionChange, DefinitionListing, DefinitionRefs, PinSpec, UpdateClass } from './definitions/types';
-import type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
+import type { ListedRunnerAsset } from './runner-releases';
+import type { RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
 
-export type { RunnerAsset, RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
+export type { ListedRunnerAsset } from './runner-releases';
+export type { RunnerDockerInfo, RunnerStatusWord, ServerInstanceStatus } from './server-api';
 import type { ClientResult, DaemonEvent, InstanceState, OpArgs, Pin, RendererOp, Snapshot } from './daemon-protocol';
 import type { InstanceStage } from './runner-protocol';
 
@@ -150,7 +152,7 @@ export interface RunnerRegistration {
   serverUrl: string;
   /** The latest runner release, per platform; empty when the server publishes none. */
   version: string | null;
-  assets: RunnerAsset[];
+  assets: ListedRunnerAsset[];
 }
 
 /** A removal token and the command that uses it. */

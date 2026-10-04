@@ -32,9 +32,9 @@
 
 import type {
   EnvironmentProviderInfo,
+  ListedRunnerAsset,
   ProviderStatus,
   PuckBridge,
-  RunnerAsset,
   RunnerRegistration,
   RunnerRemoval,
   RunnerRow,
@@ -118,7 +118,7 @@ export function statusWord(r: RunnerRow): string {
 }
 
 /** The package the server publishes for a remote platform, if any. */
-export function assetFor(assets: readonly RunnerAsset[], platform: Platform): RunnerAsset | undefined {
+export function assetFor(assets: readonly ListedRunnerAsset[], platform: Platform): ListedRunnerAsset | undefined {
   const [os, arch] = platform.split('-');
   return assets.find((a) => a.os === os && a.arch === arch);
 }
@@ -141,7 +141,7 @@ export function serverAddress(url: string): { scheme: 'HTTP' | 'HTTPS'; host: st
 
 /** Fail-closed copy-paste blocks for today's development tarballs. The
  *  advertised checksum detects corruption; it adds no authenticity claim. */
-export function commandsFor(asset: RunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
+export function commandsFor(asset: ListedRunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
   const mac = asset.os === 'macos';
   const file = shellQuote(asset.file);
   const url = shellQuote(asset.url);

@@ -13,6 +13,7 @@ import {
   MAX_RELEASE_METADATA_BYTES,
   MAX_RELEASE_RECORDS,
   readRunnerRelease,
+  readRunnerReleaseListing,
   readSha256Sums,
   readSignedRunnerRelease,
   readSignedRunnerReleases,
@@ -24,8 +25,10 @@ import {
   RunnerReleaseError,
   runnerTargetFor,
   selectRunnerAsset,
+  type ListedRunnerAsset,
   type RunnerReleaseErrorCode,
   type RunnerReleaseManifest,
+  type RunnerTarget,
 } from '../../src/harness/runner-releases';
 
 // The pure half of the signed runner-release format: shape checks that run
@@ -337,5 +340,48 @@ describe('signed release records', () => {
     expect(failure(() => readSignedRunnerReleases(Array.from({ length: MAX_RELEASE_RECORDS + 1 }, () => record))).message).toMatch(`at most ${MAX_RELEASE_RECORDS}`);
     for (const value of [null, {}, 'x', [record, 1]]) expect(failure(() => readSignedRunnerReleases(value)).code).toBe('malformed');
     expect(MAX_RELEASE_METADATA_BYTES).toBe(4 * 1024 * 1024);
+  });
+});
+
+describe('release listings', () => {
+  const listed = (t: RunnerTarget, version = VERSION): ListedRunnerAsset => {
+    const file = runnerPackageFile(t, version);
+    return { os: t.os, arch: t.arch, version, file, url: `https://puck.example.com/runner/${version}/${file}`, sha256: 'd'.repeat(64), size: 1234 };
+  };
+
+  it('reads a listing in the one shape unchanged, a manifest asset plus its version and URL', () => {
+    const listing = { latest: VERSION, minVersion: '1.0.0', assets: RUNNER_TARGETS.map((t) => listed(t)) };
+    expect(readRunnerReleaseListing(JSON.parse(JSON.stringify(listing)))).toEqual(listing);
+    const asset = listing.assets[2];
+    expect({ ...manifest().assets[2], sha256: asset.sha256, size: asset.size, version: VERSION, url: asset.url }).toEqual(asset);
+  });
+
+  it('is lenient: added fields are ignored and absent or mistyped ones read as empty', () => {
+    expect(readRunnerReleaseListing({ latest: VERSION, minVersion: null, assets: [{ ...listed(RUNNER_TARGETS[0]), signed: true }], releases: [] })).toEqual({
+      latest: VERSION,
+      minVersion: null,
+      assets: [listed(RUNNER_TARGETS[0])],
+    });
+    for (const value of [null, 'text', [], 42, {}, { latest: 1, minVersion: {}, assets: {} }]) {
+      expect(readRunnerReleaseListing(value), JSON.stringify(value)).toEqual({ latest: null, minVersion: null, assets: [] });
+    }
+    const { os, arch, url, sha256 } = listed(RUNNER_TARGETS[1]);
+    expect(readRunnerReleaseListing({ assets: [{ os, arch, url, sha256, size: 'big' }] }).assets).toEqual([{ os, arch, version: '', file: '', url, sha256, size: 0 }]);
+  });
+
+  it('drops an asset without a runner os and arch, a URL, or a lowercase hex sha256', () => {
+    const good = listed(RUNNER_TARGETS[0]);
+    const bad = [
+      null,
+      'asset',
+      { ...good, os: 'windows' },
+      { ...good, arch: 'ia32' },
+      { ...good, os: undefined },
+      { ...good, url: '' },
+      { ...good, url: 7 },
+      { ...good, sha256: 'D'.repeat(64) },
+      { ...good, sha256: 'd'.repeat(63) },
+    ];
+    expect(readRunnerReleaseListing({ latest: VERSION, assets: [...bad, good] }).assets).toEqual([good]);
   });
 });

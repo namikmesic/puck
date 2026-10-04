@@ -25,6 +25,12 @@
  * in standard base64 (`SignedRunnerRelease`). The reader here checks the
  * encoding and its bounds; the bytes go to the verifier unchanged.
  *
+ * A server lists the packages it offers (`GET /v1/runner/releases`) as a
+ * `RunnerReleaseListing`, each package the manifest's asset record with
+ * its version and download URL (`ListedRunnerAsset`). The server writes
+ * that shape, and the app and the runner read it through
+ * `readRunnerReleaseListing`, the one lenient reader.
+ *
  * Each package unpacks into the fixed layout `RUNNER_PACKAGE_ENTRIES`, as
  * scripts/package-runner.mjs writes it; src/runner-release/archive.ts
  * accepts nothing else.
@@ -134,6 +140,22 @@ export interface RunnerReleaseAsset {
   sha256: string;
   /** Bytes. */
   size: number;
+}
+
+/**
+ * A release asset as a server's listing carries it: the manifest's record
+ * plus the release version it belongs to and the URL that serves it.
+ */
+export interface ListedRunnerAsset extends RunnerReleaseAsset {
+  version: string;
+  url: string;
+}
+
+/** `GET /v1/runner/releases`: the newest release a server offers, the oldest runner version it accepts, and the newest release's assets. */
+export interface RunnerReleaseListing {
+  latest: string | null;
+  minVersion: string | null;
+  assets: ListedRunnerAsset[];
 }
 
 export interface RunnerReleaseManifest {
@@ -432,4 +454,27 @@ export function readSignedRunnerReleases(value: unknown): { manifest: Uint8Array
 /** The record for a manifest's exact bytes and its signature. */
 export function formatSignedRunnerRelease(manifest: Uint8Array, signature: Uint8Array): SignedRunnerRelease {
   return { manifest: encodeBase64(manifest), signature: encodeBase64(signature) };
+}
+
+const isRunnerOs = (v: unknown): v is RunnerOs => v === 'linux' || v === 'macos';
+const isRunnerArch = (v: unknown): v is RunnerArch => v === 'x64' || v === 'arm64';
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/**
+ * Reads a release listing leniently, so a newer server that adds fields
+ * keeps working: a field that is absent or of another type reads as empty,
+ * and an asset is dropped unless it names a runner os and arch, a URL, and
+ * a lowercase hex sha256. Nothing here is verified: whoever downloads an
+ * asset checks it against the listed sha256 before unpacking it.
+ */
+export function readRunnerReleaseListing(value: unknown): RunnerReleaseListing {
+  const o = isObject(value) ? value : {};
+  const assets = Array.isArray(o.assets)
+    ? o.assets.flatMap((a): ListedRunnerAsset[] =>
+        isObject(a) && isRunnerOs(a.os) && isRunnerArch(a.arch) && str(a.url) && SHA256_RE.test(str(a.sha256))
+          ? [{ os: a.os, arch: a.arch, version: str(a.version), file: str(a.file), url: str(a.url), sha256: str(a.sha256), size: typeof a.size === 'number' && Number.isFinite(a.size) ? a.size : 0 }]
+          : [],
+      )
+    : [];
+  return { latest: typeof o.latest === 'string' ? o.latest : null, minVersion: typeof o.minVersion === 'string' ? o.minVersion : null, assets };
 }

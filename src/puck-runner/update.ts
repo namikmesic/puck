@@ -22,7 +22,8 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ReleaseAsset, ServerApi } from './api';
+import type { ListedRunnerAsset } from '../harness/runner-releases';
+import type { ServerApi } from './api';
 import type { RunnerPaths } from './files';
 import type { Logger } from './log';
 
@@ -66,7 +67,7 @@ export interface UpdateDeps {
 }
 
 /** The newer release asset for this platform, or null. */
-export async function findUpdate(deps: UpdateDeps): Promise<ReleaseAsset | null> {
+export async function findUpdate(deps: UpdateDeps): Promise<ListedRunnerAsset | null> {
   const releases = await deps.api.releases();
   if (!releases.latest || compareVersions(releases.latest, deps.version) <= 0) return null;
   return releases.assets.find((a) => a.version === releases.latest && a.os === deps.os && a.arch === deps.arch) ?? null;
@@ -84,7 +85,7 @@ export class UpdateError extends Error {
  * `beforeSwap` runs after the smoke test and before anything in the runner
  * directory is replaced. On failure nothing in the runner directory changed.
  */
-export async function applyUpdate(deps: UpdateDeps, asset: ReleaseAsset, beforeSwap?: () => Promise<void>): Promise<void> {
+export async function applyUpdate(deps: UpdateDeps, asset: ListedRunnerAsset, beforeSwap?: () => Promise<void>): Promise<void> {
   const exec = deps.exec ?? realExec;
   const { paths, log } = deps;
   if (!/^\d+\.\d+\.\d+$/.test(asset.version) || !/^[0-9a-f]{64}$/.test(asset.sha256) || path.basename(asset.file) !== asset.file) {

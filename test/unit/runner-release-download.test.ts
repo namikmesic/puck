@@ -9,6 +9,7 @@ import {
   MAX_MANIFEST_BYTES,
   MAX_RELEASE_METADATA_BYTES,
   MAX_RELEASE_RECORDS,
+  readRunnerReleaseListing,
   RUNNER_TARGETS,
   runnerPackageFile,
   RunnerReleaseError,
@@ -556,6 +557,17 @@ describe('release listings', () => {
     useServerDeps({ fetch: fetchImpl as never }, 'http://puck.test');
     expect(await mainApi.releases()).toEqual({ latest: VERSION, minVersion: null, assets: [] });
     expect(await new ServerApi('http://puck.test', fetchImpl).releases()).toEqual({ latest: VERSION, minVersion: null, assets: [] });
+  });
+
+  it('reads a listing through the one lenient reader on both sides', async () => {
+    const good = { os: 'linux', arch: 'x64', version: VERSION, file: FILE, url: `http://puck.test/runner/${VERSION}/${FILE}`, sha256: sha256(PACKAGE), size: PACKAGE.length };
+    const listing = { latest: VERSION, minVersion: '1.0.0', releases: [], assets: [{ ...good, signed: true }, { ...good, os: 'windows' }, { ...good, sha256: 'nope' }] };
+    const fetchImpl = (async () => streamed(chunked(Buffer.from(JSON.stringify(listing))), { headers: { 'content-type': 'application/json' } }).res) as typeof fetch;
+    useServerDeps({ fetch: fetchImpl as never }, 'http://puck.test');
+    const expected = { latest: VERSION, minVersion: '1.0.0', assets: [good] };
+    expect(readRunnerReleaseListing(listing)).toEqual(expected);
+    expect(await mainApi.releases()).toEqual(expected);
+    expect(await new ServerApi('http://puck.test', fetchImpl).releases()).toEqual(expected);
   });
 
   it('reads a development server listing through both bounded readers', async () => {

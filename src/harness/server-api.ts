@@ -51,23 +51,6 @@ export interface ServerInstance {
   repos: { owner: string; name: string; revoked: boolean }[];
 }
 
-/** One runner tarball the server publishes (`GET /v1/runner/releases`). */
-export interface RunnerAsset {
-  os: string;
-  arch: string;
-  version: string;
-  file: string;
-  url: string;
-  sha256: string;
-  size: number;
-}
-
-export interface RunnerReleases {
-  latest: string | null;
-  minVersion: string | null;
-  assets: RunnerAsset[];
-}
-
 /** What the server pushes on the app socket. */
 export type ServerPush =
   | { type: 'runner.upsert'; runner: ServerRunner }
@@ -153,16 +136,4 @@ export function readPush(v: unknown): ServerPush | null {
     default:
       return null;
   }
-}
-
-export function readReleases(v: unknown): RunnerReleases {
-  const o = isObj(v) ? v : {};
-  const assets = Array.isArray(o.assets)
-    ? o.assets.flatMap((a) =>
-        isObj(a) && str(a.url) && /^[0-9a-f]{64}$/.test(str(a.sha256))
-          ? [{ os: str(a.os), arch: str(a.arch), version: str(a.version), file: str(a.file), url: str(a.url), sha256: str(a.sha256), size: num(a.size) ?? 0 }]
-          : [],
-      )
-    : [];
-  return { latest: typeof o.latest === 'string' ? o.latest : null, minVersion: typeof o.minVersion === 'string' ? o.minVersion : null, assets };
 }

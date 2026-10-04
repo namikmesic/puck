@@ -8,32 +8,25 @@
  *
  * and the server publishes them: `GET /v1/runner/releases` lists the latest
  * version's assets with their sha256 and the minimum version this server
- * accepts; `GET /runner/<version>/<file>` serves a tarball, and
- * `<file>.sha256` its checksum line. Only names matching that pattern are
- * ever served, so no request path reaches outside the directory. Checksums
- * are computed once per file (keyed by size and mtime) and cached.
+ * accepts (`RunnerReleaseListing`, src/harness/runner-releases.ts);
+ * `GET /runner/<version>/<file>` serves a tarball, and `<file>.sha256` its
+ * checksum line. Only names matching that pattern are ever served, so no
+ * request path reaches outside the directory. Checksums are computed once
+ * per file (keyed by size and mtime) and cached.
  */
 
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import type { ListedRunnerAsset, RunnerArch, RunnerOs, RunnerReleaseListing } from '../harness/runner-releases';
 import { compareVersions } from './config';
 import type { ServerContext } from './context';
 import { HttpError, type Router } from './http';
 
 const VERSION = '\\d+\\.\\d+\\.\\d+';
 const VERSION_RE = new RegExp(`^${VERSION}$`);
+/** Its os and arch groups are exactly RunnerOs and RunnerArch. */
 const FILE_RE = new RegExp(`^puck-runner-(linux|macos)-(x64|arm64)-(${VERSION})\\.tar\\.gz$`);
-
-export interface RunnerAsset {
-  os: string;
-  arch: string;
-  version: string;
-  file: string;
-  url: string;
-  sha256: string;
-  size: number;
-}
 
 export class RunnerDownloads {
   private sums = new Map<string, { key: string; sha256: string }>();
@@ -70,7 +63,7 @@ export class RunnerDownloads {
     return names.filter((n) => VERSION_RE.test(n)).sort((a, b) => compareVersions(b, a));
   }
 
-  async assets(version: string): Promise<RunnerAsset[]> {
+  async assets(version: string): Promise<ListedRunnerAsset[]> {
     if (!this.dir || !VERSION_RE.test(version)) return [];
     let names: string[];
     try {
@@ -78,7 +71,7 @@ export class RunnerDownloads {
     } catch {
       return [];
     }
-    const out: RunnerAsset[] = [];
+    const out: ListedRunnerAsset[] = [];
     for (const file of names.sort()) {
       const m = FILE_RE.exec(file);
       if (!m || m[3] !== version) continue;
@@ -86,8 +79,8 @@ export class RunnerDownloads {
       const st = await fs.stat(path);
       if (!st.isFile()) continue;
       out.push({
-        os: m[1],
-        arch: m[2],
+        os: m[1] as RunnerOs,
+        arch: m[2] as RunnerArch,
         version,
         file,
         url: `${this.publicUrl}/runner/${version}/${file}`,
@@ -116,7 +109,7 @@ export function registerDownloadRoutes(router: Router, ctx: ServerContext, downl
   router.add('GET', '/v1/runner/releases', async () => {
     const versions = await downloads.versions();
     let latest: string | null = null;
-    let assets: RunnerAsset[] = [];
+    let assets: ListedRunnerAsset[] = [];
     for (const v of versions) {
       assets = await downloads.assets(v);
       if (assets.length) {
@@ -124,7 +117,8 @@ export function registerDownloadRoutes(router: Router, ctx: ServerContext, downl
         break;
       }
     }
-    return { body: { latest, minVersion: ctx.config.minRunnerVersion, assets } };
+    const listing: RunnerReleaseListing = { latest, minVersion: ctx.config.minRunnerVersion, assets };
+    return { body: listing };
   });
 
   router.add('GET', '/runner/:version/:file', async (req) => {
