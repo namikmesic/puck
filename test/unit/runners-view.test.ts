@@ -4,8 +4,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EnvironmentProviderInfo, PuckBridge, RunnerRegistration, RunnersState } from '../../src/harness/bridge';
+import { RUNNER_PACKAGE_ENTRIES } from '../../src/harness/runner-releases';
 import { assetFor, commandsFor, initRunnersView, runnerMeta, serverAddress, statusWord } from '../../src/renderer/settings/runners';
 import { LOCAL_ID, RID, runnerRow, runnersInfo, runnersState } from './runners-fixtures';
+
+// The package layout: its regular files, and those it marks executable.
+const PACKAGE_FILES = RUNNER_PACKAGE_ENTRIES.filter((e) => e.type === 'file').map((e) => e.name);
+const EXECUTABLES = RUNNER_PACKAGE_ENTRIES.filter((e) => e.type === 'file' && e.mode & 0o111).map((e) => e.name);
 
 const shellDirs: string[] = [];
 afterEach(() => {
@@ -56,7 +61,7 @@ tar() {
   printf 'partial' > config.sh
   if [ "$TEST_FAILURE" = tar ]; then return 2; fi
   mkdir bin
-  for file in config.sh run.sh svc.sh bin/node bin/puck-runner.cjs; do
+  for file in ${PACKAGE_FILES.filter((name) => name !== 'VERSION').join(' ')}; do
     [ "$file" != "$TEST_MISSING_FILE" ] || { rm -f "$file"; continue; }
     printf '%s\\n' '#!/bin/sh' 'pwd -P > "../invoked-cwd"' 'printf "%s\\n" "$@" > "../invoked-args"' > "$file"
     chmod +x "$file"
@@ -375,21 +380,36 @@ describe.each([
     expect(sandbox.staging()).toEqual([]);
   });
 
-  it.each(['config.sh', 'run.sh', 'svc.sh', 'VERSION', 'bin/node', 'bin/puck-runner.cjs'])('never publishes a package missing %s', (missing) => {
+  it('checks the package against the layout table: every regular file, and the executable ones', () => {
+    const download = commandsFor(asset, reg).download[0];
+    expect(download).toContain(`for required in ${PACKAGE_FILES.map((name) => `'${name}'`).join(' ')}; do`);
+    expect(download).toContain(`for executable in ${EXECUTABLES.map((name) => `'${name}'`).join(' ')}; do`);
+    expect(EXECUTABLES).toEqual(['config.sh', 'run.sh', 'svc.sh', 'bin/node']);
+  });
+
+  it.each(PACKAGE_FILES)('never publishes a package missing %s', (missing) => {
     const sandbox = commandSandbox();
     const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_MISSING_FILE: missing });
     expect(result.status).not.toBe(0);
+    expect(result.stderr.trim()).toBe(`Runner package is missing ${missing}.`);
     expect(sandbox.exists('puck-runner')).toBe(false);
     expect(sandbox.staging()).toEqual([]);
   });
 
-  it('never publishes a mismatched version or non-executable configuration', () => {
-    for (const over of [{ TEST_VERSION: 'different' }, { TEST_NOT_EXECUTABLE: 'config.sh' }]) {
-      const sandbox = commandSandbox();
-      expect(sandbox.execute(commandsFor(asset, reg).download, over).status).not.toBe(0);
-      expect(sandbox.exists('puck-runner')).toBe(false);
-      expect(sandbox.staging()).toEqual([]);
-    }
+  it.each(EXECUTABLES)('never publishes a package that cannot execute %s', (executable) => {
+    const sandbox = commandSandbox();
+    const result = sandbox.execute(commandsFor(asset, reg).download, { TEST_NOT_EXECUTABLE: executable });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr.trim()).toBe(`Runner package cannot execute ${executable}.`);
+    expect(sandbox.exists('puck-runner')).toBe(false);
+    expect(sandbox.staging()).toEqual([]);
+  });
+
+  it('never publishes a mismatched version', () => {
+    const sandbox = commandSandbox();
+    expect(sandbox.execute(commandsFor(asset, reg).download, { TEST_VERSION: 'different' }).status).not.toBe(0);
+    expect(sandbox.exists('puck-runner')).toBe(false);
+    expect(sandbox.staging()).toEqual([]);
   });
 
   it.each(['absent', 'wrong-version', 'non-executable'])('Configure and both Run choices reject an %s installation', (kind) => {
