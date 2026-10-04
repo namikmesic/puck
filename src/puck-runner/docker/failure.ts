@@ -9,14 +9,13 @@
  *   daemon-down  the engine is not running, or its socket is missing
  *   cli-missing  discovery found no docker CLI (`discovery.ts`)
  *   timeout      the client's guard killed the command (`TIMEOUTS`)
- *   cancelled    the caller's signal aborted the command
  *   other        anything else; stderr carries the detail
  *
  * Only the first three come from stderr, and these rules are the only place
  * stderr is matched. Pure: the classifier test owns the patterns.
  */
 
-export type DockerFailure = 'not-found' | 'permission' | 'daemon-down' | 'cli-missing' | 'timeout' | 'cancelled' | 'other';
+export type DockerFailure = 'not-found' | 'permission' | 'daemon-down' | 'cli-missing' | 'timeout' | 'other';
 
 /** Ordered: the first matching rule wins, so a missing socket reads as the engine, never as a missing object. */
 const RULES: ReadonlyArray<{ failure: DockerFailure; re: RegExp }> = [

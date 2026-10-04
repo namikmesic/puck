@@ -23,7 +23,6 @@ const PROBLEMS: Record<DockerFailure, DockerProblem> = {
   'daemon-down': 'daemon-down',
   timeout: 'timeout',
   'not-found': 'unknown',
-  cancelled: 'unknown',
   other: 'unknown',
 };
 

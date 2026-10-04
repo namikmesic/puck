@@ -102,7 +102,7 @@ export const realDocker: DockerRunner = async (args, opts = {}) => {
     // A value, not prose to match; stderr keeps what discovery searched, for the user.
     return { code: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err), failure: 'cli-missing' };
   }
-  if (opts.signal?.aborted) return { code: null, stdout: '', stderr: 'cancelled', failure: 'cancelled' };
+  if (opts.signal?.aborted) return { code: null, stdout: '', stderr: 'cancelled', failure: 'other' };
   return new Promise((resolve) => {
     const child = spawn(binary, args, { env: childEnv(binary), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
@@ -145,7 +145,7 @@ export const realDocker: DockerRunner = async (args, opts = {}) => {
     child.on('close', (code) => {
       // An exit 0 that raced the guard or the signal still succeeded.
       if (code === 0) settle({ code, stdout, stderr, failure: null });
-      else if (aborted) settle({ code, stdout, stderr: 'cancelled', failure: 'cancelled' });
+      else if (aborted) settle({ code, stdout, stderr: 'cancelled', failure: 'other' });
       else if (timedOut) settle({ code, stdout, stderr: `docker ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s`, failure: 'timeout' });
       else settle({ code, stdout, stderr, failure: classifyStderr(stderr) });
     });

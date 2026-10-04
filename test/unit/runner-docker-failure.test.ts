@@ -77,8 +77,8 @@ describe('runner docker client classification', () => {
     expect(await realDocker(['hang'], { timeoutMs: 100 })).toMatchObject({ failure: 'timeout', stderr: expect.stringContaining('timed out') });
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 50);
-    expect(await realDocker(['hang'], { signal: controller.signal })).toMatchObject({ failure: 'cancelled' });
-    expect(await realDocker(['ok'], { signal: AbortSignal.abort() })).toEqual({ code: null, stdout: '', stderr: 'cancelled', failure: 'cancelled' });
+    expect(await realDocker(['hang'], { signal: controller.signal })).toMatchObject({ stderr: 'cancelled', failure: 'other' });
+    expect(await realDocker(['ok'], { signal: AbortSignal.abort() })).toEqual({ code: null, stdout: '', stderr: 'cancelled', failure: 'other' });
   });
 
   it('reports a failed discovery as cli-missing, keeping what was tried for the message', async () => {

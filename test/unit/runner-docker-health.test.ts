@@ -72,7 +72,6 @@ describe('runner docker health', () => {
       ['daemon-down', 'daemon-down'],
       ['timeout', 'timeout'],
       ['not-found', 'unknown'],
-      ['cancelled', 'unknown'],
       ['other', 'unknown'],
     ];
     for (const [failure, problem] of cases) {
