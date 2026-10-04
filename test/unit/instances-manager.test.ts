@@ -62,7 +62,7 @@ const until = async (what: string, ok: () => boolean, ms = 10_000): Promise<void
 
 async function thisMacRunner(socket: string, extraEnv: Record<string, string> = {}): Promise<void> {
   const docker = async (args: string[]): Promise<DockerResult> =>
-    args[0] === 'container' ? { code: 0, stdout: 'running\n', stderr: '' } : { code: 0, stdout: '', stderr: '' };
+    args[0] === 'container' ? { code: 0, stdout: 'running\n', stderr: '', failure: null } : { code: 0, stdout: '', stderr: '', failure: null };
   listener = new LocalListener({
     path: socket,
     runnerId: RUNNER,

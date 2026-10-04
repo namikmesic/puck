@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { DockerOptions, DockerResult } from '../../src/puck-runner/docker/client';
 import { createArchive, DockerOps, parseLabels, rebuildArchive } from '../../src/puck-runner/docker/ops';
+import { TIMEOUTS } from '../../src/puck-runner/docker/timeouts';
 import type { InstanceStage } from '../../src/harness/runner-protocol';
 
 // Every Docker command the runner runs for an environment, as argv, against
 // a recording runner: the create flags (init, restart policy,
 // no-new-privileges, labels, both volumes, resources, only non-secret -e),
 // the copy-in tar, start, stop, rebuild and delete, and rediscovery by label.
+// The runner answers with classified results, as the client does: the ops
+// read `failure`, never stderr (the classifier test owns the patterns).
 
 const ENV = 'env_01J9ZZZZZZZZZZZZZZZZZZZZZZ';
 const BUNDLE_SHA = 'a'.repeat(64);
@@ -21,7 +24,7 @@ function recorder(answer: (args: string[]) => Partial<DockerResult> = () => ({})
   const calls: Call[] = [];
   const run = async (args: string[], opts: DockerOptions = {}): Promise<DockerResult> => {
     calls.push({ args, input: opts.input, timeoutMs: opts.timeoutMs });
-    return { code: 0, stdout: '', stderr: '', ...answer(args) };
+    return { code: 0, stdout: '', stderr: '', failure: null, ...answer(args) };
   };
   return { calls, run, argv: () => calls.map((c) => c.args.join(' ')) };
 }
@@ -47,7 +50,7 @@ const grant = { owner: 'octo', installationId: 42, repos: ['octo/app'], token: '
 
 describe('runner docker ops: argv', () => {
   it('creates an environment: pull when missing, two labelled volumes, a hardened container, copy-in, start', async () => {
-    const r = recorder((args) => (args[0] === 'image' && args[1] === 'inspect' ? { code: 1, stderr: 'No such image' } : {}));
+    const r = recorder((args) => (args[0] === 'image' && args[1] === 'inspect' ? { code: 1, failure: 'not-found' } : {}));
     const stages: InstanceStage[] = [];
     await new DockerOps(r.run).create(
       {
@@ -87,6 +90,7 @@ describe('runner docker ops: argv', () => {
       `start puck-${ENV}`,
     ]);
     expect(stages).toEqual(['checking-image', 'pulling-image', 'creating-volumes', 'creating-container', 'copying-files', 'starting-container']);
+    expect(r.calls.map((c) => c.timeoutMs)).toEqual([TIMEOUTS.inspect, TIMEOUTS.pull, TIMEOUTS.volume, TIMEOUTS.volume, TIMEOUTS.create, TIMEOUTS.copy, TIMEOUTS.start]);
     // Secrets and tokens reach the container only through the tar stream, never argv.
     const all = r.argv().join('\n');
     expect(all).not.toContain('npm_secret');
@@ -114,11 +118,11 @@ describe('runner docker ops: argv', () => {
     const r = recorder();
     await new DockerOps(r.run).image({ envId: ENV, dockerfile: 'FROM node:22\n', bundleSha: BUNDLE_SHA }, () => undefined);
     expect(r.argv()).toEqual([`build -t puck-img-${ENV.toLowerCase()} -`]);
-    expect(r.calls[0].input).toBe('FROM node:22\n');
+    expect(r.calls[0]).toMatchObject({ input: 'FROM node:22\n', timeoutMs: TIMEOUTS.build });
   });
 
   it('removes the container again when copy-in fails, keeping the volumes', async () => {
-    const r = recorder((args) => (args[0] === 'cp' ? { code: 1, stderr: 'no space left on device' } : {}));
+    const r = recorder((args) => (args[0] === 'cp' ? { code: 1, stderr: 'no space left on device', failure: 'other' } : {}));
     await expect(
       new DockerOps(r.run).create({ envId: ENV, image: 'img', bundleSha: BUNDLE_SHA }, { bundle: Buffer.from('x'), inbox: { instance }, github: [] }, () => undefined),
     ).rejects.toThrow(/Copying files into the container: no space left on device/);
@@ -132,6 +136,8 @@ describe('runner docker ops: argv', () => {
     await ops.stop(ENV);
     await ops.stageDaemon(ENV, Buffer.from('// next'));
     expect(r.argv()).toEqual([`start puck-${ENV}`, `stop -t 30 puck-${ENV}`, `cp - puck-${ENV}:/`]);
+    expect(r.calls.map((c) => c.timeoutMs)).toEqual([TIMEOUTS.start, TIMEOUTS.stop, TIMEOUTS.copy]);
+    expect(TIMEOUTS.stop).toBeGreaterThan(TIMEOUTS.stopGrace);
     expect(entries(r.calls[2].input as Buffer).map((e) => [e.name, e.mode.toString(8)])).toEqual([['opt/puck/puckd.next.js', '644']]);
   });
 
@@ -148,7 +154,7 @@ describe('runner docker ops: argv', () => {
   });
 
   it('recreates a missing container on the existing volumes', async () => {
-    const r = recorder((args) => (args[0] === 'container' && args[1] === 'inspect' ? { code: 1, stderr: 'Error: No such container: puck-x' } : {}));
+    const r = recorder((args) => (args[0] === 'container' && args[1] === 'inspect' ? { code: 1, failure: 'not-found' } : {}));
     await new DockerOps(r.run).rebuild({ envId: ENV, image: 'img:2', bundleSha: BUNDLE_SHA }, { bundle: Buffer.from('// b'), instance }, () => undefined);
     const argv = r.argv();
     expect(argv.some((line) => line.startsWith('stop '))).toBe(false);
@@ -158,7 +164,7 @@ describe('runner docker ops: argv', () => {
   });
 
   it('deletes the container, both volumes and a built image, tolerating ones already gone', async () => {
-    const r = recorder((args) => (args[0] === 'image' ? { code: 1, stderr: 'Error: No such image: puck-img-x' } : {}));
+    const r = recorder(() => ({ code: 1, failure: 'not-found' }));
     await new DockerOps(r.run).delete(ENV, () => undefined);
     expect(r.argv()).toEqual([
       `rm -f puck-${ENV}`,
@@ -166,6 +172,7 @@ describe('runner docker ops: argv', () => {
       `volume rm -f puck-${ENV}-ws`,
       `image rm puck-img-${ENV.toLowerCase()}`,
     ]);
+    expect(r.calls.every((c) => c.timeoutMs === TIMEOUTS.remove)).toBe(true);
   });
 
   it('rediscovers environments by the puck=instance label only', async () => {
@@ -176,14 +183,49 @@ describe('runner docker ops: argv', () => {
     const r = recorder(() => ({ stdout: rows.map((x) => JSON.stringify(x)).join('\n') + '\n' }));
     const list = await new DockerOps(r.run).list();
     expect(r.argv()).toEqual(['ps -a --filter label=puck=instance --format {{json .}}']);
+    expect(r.calls[0].timeoutMs).toBe(TIMEOUTS.list);
     expect(list).toEqual([{ envId: ENV, container: `puck-${ENV}`, state: 'running', definition: 'example', image: 'node:22' }]);
   });
 
   it('reads a missing container as null and other inspect failures as errors', async () => {
-    const gone = recorder(() => ({ code: 1, stderr: 'Error: No such container: puck-x' }));
+    const gone = recorder(() => ({ code: 1, failure: 'not-found' }));
     expect(await new DockerOps(gone.run).state(ENV)).toBeNull();
-    const down = recorder(() => ({ code: 1, stderr: 'Cannot connect to the Docker daemon' }));
-    await expect(new DockerOps(down.run).state(ENV)).rejects.toThrow(/Cannot connect/);
+    expect(gone.calls[0].timeoutMs).toBe(TIMEOUTS.inspect);
+    const down = recorder(() => ({ code: 1, stderr: 'Cannot connect to the Docker daemon', failure: 'daemon-down' }));
+    await expect(new DockerOps(down.run).state(ENV)).rejects.toThrow(/Inspecting puck-.*: Cannot connect to the Docker daemon/);
+  });
+
+  it('tolerates only a not-found outcome, read from the classification and never from stderr', async () => {
+    // The stderr says "no such ...", but the client classified something else: the field decides.
+    const noun: Record<string, string> = { container: 'container', rm: 'container', volume: 'volume', image: 'image' };
+    const unclassified = (args: string[]): Partial<DockerResult> => ({ code: 1, stderr: `Error: No such ${noun[args[0]]}: x`, failure: 'other' });
+    await expect(new DockerOps(recorder(unclassified).run).state(ENV)).rejects.toThrow(/Inspecting/);
+    await expect(new DockerOps(recorder(unclassified).run).volumesPresent(ENV)).rejects.toThrow(/Inspecting volume/);
+    await expect(new DockerOps(recorder(unclassified).run).removeContainer(ENV)).rejects.toThrow(/Removing the container/);
+    await expect(new DockerOps(recorder(unclassified).run).removeVolumes(ENV)).rejects.toThrow(/Removing volume/);
+    await expect(new DockerOps(recorder(unclassified).run).removeBuiltImage(ENV)).rejects.toThrow(/Removing the image/);
+
+    const missing = recorder((args) => (args[0] === 'volume' && args[1] === 'inspect' ? { code: 1, failure: 'not-found' } : {}));
+    expect(await new DockerOps(missing.run).volumesPresent(ENV)).toBe(false);
+    expect(missing.calls[0].timeoutMs).toBe(TIMEOUTS.inspect);
+    const present = recorder();
+    expect(await new DockerOps(present.run).volumesPresent(ENV)).toBe(true);
+    expect(present.argv()).toEqual([`volume inspect --format {{.Name}} puck-${ENV}-data`, `volume inspect --format {{.Name}} puck-${ENV}-ws`]);
+
+    const denied = recorder((args) => (args[0] === 'rm' ? { code: 1, stderr: 'permission denied', failure: 'permission' } : {}));
+    await expect(new DockerOps(denied.run).delete(ENV, () => undefined)).rejects.toThrow(/Removing the container: permission denied/);
+    expect(denied.argv()).toEqual([`rm -f puck-${ENV}`]);
+  });
+
+  it('pulls only an image that is not found, and stops on any other inspect failure', async () => {
+    const down = recorder((args) => (args[0] === 'image' ? { code: 1, stderr: 'engine unreachable', failure: 'daemon-down' } : {}));
+    await expect(new DockerOps(down.run).image({ envId: ENV, image: 'img:1', bundleSha: BUNDLE_SHA }, () => undefined)).rejects.toThrow(
+      /Inspecting image img:1: engine unreachable/,
+    );
+    expect(down.argv()).toEqual(['image inspect --format {{.Id}} img:1']);
+    const cached = recorder();
+    expect(await new DockerOps(cached.run).image({ envId: ENV, image: 'img:1', bundleSha: BUNDLE_SHA }, () => undefined)).toBe('img:1');
+    expect(cached.argv()).toEqual(['image inspect --format {{.Id}} img:1']);
   });
 
   it('parses docker ps label lists', () => {

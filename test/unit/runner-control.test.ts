@@ -32,15 +32,15 @@ function harness(opts: { exists?: boolean; containers?: number; max?: number | n
     if (opts.hold) await opts.hold;
     calls.push(args);
     inputs.push(o.input);
-    if (args[0] === 'container' && args[1] === 'inspect') return opts.exists ? { code: 0, stdout: 'running\n', stderr: '' } : { code: 1, stdout: '', stderr: 'No such container' };
+    if (args[0] === 'container' && args[1] === 'inspect') return opts.exists ? { code: 0, stdout: 'running\n', stderr: '', failure: null } : { code: 1, stdout: '', stderr: 'No such container', failure: 'not-found' };
     if (args[0] === 'volume' && args[1] === 'inspect') {
-      return opts.volumes ? { code: 0, stdout: `${args[args.length - 1]}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'No such volume' };
+      return opts.volumes ? { code: 0, stdout: `${args[args.length - 1]}\n`, stderr: '', failure: null } : { code: 1, stdout: '', stderr: 'No such volume', failure: 'not-found' };
     }
     if (args[0] === 'ps') {
       const row = (i: number) => JSON.stringify({ Names: `puck-e${i}`, State: 'running', Image: 'x', Labels: `puck=instance,puck.env=env_${i}` });
-      return { code: 0, stdout: Array.from({ length: opts.containers ?? 0 }, (_, i) => row(i)).join('\n'), stderr: '' };
+      return { code: 0, stdout: Array.from({ length: opts.containers ?? 0 }, (_, i) => row(i)).join('\n'), stderr: '', failure: null };
     }
-    return { code: 0, stdout: '', stderr: '' };
+    return { code: 0, stdout: '', stderr: '', failure: null };
   };
   const bundles = new BundleCache(path.join(dir, 'cache'));
   const started: string[] = [];

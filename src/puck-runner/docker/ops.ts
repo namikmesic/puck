@@ -19,6 +19,10 @@
  *   delete     docker rm -f, docker volume rm of both volumes, docker image rm of a built image
  *   list       docker ps -a --filter label=puck=instance (rediscovery; nothing else is touched)
  *
+ * A failure is read from the client's classification (`failure.ts`), never
+ * from stderr: the tolerated ones are `not-found` outcomes, and stderr only
+ * goes into the message. Every timeout is a row of `TIMEOUTS`.
+ *
  * The label `puck=instance` is the whole contract: containers labelled
  * otherwise (an earlier Puck build's `puck=environment` containers, test
  * containers) are never listed or changed. No host directory and no Docker
@@ -36,23 +40,9 @@ import {
 import type { GithubGrant } from '../../harness/daemon-protocol';
 import { tar, type TarEntry } from '../tar';
 import { DockerError, stderrTail, type DockerOptions, type DockerResult, type DockerRunner } from './client';
-
-export const TIMEOUTS = {
-  inspect: 20_000,
-  pull: 30 * 60_000,
-  build: 30 * 60_000,
-  volume: 30_000,
-  create: 60_000,
-  copy: 120_000,
-  start: 60_000,
-  /** `docker stop -t 30` plus slack. */
-  stop: 45_000,
-  remove: 60_000,
-  list: 20_000,
-};
+import { TIMEOUTS } from './timeouts';
 
 export const LABEL = 'puck=instance';
-const STOP_GRACE_S = 30;
 
 export type StageFn = (stage: InstanceStage, detail?: string) => void;
 
@@ -61,7 +51,7 @@ export class DockerOps {
 
   private async must(args: string[], what: string, opts: DockerOptions = {}): Promise<DockerResult> {
     const r = await this.docker(args, opts);
-    if (r.code !== 0) throw new DockerError(`${what}: ${stderrTail(r) || `docker ${args[0]} failed`}`, r);
+    if (r.failure) throw new DockerError(`${what}: ${stderrTail(r) || `docker ${args[0]} failed`}`, r);
     return r;
   }
 
@@ -100,8 +90,8 @@ export class DockerOps {
     const names = instanceNames(envId);
     for (const volume of [names.data, names.workspace]) {
       const r = await this.docker(['volume', 'inspect', '--format', '{{.Name}}', volume], { timeoutMs: TIMEOUTS.inspect });
-      if (r.code === 0) continue;
-      if (/no such volume/i.test(r.stderr)) return false;
+      if (!r.failure) continue;
+      if (r.failure === 'not-found') return false;
       throw new DockerError(`Inspecting volume ${volume}: ${stderrTail(r)}`, r);
     }
     return true;
@@ -111,8 +101,8 @@ export class DockerOps {
   async state(envId: string): Promise<string | null> {
     const { container } = instanceNames(envId);
     const r = await this.docker(['container', 'inspect', '--format', '{{.State.Status}}', container], { timeoutMs: TIMEOUTS.inspect });
-    if (r.code === 0) return r.stdout.trim() || null;
-    if (/no such (container|object)/i.test(r.stderr)) return null;
+    if (!r.failure) return r.stdout.trim() || null;
+    if (r.failure === 'not-found') return null;
     throw new DockerError(`Inspecting ${container}: ${stderrTail(r)}`, r);
   }
 
@@ -134,7 +124,8 @@ export class DockerOps {
     const image = build.image as string;
     onStage('checking-image', image);
     const found = await this.docker(['image', 'inspect', '--format', '{{.Id}}', image], { timeoutMs: TIMEOUTS.inspect });
-    if (found.code === 0) return image;
+    if (!found.failure) return image;
+    if (found.failure !== 'not-found') throw new DockerError(`Inspecting image ${image}: ${stderrTail(found)}`, found);
     onStage('pulling-image', `docker pull ${image}`);
     await this.must(['pull', image], `Pulling ${image}`, {
       timeoutMs: TIMEOUTS.pull,
@@ -197,21 +188,21 @@ export class DockerOps {
 
   async stop(envId: string): Promise<void> {
     const { container } = instanceNames(envId);
-    await this.must(['stop', '-t', String(STOP_GRACE_S), container], 'Stopping the container', { timeoutMs: TIMEOUTS.stop });
+    await this.must(['stop', '-t', String(TIMEOUTS.stopGrace / 1000), container], 'Stopping the container', { timeoutMs: TIMEOUTS.stop });
   }
 
   /** Removes the container (not its volumes); a missing one is fine. */
   async removeContainer(envId: string): Promise<void> {
     const { container } = instanceNames(envId);
     const r = await this.docker(['rm', '-f', container], { timeoutMs: TIMEOUTS.remove });
-    if (r.code !== 0 && !/no such container/i.test(r.stderr)) throw new DockerError(`Removing the container: ${stderrTail(r)}`, r);
+    if (r.failure && r.failure !== 'not-found') throw new DockerError(`Removing the container: ${stderrTail(r)}`, r);
   }
 
   async removeVolumes(envId: string): Promise<void> {
     const names = instanceNames(envId);
     for (const volume of [names.data, names.workspace]) {
       const r = await this.docker(['volume', 'rm', '-f', volume], { timeoutMs: TIMEOUTS.remove });
-      if (r.code !== 0 && !/no such volume/i.test(r.stderr)) throw new DockerError(`Removing volume ${volume}: ${stderrTail(r)}`, r);
+      if (r.failure && r.failure !== 'not-found') throw new DockerError(`Removing volume ${volume}: ${stderrTail(r)}`, r);
     }
   }
 
@@ -219,7 +210,7 @@ export class DockerOps {
   async removeBuiltImage(envId: string): Promise<void> {
     const { image } = instanceNames(envId);
     const r = await this.docker(['image', 'rm', image], { timeoutMs: TIMEOUTS.remove });
-    if (r.code !== 0 && !/no such image|image not known/i.test(r.stderr)) throw new DockerError(`Removing the image: ${stderrTail(r)}`, r);
+    if (r.failure && r.failure !== 'not-found') throw new DockerError(`Removing the image: ${stderrTail(r)}`, r);
   }
 
   /* ---------- Operations ---------- */

@@ -9,6 +9,9 @@
  * the runner with a minimal PATH; the resolved location is cached for the
  * process lifetime, and a failed discovery is retried on the next call.
  *
+ * Every result is classified once, here (`failure.ts`): callers branch on
+ * `failure` and keep stderr for the message. Timeouts come from `TIMEOUTS`.
+ *
  * `DockerRunner` and `DockerSpawner` are the seams: the docker operations
  * are tested against a recording runner, and the attach relay against a
  * scripted process.
@@ -18,19 +21,19 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 import { discoverDocker, realDiscoveryDeps, type DockerLocation } from './discovery';
+import { classifyStderr, type DockerFailure } from './failure';
+import { TIMEOUTS } from './timeouts';
 
 export interface DockerResult {
   code: number | null;
   stdout: string;
   stderr: string;
-  /** Killed by the timeout guard. */
-  timedOut?: boolean;
-  /** Killed because the caller's signal aborted. */
-  aborted?: boolean;
+  /** Null when the command exited 0; otherwise what went wrong, classified once by the client. */
+  failure: DockerFailure | null;
 }
 
 export interface DockerOptions {
-  /** Default 20 s: a wedged engine must produce an error, not a hang. */
+  /** Default `TIMEOUTS.default`: a wedged engine must produce an error, not a hang. */
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Every complete output line (stdout and stderr) as it arrives. */
@@ -44,7 +47,6 @@ export type DockerRunner = (args: string[], opts?: DockerOptions) => Promise<Doc
 /** Starts a long-lived docker process with piped stdio (the attach relay). */
 export type DockerSpawner = (args: string[]) => ChildProcessWithoutNullStreams;
 
-export const DEFAULT_TIMEOUT_MS = 20_000;
 const OUTPUT_TAIL = 256_000;
 const STDERR_TAIL = 8_000;
 
@@ -92,14 +94,15 @@ function lineSplitter(onLine: (line: string) => void): { push(chunk: string): vo
 }
 
 export const realDocker: DockerRunner = async (args, opts = {}) => {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? TIMEOUTS.default;
   let binary: string;
   try {
     binary = (await dockerLocation()).path;
   } catch (err) {
-    return { code: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) };
+    // A value, not prose to match; stderr keeps what discovery searched, for the user.
+    return { code: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err), failure: 'cli-missing' };
   }
-  if (opts.signal?.aborted) return { code: null, stdout: '', stderr: 'cancelled', aborted: true };
+  if (opts.signal?.aborted) return { code: null, stdout: '', stderr: 'cancelled', failure: 'cancelled' };
   return new Promise((resolve) => {
     const child = spawn(binary, args, { env: childEnv(binary), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
@@ -138,11 +141,13 @@ export const realDocker: DockerRunner = async (args, opts = {}) => {
     if (input === undefined) child.stdin.end();
     else if (typeof input === 'string' || Buffer.isBuffer(input)) child.stdin.end(input);
     else input.pipe(child.stdin);
-    child.on('error', (err) => settle({ code: -1, stdout, stderr: String(err.message) }));
+    child.on('error', (err) => settle({ code: -1, stdout, stderr: String(err.message), failure: classifyStderr(String(err.message)) }));
     child.on('close', (code) => {
-      if (aborted) settle({ code, stdout, stderr: 'cancelled', aborted: true });
-      else if (timedOut) settle({ code, stdout, stderr: `docker ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s`, timedOut: true });
-      else settle({ code, stdout, stderr });
+      // An exit 0 that raced the guard or the signal still succeeded.
+      if (code === 0) settle({ code, stdout, stderr, failure: null });
+      else if (aborted) settle({ code, stdout, stderr: 'cancelled', failure: 'cancelled' });
+      else if (timedOut) settle({ code, stdout, stderr: `docker ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s`, failure: 'timeout' });
+      else settle({ code, stdout, stderr, failure: classifyStderr(stderr) });
     });
   });
 };

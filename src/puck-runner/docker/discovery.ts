@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { TIMEOUTS } from './timeouts';
 
 /** Environment variable naming an explicit docker binary (wins over discovery). */
 export const DOCKER_BIN_ENV = 'PUCK_DOCKER_BIN';
@@ -107,7 +108,7 @@ function isExecutableFile(candidate: string): boolean {
 }
 
 /** Bounded, so a slow rc file cannot hang the runner's start. */
-function loginShellProbe(shell: string, timeoutMs = 8000): Promise<string | null> {
+function loginShellProbe(shell: string, timeoutMs = TIMEOUTS.loginShell): Promise<string | null> {
   return new Promise((resolve) => {
     let out = '';
     let settled = false;
