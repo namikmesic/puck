@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { checkNoRunnerDownloads, checkRunnerDownloads } from '../../scripts/check-runner-downloads.mjs';
+import { readRunnerReleaseListing } from '../../src/harness/runner-releases';
 import { call, startLiveServer, startServer, type Harness } from './server-fakes';
 
 let h: Pick<Harness, 'base' | 'close'>;
@@ -41,6 +42,8 @@ describe('runner downloads', () => {
       },
       expect.objectContaining({ os: 'macos', arch: 'arm64' }),
     ]);
+    // The listing is the shared shape: the app's and the runner's reader take it whole.
+    expect(readRunnerReleaseListing(res.body)).toEqual(res.body);
   });
 
   it('serves a tarball and its checksum line, and nothing else', async () => {

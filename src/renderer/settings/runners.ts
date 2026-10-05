@@ -20,9 +20,10 @@
  *   works only when This Mac is already installed or the server publishes
  *   a macOS ARM64 package.
  *   Copied installation commands quote control-free values, check the
- *   development package in private staging, and publish only a complete
- *   installation. Configure and Run each check and enter its directory in
- *   a subshell; copying a block never changes the caller's directory.
+ *   development package in private staging against the package layout
+ *   (RUNNER_PACKAGE_ENTRIES), and publish only a complete installation.
+ *   Configure and Run each check and enter its directory in a subshell;
+ *   copying a block never changes the caller's directory.
  *
  * A controller that survives re-renders: a runner-list push or a focus
  * refresh redraws the list and restores an open dialog and a half-typed
@@ -32,14 +33,15 @@
 
 import type {
   EnvironmentProviderInfo,
+  ListedRunnerAsset,
   ProviderStatus,
   PuckBridge,
-  RunnerAsset,
   RunnerRegistration,
   RunnerRemoval,
   RunnerRow,
   RunnersState,
 } from '../../harness/bridge';
+import { RUNNER_PACKAGE_ENTRIES } from '../../harness/runner-releases';
 import { shellQuote } from '../../harness/shell';
 import { armDelete, el } from '../dom';
 import { relTime } from '../format';
@@ -118,7 +120,7 @@ export function statusWord(r: RunnerRow): string {
 }
 
 /** The package the server publishes for a remote platform, if any. */
-export function assetFor(assets: readonly RunnerAsset[], platform: Platform): RunnerAsset | undefined {
+export function assetFor(assets: readonly ListedRunnerAsset[], platform: Platform): ListedRunnerAsset | undefined {
   const [os, arch] = platform.split('-');
   return assets.find((a) => a.os === os && a.arch === arch);
 }
@@ -139,9 +141,14 @@ export function serverAddress(url: string): { scheme: 'HTTP' | 'HTTPS'; host: st
   return { scheme: parsed.protocol === 'https:' ? 'HTTPS' : 'HTTP', host: parsed.host, loopback };
 }
 
+/** The package layout's regular files, which an installation requires, and those it must be able to execute. */
+const PACKAGE_FILES = RUNNER_PACKAGE_ENTRIES.filter((e) => e.type === 'file');
+const REQUIRED_FILES = PACKAGE_FILES.map((e) => e.name);
+const EXECUTABLE_FILES = PACKAGE_FILES.filter((e) => e.mode & 0o111).map((e) => e.name);
+
 /** Fail-closed copy-paste blocks for today's development tarballs. The
  *  advertised checksum detects corruption; it adds no authenticity claim. */
-export function commandsFor(asset: RunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
+export function commandsFor(asset: ListedRunnerAsset, reg: { serverUrl: string; token: string }): { download: string[]; configure: string[]; run: string[] } {
   const mac = asset.os === 'macos';
   const file = shellQuote(asset.file);
   const url = shellQuote(asset.url);
@@ -204,10 +211,10 @@ export function commandsFor(asset: RunnerAsset, reg: { serverUrl: string; token:
       'mv "./$file.partial" "./$file"',
       '# Extract in staging and require the shipped files and version.',
       'tar -xzf "./$file"',
-      'for required in config.sh run.sh svc.sh VERSION bin/node bin/puck-runner.cjs; do',
+      `for required in ${REQUIRED_FILES.map(shellQuote).join(' ')}; do`,
       '  [ -f "$required" ] || fail "Runner package is missing $required."',
       'done',
-      'for executable in config.sh run.sh svc.sh bin/node; do',
+      `for executable in ${EXECUTABLE_FILES.map(shellQuote).join(' ')}; do`,
       '  [ -x "$executable" ] || fail "Runner package cannot execute $executable."',
       'done',
       `[ "$(cat VERSION)" = ${version} ] || fail 'Runner package version does not match.'`,

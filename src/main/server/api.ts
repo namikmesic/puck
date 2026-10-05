@@ -1,18 +1,12 @@
 /**
  * The Puck server's REST API as the app uses it, one function per call,
  * every one authenticated with the Puck session (session.ts). Answers are
- * read leniently (src/harness/server-api.ts).
+ * read leniently (src/harness/server-api.ts, and src/harness/runner-releases.ts
+ * for the release listing).
  */
 
-import { MAX_RELEASE_METADATA_BYTES } from '../../harness/runner-releases';
-import {
-  readInstance,
-  readReleases,
-  readRunner,
-  type RunnerReleases,
-  type ServerInstance,
-  type ServerRunner,
-} from '../../harness/server-api';
+import { MAX_RELEASE_METADATA_BYTES, readRunnerReleaseListing, type RunnerReleaseListing } from '../../harness/runner-releases';
+import { readInstance, readRunner, type ServerInstance, type ServerRunner } from '../../harness/server-api';
 import { serverRequest } from './http';
 import { authed } from './session';
 
@@ -105,6 +99,6 @@ export async function forgetInstance(envId: string): Promise<void> {
 }
 
 /** The server's runner releases, read within the listing bound (src/runner-release/download.ts). */
-export async function releases(): Promise<RunnerReleases> {
-  return readReleases(await serverRequest('GET', '/v1/runner/releases', { maxBodyBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false }));
+export async function releases(): Promise<RunnerReleaseListing> {
+  return readRunnerReleaseListing(await serverRequest('GET', '/v1/runner/releases', { maxBodyBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false }));
 }

@@ -15,7 +15,7 @@
 
 import { Readable } from 'node:stream';
 import type { GithubGrant } from '../harness/daemon-protocol';
-import { MAX_RELEASE_METADATA_BYTES } from '../harness/runner-releases';
+import { MAX_RELEASE_METADATA_BYTES, readRunnerReleaseListing, type RunnerReleaseListing } from '../harness/runner-releases';
 import { readBoundedBody } from '../runner-release/download';
 import { signAssertion, type RunnerKey } from './identity';
 
@@ -71,22 +71,6 @@ export interface RegisterResponse {
   fingerprint: string;
   owner: { login: string };
   serverUrl: string;
-}
-
-export interface ReleaseAsset {
-  os: string;
-  arch: string;
-  version: string;
-  file: string;
-  url: string;
-  sha256: string;
-  size: number;
-}
-
-export interface Releases {
-  latest: string | null;
-  minVersion: string | null;
-  assets: ReleaseAsset[];
 }
 
 export class ServerApi {
@@ -153,8 +137,9 @@ export class ServerApi {
     return body.grants as GithubGrant[];
   }
 
-  releases(): Promise<Releases> {
-    return this.call('GET', '/v1/runner/releases', { maxBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false });
+  /** The server's release listing, read leniently (src/harness/runner-releases.ts). */
+  async releases(): Promise<RunnerReleaseListing> {
+    return readRunnerReleaseListing(await this.call('GET', '/v1/runner/releases', { maxBytes: MAX_RELEASE_METADATA_BYTES, refuseContentEncoding: false }));
   }
 
   /** Streams a download; only URLs on this server are fetched. */
